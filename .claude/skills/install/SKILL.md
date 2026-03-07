@@ -11,7 +11,7 @@ Every time this skill is invoked, execute ALL steps below in order:
 ## 1. Bump patch version
 
 1. Read current version from `package.json`.
-2. Increment the **patch** number (e.g. `0.2.2` → `0.2.3`).
+2. Increment the **patch** number (e.g. `0.2.3` → `0.2.4`).
 3. Update **both** `package.json` `"version"` field and `src/bot.ts` `VERSION` constant to the new version.
 4. Update the version examples in **this file** (SKILL.md) step 1's comments to reflect the new base version.
 
@@ -28,7 +28,8 @@ Every time this skill is invoked, execute ALL steps below in order:
 2. Commit with message: `chore: release v<new-version>`.
 3. Create a git tag: `git tag v<new-version>`.
 4. Push: `git push origin main --tags`.
-5. CI will automatically publish to npm and create a GitHub Release on tag push.
+5. Use `gh` to confirm the `Release` workflow for the pushed tag completes successfully.
+6. Use `gh` to confirm the workflow's npm publish step succeeded before considering the release done.
 
 ## Prerequisites
 

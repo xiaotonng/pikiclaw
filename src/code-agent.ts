@@ -37,6 +37,9 @@ export interface StreamResult {
   inputTokens: number | null;
   outputTokens: number | null;
   cachedInputTokens: number | null;
+  error: string | null;
+  stopReason: string | null;
+  incomplete: boolean;
 }
 
 const Q = (a: string) => /[^a-zA-Z0-9_./:=@-]/.test(a) ? `'${a.replace(/'/g, "'\\''")}'` : a;
@@ -55,6 +58,7 @@ async function run(cmd: string[], opts: StreamOpts, parseLine: (ev: any, s: any)
     sessionId: opts.sessionId, text: '', thinking: '', msgs: [] as string[], thinkParts: [] as string[],
     model: opts.model, thinkingEffort: opts.thinkingEffort, errors: null as string[] | null,
     inputTokens: null as number | null, outputTokens: null as number | null, cachedInputTokens: null as number | null,
+    stopReason: null as string | null,
   };
 
   const shellCmd = cmd.map(Q).join(' ');
@@ -96,7 +100,7 @@ async function run(cmd: string[], opts: StreamOpts, parseLine: (ev: any, s: any)
     } catch {}
   });
 
-  const [ok, code] = await new Promise<[boolean, number | null]>(resolve => {
+  const [procOk, code] = await new Promise<[boolean, number | null]>(resolve => {
     proc.on('close', code => { agentLog(`[exit] code=${code} lines_parsed=${lineCount}`); resolve([code === 0, code]); });
     proc.on('error', e => { agentLog(`[error] ${e.message}`); stderr += e.message; resolve([false, -1]); });
   });
@@ -104,17 +108,24 @@ async function run(cmd: string[], opts: StreamOpts, parseLine: (ev: any, s: any)
   if (!s.text.trim() && s.msgs.length) s.text = s.msgs.join('\n\n');
   if (!s.thinking.trim() && s.thinkParts.length) s.thinking = s.thinkParts.join('\n\n');
 
+  const ok = procOk && !s.errors;
+  const error = s.errors?.map(e => e.trim()).filter(Boolean).join('; ') || (!procOk ? (stderr.trim() || `Failed (exit=${code}).`) : null);
+  const incomplete = !ok || s.stopReason === 'max_tokens';
   const elapsed = ((Date.now() - start) / 1000).toFixed(1);
   agentLog(`[result] ok=${ok && !s.errors} elapsed=${elapsed}s text=${s.text.length}chars thinking=${s.thinking.length}chars session=${s.sessionId || '?'}`);
   if (s.errors) agentLog(`[result] errors: ${s.errors.join('; ')}`);
-  if (stderr.trim() && !ok) agentLog(`[result] stderr: ${stderr.trim().slice(0, 300)}`);
+  if (s.stopReason) agentLog(`[result] stop_reason=${s.stopReason}`);
+  if (stderr.trim() && !procOk) agentLog(`[result] stderr: ${stderr.trim().slice(0, 300)}`);
 
   return {
-    ok: ok && !s.errors, sessionId: s.sessionId, model: s.model, thinkingEffort: s.thinkingEffort,
-    message: s.errors?.join('; ') || s.text.trim() || (ok ? '(no textual response)' : `Failed (exit=${code}).\n\n${stderr.trim() || '(no output)'}`),
+    ok, sessionId: s.sessionId, model: s.model, thinkingEffort: s.thinkingEffort,
+    message: s.text.trim() || s.errors?.join('; ') || (procOk ? '(no textual response)' : `Failed (exit=${code}).\n\n${stderr.trim() || '(no output)'}`),
     thinking: s.thinking.trim() || null,
     elapsedS: (Date.now() - start) / 1000,
     inputTokens: s.inputTokens, outputTokens: s.outputTokens, cachedInputTokens: s.cachedInputTokens,
+    error,
+    stopReason: s.stopReason,
+    incomplete,
   };
 }
 
@@ -184,6 +195,8 @@ function claudeParse(ev: any, s: any) {
       else if (d.type === 'text_delta') s.text += d.text || '';
     }
     if (inner.type === 'message_delta') {
+      const d = inner.delta || {};
+      s.stopReason = d.stop_reason ?? s.stopReason;
       const u = inner.usage;
       if (u) { s.inputTokens = u.input_tokens ?? s.inputTokens; s.cachedInputTokens = u.cache_read_input_tokens ?? s.cachedInputTokens; s.outputTokens = u.output_tokens ?? s.outputTokens; }
     }
@@ -192,17 +205,20 @@ function claudeParse(ev: any, s: any) {
   }
 
   if (t === 'assistant') {
-    const contents = (ev.message || {}).content || [];
+    const msg = ev.message || {};
+    const contents = msg.content || [];
     const th = contents.filter((b: any) => b?.type === 'thinking').map((b: any) => b.thinking || '').join('');
     const tx = contents.filter((b: any) => b?.type === 'text').map((b: any) => b.text || '').join('');
     if (th && !s.thinking.trim()) s.thinking = th;
     if (tx && !s.text.trim()) s.text = tx;
+    s.stopReason = msg.stop_reason ?? s.stopReason;
   }
 
   if (t === 'result') {
     s.sessionId = ev.session_id ?? s.sessionId; s.model = ev.model ?? s.model;
     if (ev.is_error && ev.errors?.length) s.errors = ev.errors;
     if (ev.result && !s.text.trim()) s.text = ev.result;
+    s.stopReason = ev.stop_reason ?? s.stopReason;
     const u = ev.usage;
     if (u) { s.inputTokens = u.input_tokens ?? s.inputTokens; s.cachedInputTokens = (u.cache_read_input_tokens ?? u.cached_input_tokens) ?? s.cachedInputTokens; s.outputTokens = u.output_tokens ?? s.outputTokens; }
   }
@@ -211,7 +227,8 @@ function claudeParse(ev: any, s: any) {
 export async function doClaudeStream(opts: StreamOpts): Promise<StreamResult> {
   const result = await run(claudeCmd(opts), opts, claudeParse);
   // session not found → retry as new conversation
-  if (!result.ok && opts.sessionId && /no conversation found/i.test(result.message)) {
+  const retryText = `${result.error || ''}\n${result.message}`;
+  if (!result.ok && opts.sessionId && /no conversation found/i.test(retryText)) {
     return run(claudeCmd({ ...opts, sessionId: null }), { ...opts, sessionId: null }, claudeParse);
   }
   return result;

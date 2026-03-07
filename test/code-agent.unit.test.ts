@@ -127,6 +127,9 @@ describe('claude stream', () => {
     expect(result.inputTokens).toBe(150);
     expect(result.cachedInputTokens).toBe(30);
     expect(result.outputTokens).toBe(60);
+    expect(result.stopReason).toBe(null);
+    expect(result.error).toBe(null);
+    expect(result.incomplete).toBe(false);
   });
 
   it('parses thinking deltas', async () => {
@@ -195,6 +198,24 @@ fi`;
     const result = await doClaudeStream(baseOpts('claude'));
     expect(result.ok).toBe(false);
     expect(result.message).toBe('Rate limit exceeded');
+    expect(result.error).toBe('Rate limit exceeded');
+    expect(result.incomplete).toBe(true);
+  });
+
+  it('captures stop_reason=max_tokens as incomplete', async () => {
+    writeFakeScript('claude', [
+      { type: 'system', session_id: 's-max' },
+      { type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Long answer...' } } },
+      { type: 'stream_event', event: { type: 'message_delta', delta: { stop_reason: 'max_tokens' }, usage: { output_tokens: 999 } } },
+      { type: 'result', session_id: 's-max' },
+    ]);
+
+    const result = await doClaudeStream(baseOpts('claude'));
+    expect(result.ok).toBe(true);
+    expect(result.message).toBe('Long answer...');
+    expect(result.stopReason).toBe('max_tokens');
+    expect(result.error).toBe(null);
+    expect(result.incomplete).toBe(true);
   });
 });
 
@@ -305,6 +326,23 @@ describe('edge cases', () => {
     expect(result.ok).toBe(false);
     expect(result.message).toContain('Failed (exit=1)');
     expect(result.message).toContain('oops');
+    expect(result.error).toBe('oops');
+    expect(result.incomplete).toBe(true);
+  });
+
+  it('preserves partial text when process exits with error', async () => {
+    const script = `#!/bin/sh
+echo '${JSON.stringify({ type: 'system', session_id: 's-partial' })}'
+echo '${JSON.stringify({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Partial answer' } } })}'
+echo "quota exceeded" >&2
+exit 1`;
+    fs.writeFileSync(path.join(fakeBin, 'claude'), script, { mode: 0o755 });
+
+    const result = await doClaudeStream(baseOpts('claude'));
+    expect(result.ok).toBe(false);
+    expect(result.message).toBe('Partial answer');
+    expect(result.error).toBe('quota exceeded');
+    expect(result.incomplete).toBe(true);
   });
 
   it('handles empty output with success exit', async () => {

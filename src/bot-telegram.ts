@@ -433,7 +433,7 @@ export class TelegramBot extends Bot {
       tokenBlock = `\n<blockquote expandable>${tp.join('  ')}</blockquote>`;
     }
 
-    const quickReplies = detectQuickReplies(result.message);
+    const quickReplies = result.incomplete ? [] : detectQuickReplies(result.message);
     let keyboard: any = undefined;
     if (quickReplies.length) {
       const rows: { text: string; callback_data: string }[][] = [];
@@ -460,8 +460,20 @@ export class TelegramBot extends Bot {
       thinkingHtml = `<blockquote><b>${label}</b>\n${escapeHtml(display)}</blockquote>\n\n`;
     }
 
+    let statusHtml = '';
+    if (result.incomplete) {
+      const statusLines: string[] = [];
+      if (result.stopReason === 'max_tokens') statusLines.push('Output limit reached. Response may be truncated.');
+      if (!result.ok) {
+        const detail = result.error?.trim();
+        if (detail && detail !== result.message.trim()) statusLines.push(detail);
+        else statusLines.push('Agent exited before reporting completion.');
+      }
+      statusHtml = `<blockquote expandable><b>Incomplete Response</b>\n${statusLines.map(escapeHtml).join('\n')}</blockquote>\n\n`;
+    }
+
     const bodyHtml = mdToTgHtml(result.message);
-    const fullHtml = `${thinkingHtml}${bodyHtml}\n\n${meta}${tokenBlock}`;
+    const fullHtml = `${statusHtml}${thinkingHtml}${bodyHtml}\n\n${meta}${tokenBlock}`;
 
     if (fullHtml.length <= 3900) {
       try {
@@ -472,7 +484,7 @@ export class TelegramBot extends Bot {
     } else {
       let preview = bodyHtml.slice(0, 3200);
       if (bodyHtml.length > 3200) preview += '\n<i>... (see full response below)</i>';
-      const previewHtml = `${thinkingHtml}${preview}\n\n${meta}${tokenBlock}`;
+      const previewHtml = `${statusHtml}${thinkingHtml}${preview}\n\n${meta}${tokenBlock}`;
       try {
         await this.channel.editMessage(ctx.chatId, phId, previewHtml, { parseMode: 'HTML', keyboard });
       } catch {
