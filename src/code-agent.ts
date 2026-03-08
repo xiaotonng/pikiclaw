@@ -20,6 +20,8 @@ export interface StreamOpts {
   codexModel?: string;
   codexFullAccess?: boolean;
   codexExtraArgs?: string[];
+  /** Previous cumulative token totals for this Codex session (used to compute per-invocation delta) */
+  codexPrevCumulative?: { input: number; output: number; cached: number };
   // claude
   claudeModel?: string;
   claudePermissionMode?: string;
@@ -39,6 +41,10 @@ export interface StreamResult {
   inputTokens: number | null;
   outputTokens: number | null;
   cachedInputTokens: number | null;
+  /** Context window size as reported by the CLI (Claude: result.modelUsage, Codex: models_cache.json) */
+  contextWindow: number | null;
+  /** Raw cumulative token totals from Codex session (null for Claude). Store these and pass back as codexPrevCumulative on the next invocation. */
+  codexCumulative: { input: number; output: number; cached: number } | null;
   error: string | null;
   stopReason: string | null;
   incomplete: boolean;
@@ -60,6 +66,8 @@ async function run(cmd: string[], opts: StreamOpts, parseLine: (ev: any, s: any)
     sessionId: opts.sessionId, text: '', thinking: '', msgs: [] as string[], thinkParts: [] as string[],
     model: opts.model, thinkingEffort: opts.thinkingEffort, errors: null as string[] | null,
     inputTokens: null as number | null, outputTokens: null as number | null, cachedInputTokens: null as number | null,
+    contextWindow: null as number | null,
+    codexCumulative: null as { input: number; output: number; cached: number } | null,
     stopReason: null as string | null,
   };
 
@@ -125,6 +133,8 @@ async function run(cmd: string[], opts: StreamOpts, parseLine: (ev: any, s: any)
     thinking: s.thinking.trim() || null,
     elapsedS: (Date.now() - start) / 1000,
     inputTokens: s.inputTokens, outputTokens: s.outputTokens, cachedInputTokens: s.cachedInputTokens,
+    contextWindow: s.contextWindow,
+    codexCumulative: s.codexCumulative,
     error,
     stopReason: s.stopReason,
     incomplete,
@@ -149,7 +159,7 @@ function codexCmd(o: StreamOpts): string[] {
   return args;
 }
 
-function codexParse(ev: any, s: any) {
+function codexParse(ev: any, s: any, opts: StreamOpts) {
   const t = ev.type || '';
   if (t === 'thread.started') {
     s.sessionId = ev.thread_id ?? s.sessionId;
@@ -162,13 +172,27 @@ function codexParse(ev: any, s: any) {
   }
   if (t === 'turn.completed') {
     const u = ev.usage;
-    if (u) { s.inputTokens = u.input_tokens ?? s.inputTokens; s.cachedInputTokens = u.cached_input_tokens ?? s.cachedInputTokens; s.outputTokens = u.output_tokens ?? s.outputTokens; }
+    if (u) {
+      // Codex reports cumulative session totals in turn.completed.
+      // Store raw cumulative and compute per-invocation delta.
+      const cumInput = u.input_tokens ?? 0;
+      const cumOutput = u.output_tokens ?? 0;
+      const cumCached = u.cached_input_tokens ?? 0;
+      s.codexCumulative = { input: cumInput, output: cumOutput, cached: cumCached };
+      const prev = opts.codexPrevCumulative;
+      s.inputTokens = prev ? Math.max(0, cumInput - prev.input) : cumInput;
+      s.outputTokens = prev ? Math.max(0, cumOutput - prev.output) : cumOutput;
+      s.cachedInputTokens = prev ? Math.max(0, cumCached - prev.cached) : cumCached;
+    }
     s.model = ev.model ?? s.model;
   }
 }
 
-export function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
-  return run(codexCmd(opts), opts, codexParse);
+export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
+  const result = await run(codexCmd(opts), opts, (ev, s) => codexParse(ev, s, opts));
+  // Codex doesn't report context_window in stream events; read from models_cache.json
+  if (!result.contextWindow) result.contextWindow = readCodexContextWindow(result.model);
+  return result;
 }
 
 // --- claude ---
@@ -267,6 +291,13 @@ function claudeParse(ev: any, s: any) {
     s.stopReason = ev.stop_reason ?? s.stopReason;
     const u = ev.usage;
     if (u) { s.inputTokens = u.input_tokens ?? s.inputTokens; s.cachedInputTokens = (u.cache_read_input_tokens ?? u.cached_input_tokens) ?? s.cachedInputTokens; s.outputTokens = u.output_tokens ?? s.outputTokens; }
+    // Extract contextWindow from modelUsage (Claude CLI reports this in result event)
+    const mu = ev.modelUsage;
+    if (mu && typeof mu === 'object') {
+      for (const info of Object.values(mu) as any[]) {
+        if (info?.contextWindow > 0) { s.contextWindow = info.contextWindow; break; }
+      }
+    }
   }
 }
 
@@ -393,27 +424,36 @@ function readLastLine(filePath: string): string | null {
 }
 
 function parseCodexSession(filePath: string): SessionInfo | null {
-  const lines = readLines(filePath, 10);
+  const lines = readLines(filePath, 40);
   const line = lines[0];
   if (!line) return null;
   try {
     const ev = JSON.parse(line);
     if (ev.type !== 'session_meta') return null;
     const p = ev.payload || {};
+    let model: string | null = typeof p.model === 'string' ? p.model : null;
 
     let title: string | null = null;
     for (const raw of lines.slice(1)) {
       if (!raw || raw[0] !== '{') continue;
       try {
         const item = JSON.parse(raw);
+        if (!model && item.type === 'turn_context') {
+          const payload = item.payload || {};
+          model =
+            (typeof payload.model === 'string' ? payload.model : null)
+            || (typeof payload?.collaboration_mode?.settings?.model === 'string' ? payload.collaboration_mode.settings.model : null)
+            || model;
+        }
         if (item.type === 'response_item' && item.payload?.role === 'user' && item.payload?.type === 'message') {
           const content = item.payload.content;
           if (Array.isArray(content)) {
             const textBlock = content.find((b: any) => b?.type === 'input_text' && b.text && !/^[<#]/.test(b.text));
-            if (textBlock) { title = textBlock.text.slice(0, 120); break; }
+            if (textBlock) title = textBlock.text.slice(0, 120);
           }
         }
       } catch { /* skip */ }
+      if (model && title) break;
     }
 
     // Codex writes task_complete as the last event when done
@@ -430,7 +470,7 @@ function parseCodexSession(filePath: string): SessionInfo | null {
       sessionId: p.id ?? path.basename(filePath, '.jsonl'),
       agent: 'codex',
       workdir: p.cwd ?? null,
-      model: p.model_provider ?? null,
+      model: model ?? null,
       createdAt: p.timestamp ?? null,
       title,
       running,
@@ -577,24 +617,263 @@ export interface ModelInfo {
 export interface ModelListResult {
   agent: Agent;
   models: ModelInfo[];
+  sources: string[];
+  note: string | null;
 }
 
-const CLAUDE_MODELS: ModelInfo[] = [
-  { id: 'claude-opus-4-6', alias: 'opus' },
-  { id: 'claude-sonnet-4-5-20250929', alias: 'sonnet' },
-  { id: 'claude-haiku-4-5-20250929', alias: 'haiku' },
-];
+export interface ModelListOpts {
+  workdir?: string;
+  currentModel?: string | null;
+}
 
-const CODEX_MODELS: ModelInfo[] = [
-  { id: 'o4-mini', alias: null },
-  { id: 'o3', alias: null },
-  { id: 'gpt-5.4', alias: null },
-  { id: 'gpt-4.1', alias: null },
-  { id: 'codex-mini', alias: null },
-];
+function shellOutput(cmd: string): string | null {
+  try {
+    return execSync(cmd, { encoding: 'utf-8', timeout: 3000 }).trim() || null;
+  } catch {
+    return null;
+  }
+}
 
-export function listModels(agent: Agent): ModelListResult {
-  return { agent, models: agent === 'codex' ? CODEX_MODELS : CLAUDE_MODELS };
+function pushUnique<T>(items: T[], value: T) {
+  if (!items.includes(value)) items.push(value);
+}
+
+function pushModel(models: ModelInfo[], seen: Set<string>, id: string, alias: string | null) {
+  const cleanId = id.trim();
+  if (!cleanId || seen.has(cleanId)) return;
+  seen.add(cleanId);
+  models.push({ id: cleanId, alias: alias?.trim() || null });
+}
+
+function claudeModelAlias(modelId: string | null | undefined): string | null {
+  const value = String(modelId || '').trim().toLowerCase();
+  if (!value) return null;
+  if (value === 'opus' || value.startsWith('claude-opus-')) return 'opus';
+  if (value === 'sonnet' || value.startsWith('claude-sonnet-')) return 'sonnet';
+  if (value === 'haiku' || value.startsWith('claude-haiku-')) return 'haiku';
+  return null;
+}
+
+function isClaudeModelToken(token: string): boolean {
+  return token === 'opus' || token === 'sonnet' || token === 'haiku' || token.startsWith('claude-');
+}
+
+function addClaudeModel(models: ModelInfo[], seen: Set<string>, rawModel: string | null | undefined): boolean {
+  const clean = String(rawModel || '').trim();
+  if (!clean) return false;
+  const alias = claudeModelAlias(clean);
+  if (!alias && !clean.toLowerCase().startsWith('claude-')) return false;
+  if (clean === alias) {
+    if (models.some((m) => m.alias === alias)) return false;
+    pushModel(models, seen, clean, null);
+    return true;
+  }
+  if (alias) {
+    const aliasIndex = models.findIndex((m) => m.id === alias && !m.alias);
+    if (aliasIndex >= 0) {
+      models.splice(aliasIndex, 1);
+      seen.delete(alias);
+    }
+  }
+  pushModel(models, seen, clean, alias);
+  return true;
+}
+
+function isCodexModelToken(token: string): boolean {
+  return /^(?:o\d(?:-[a-z0-9.-]+)?|gpt-[a-z0-9.-]+|codex-mini(?:-[a-z0-9.-]+)?)$/i.test(token);
+}
+
+function addCodexModel(models: ModelInfo[], seen: Set<string>, rawModel: string | null | undefined): boolean {
+  const clean = String(rawModel || '').trim();
+  if (!clean || !isCodexModelToken(clean)) return false;
+  pushModel(models, seen, clean, null);
+  return true;
+}
+
+function readCodexConfigModels(home: string): string[] {
+  const configPath = path.join(home, '.codex', 'config.toml');
+  if (!fs.existsSync(configPath)) return [];
+
+  try {
+    const raw = fs.readFileSync(configPath, 'utf-8');
+    const found: string[] = [];
+    const defaultModel = raw.match(/^\s*model\s*=\s*"([^"]+)"/m)?.[1];
+    if (defaultModel) pushUnique(found, defaultModel);
+
+    const migrationsSection = raw.match(/\[notice\.model_migrations\]\n([\s\S]*?)(?:\n\[|$)/)?.[1] || '';
+    for (const match of migrationsSection.matchAll(/"[^"]+"\s*=\s*"([^"]+)"/g)) {
+      if (match[1]) pushUnique(found, match[1]);
+    }
+    return found.filter(isCodexModelToken);
+  } catch {
+    return [];
+  }
+}
+
+function readCodexCachedModels(home: string): string[] {
+  const cachePath = path.join(home, '.codex', 'models_cache.json');
+  if (!fs.existsSync(cachePath)) return [];
+
+  try {
+    const raw = JSON.parse(fs.readFileSync(cachePath, 'utf-8'));
+    const models = Array.isArray(raw?.models) ? raw.models : [];
+    return models
+      .filter((m: any) => m?.visibility === 'list')
+      .sort((a: any, b: any) => (Number(a?.priority) || 0) - (Number(b?.priority) || 0))
+      .map((m: any) => String(m?.slug || '').trim())
+      .filter(isCodexModelToken);
+  } catch {
+    return [];
+  }
+}
+
+/** Look up context_window for a Codex model from ~/.codex/models_cache.json */
+function readCodexContextWindow(model: string | null): number | null {
+  if (!model) return null;
+  const home = process.env.HOME || '';
+  const cachePath = path.join(home, '.codex', 'models_cache.json');
+  if (!fs.existsSync(cachePath)) return null;
+  try {
+    const raw = JSON.parse(fs.readFileSync(cachePath, 'utf-8'));
+    const models = Array.isArray(raw?.models) ? raw.models : [];
+    const entry = models.find((m: any) => m?.slug === model);
+    const cw = Number(entry?.context_window);
+    return cw > 0 ? cw : null;
+  } catch {
+    return null;
+  }
+}
+
+function readClaudeStateModels(home: string, workdir?: string): string[] {
+  const statePath = path.join(home, '.claude.json');
+  if (!fs.existsSync(statePath)) return [];
+
+  try {
+    const raw = JSON.parse(fs.readFileSync(statePath, 'utf-8'));
+    const projects = raw?.projects;
+    if (!projects || typeof projects !== 'object') return [];
+
+    const found: string[] = [];
+    const addFromProject = (projectState: any) => {
+      const usage = projectState?.lastModelUsage;
+      if (!usage || typeof usage !== 'object') return;
+      for (const modelId of Object.keys(usage)) {
+        if (isClaudeModelToken(modelId)) pushUnique(found, modelId);
+      }
+    };
+
+    if (workdir && typeof projects[workdir] === 'object') {
+      addFromProject(projects[workdir]);
+    }
+    for (const [projectPath, projectState] of Object.entries(projects)) {
+      if (projectPath === workdir) continue;
+      addFromProject(projectState);
+    }
+
+    return found;
+  } catch {
+    return [];
+  }
+}
+
+function discoverClaudeModels(opts: ModelListOpts): ModelListResult {
+  const models: ModelInfo[] = [];
+  const seen = new Set<string>();
+  const sources: string[] = [];
+  const home = process.env.HOME || '';
+
+  if (opts.currentModel?.trim()) {
+    addClaudeModel(models, seen, opts.currentModel);
+    pushUnique(sources, 'current config');
+  }
+
+  let foundStateModel = false;
+  for (const modelId of readClaudeStateModels(home, opts.workdir)) {
+    foundStateModel = addClaudeModel(models, seen, modelId) || foundStateModel;
+  }
+  if (foundStateModel) pushUnique(sources, '~/.claude.json');
+
+  const help = shellOutput('claude --help 2>/dev/null');
+  if (help) {
+    let foundHelpModel = false;
+    for (const match of help.matchAll(/\b(?:opus|sonnet|haiku|claude-(?:opus|sonnet|haiku)-[a-z0-9-]+)\b/gi)) {
+      const token = match[0].trim();
+      foundHelpModel = addClaudeModel(models, seen, token) || foundHelpModel;
+    }
+    if (foundHelpModel) pushUnique(sources, 'claude --help');
+  }
+
+  if (opts.workdir) {
+    const sessions = getClaudeSessions({ agent: 'claude', workdir: opts.workdir, limit: 20 });
+    let foundSessionModel = false;
+    for (const session of sessions.sessions) {
+      if (!session.model) continue;
+      foundSessionModel = addClaudeModel(models, seen, session.model) || foundSessionModel;
+    }
+    if (foundSessionModel) pushUnique(sources, 'recent sessions');
+  }
+
+  return {
+    agent: 'claude',
+    models,
+    sources,
+    note: 'Claude CLI does not expose a machine-readable model list; entries are discovered from current config, ~/.claude.json, CLI help, and local session state.',
+  };
+}
+
+function discoverCodexModels(opts: ModelListOpts): ModelListResult {
+  const models: ModelInfo[] = [];
+  const seen = new Set<string>();
+  const sources: string[] = [];
+  const home = process.env.HOME || '';
+
+  let foundCacheModel = false;
+  for (const modelId of readCodexCachedModels(home)) {
+    foundCacheModel = addCodexModel(models, seen, modelId) || foundCacheModel;
+  }
+  if (foundCacheModel) pushUnique(sources, '~/.codex/models_cache.json');
+
+  const help = shellOutput('codex --help 2>/dev/null');
+  if (help) {
+    let foundHelpModel = false;
+    for (const match of help.matchAll(/model="([^"]+)"/g)) {
+      addCodexModel(models, seen, match[1]);
+      foundHelpModel = true;
+    }
+    if (foundHelpModel) pushUnique(sources, 'codex --help');
+  }
+
+  if (opts.currentModel?.trim()) {
+    addCodexModel(models, seen, opts.currentModel);
+    pushUnique(sources, 'current config');
+  }
+
+  let foundConfigModel = false;
+  for (const modelId of readCodexConfigModels(home)) {
+    foundConfigModel = addCodexModel(models, seen, modelId) || foundConfigModel;
+  }
+  if (foundConfigModel) pushUnique(sources, '~/.codex/config.toml');
+
+  if (opts.workdir) {
+    const sessions = getCodexSessions({ agent: 'codex', workdir: opts.workdir, limit: 20 });
+    let foundSessionModel = false;
+    for (const session of sessions.sessions) {
+      if (!session.model) continue;
+      foundSessionModel = addCodexModel(models, seen, session.model) || foundSessionModel;
+    }
+    if (foundSessionModel) pushUnique(sources, 'recent sessions');
+  }
+
+  return {
+    agent: 'codex',
+    models,
+    sources,
+    note: 'Codex CLI does not expose a model-list subcommand; entries are discovered from the local Codex model cache and other local state.',
+  };
+}
+
+export function listModels(agent: Agent, opts: ModelListOpts = {}): ModelListResult {
+  return agent === 'codex' ? discoverCodexModels(opts) : discoverClaudeModels(opts);
 }
 
 // ---------------------------------------------------------------------------

@@ -226,6 +226,36 @@ describe('TelegramBot.handleMessage artifacts', () => {
   });
 });
 
+describe('TelegramBot.cmdModels', () => {
+  it('shows discovered sources and the resolved current Claude model', async () => {
+    const { bot, ctx } = createBot();
+    const replies: Array<{ text: string; opts?: any }> = [];
+    ctx.reply = vi.fn(async (text: string, opts?: any) => {
+      replies.push({ text, opts });
+      return 1;
+    });
+
+    bot.chat(ctx.chatId).agent = 'claude';
+    (bot as any).claudeModel = 'claude-opus-4-6';
+    vi.spyOn(bot, 'fetchModels').mockReturnValue({
+      agent: 'claude',
+      models: [
+        { id: 'opus', alias: null },
+        { id: 'sonnet', alias: null },
+      ],
+      sources: ['claude --help', 'current config'],
+      note: 'Claude CLI does not expose a machine-readable model list; entries are discovered from CLI help and local state.',
+    });
+
+    await (bot as any).cmdModels(ctx);
+
+    expect(replies).toHaveLength(1);
+    expect(replies[0].text).toContain('Source: claude --help, current config');
+    expect(replies[0].text).toContain('current (claude-opus-4-6)');
+    expect(replies[0].opts?.keyboard?.inline_keyboard).toHaveLength(2);
+  });
+});
+
 describe('TelegramBot.performRestart', () => {
   it('uses a non-interactive default npx restart command', () => {
     const { bot, channel } = createBot();

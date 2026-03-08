@@ -21,24 +21,29 @@ import { splitText } from './channel-base.js';
 // Context window sizes (max input tokens per model family)
 // ---------------------------------------------------------------------------
 
-function getContextWindowSize(model: string | null): number | null {
-  if (!model) return null;
-  const m = model.toLowerCase();
-  // Claude models: 200k context
-  if (m.includes('claude')) return 200_000;
-  // GPT-4.1 / GPT-5 / o3/o4 family: 200k (1M for o3, but default to 200k)
-  if (m.startsWith('gpt-') || m.startsWith('o3') || m.startsWith('o4')) return 200_000;
-  // Gemini: 1M context
-  if (m.includes('gemini')) return 1_000_000;
-  return null;
-}
-
 // ---------------------------------------------------------------------------
 // Telegram HTML formatting
 // ---------------------------------------------------------------------------
 
 function escapeHtml(t: string): string {
   return t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function claudeModelAlias(modelId: string | null | undefined): string | null {
+  const value = String(modelId || '').trim().toLowerCase();
+  if (!value) return null;
+  if (value === 'opus' || value.startsWith('claude-opus-')) return 'opus';
+  if (value === 'sonnet' || value.startsWith('claude-sonnet-')) return 'sonnet';
+  if (value === 'haiku' || value.startsWith('claude-haiku-')) return 'haiku';
+  return null;
+}
+
+function modelMatchesSelection(agent: Agent, selection: string, currentModel: string): boolean {
+  if (selection === currentModel) return true;
+  if (agent !== 'claude') return false;
+  const a = claudeModelAlias(selection);
+  const b = claudeModelAlias(currentModel);
+  return !!a && a === b;
 }
 
 function mdToTgHtml(text: string): string {
@@ -528,13 +533,22 @@ export class TelegramBot extends Bot {
     const cs = this.chat(ctx.chatId);
     const res = this.fetchModels(cs.agent);
     const currentModel = this.modelForAgent(cs.agent);
-    const lines = [`<b>Models for ${escapeHtml(cs.agent)}</b>\n`];
+    const lines = [`<b>Models for ${escapeHtml(cs.agent)}</b>`];
+    if (res.sources.length) lines.push(`<i>Source: ${escapeHtml(res.sources.join(', '))}</i>`);
+    if (res.note) lines.push(`<i>${escapeHtml(res.note)}</i>`);
+    lines.push('');
     const rows: { text: string; callback_data: string }[][] = [];
+    if (!res.models.length) {
+      lines.push('<i>No discoverable models found.</i>');
+    }
     for (const m of res.models) {
-      const isCurrent = m.id === currentModel || m.alias === currentModel;
+      const isCurrent = modelMatchesSelection(cs.agent, m.id, currentModel);
       const status = isCurrent ? '\u25CF' : '\u25CB';
       const display = m.alias ? `${m.alias} (${m.id})` : m.id;
-      lines.push(`${status} <code>${escapeHtml(display)}</code>${isCurrent ? ' \u2190 current' : ''}`);
+      const currentSuffix = isCurrent
+        ? (m.id === currentModel ? ' \u2190 current' : ` \u2190 current (${escapeHtml(currentModel)})`)
+        : '';
+      lines.push(`${status} <code>${escapeHtml(display)}</code>${currentSuffix}`);
       const label = isCurrent ? `\u25CF ${m.alias || m.id}` : (m.alias || m.id);
       rows.push([{ text: label, callback_data: `mod:${m.id}` }]);
     }
@@ -572,7 +586,8 @@ export class TelegramBot extends Bot {
     this.log(`restart: spawning \`${bin} ${allArgs.join(' ')}\``);
     // Collect all known chat IDs so the new process can send startup notices
     const knownIds = new Set(this.allowedChatIds);
-    for (const cid of this.channel.knownChats) knownIds.add(cid);
+    const knownChats = this.channel.knownChats instanceof Set ? this.channel.knownChats : new Set<number>();
+    for (const cid of knownChats) knownIds.add(cid);
 
     const child = spawn(bin, allArgs, {
       stdio: 'inherit',
@@ -708,10 +723,12 @@ export class TelegramBot extends Bot {
       if (result.inputTokens != null) tp.push(`in: ${fmtTokens(result.inputTokens)}`);
       if (result.cachedInputTokens) tp.push(`cached: ${fmtTokens(result.cachedInputTokens)}`);
       if (result.outputTokens != null) tp.push(`out: ${fmtTokens(result.outputTokens)}`);
-      // Context window usage percentage (based on input tokens = full conversation context)
-      const ctxMax = getContextWindowSize(result.model);
-      if (ctxMax && result.inputTokens != null) {
-        const pct = (result.inputTokens / ctxMax * 100).toFixed(1);
+      // Context window usage percentage from CLI-reported contextWindow
+      // For Codex use cumulative input (= full session context); for Claude use inputTokens
+      const ctxMax = result.contextWindow;
+      const ctxInput = result.codexCumulative?.input ?? result.inputTokens;
+      if (ctxMax && ctxInput != null) {
+        const pct = (ctxInput / ctxMax * 100).toFixed(1);
         tp.push(`ctx: ${pct}%`);
       }
       tokenBlock = `\n<blockquote expandable>${tp.join('  ')}</blockquote>`;
@@ -848,10 +865,12 @@ export class TelegramBot extends Bot {
       const cs = this.chat(ctx.chatId);
       if (sessionId === 'new') {
         cs.sessionId = null;
+        cs.codexCumulative = undefined;
         await ctx.answerCallback('New session');
         await ctx.editReply(ctx.messageId, 'Session reset. Send a message to start.', {});
       } else {
         cs.sessionId = sessionId;
+        cs.codexCumulative = undefined;
         await ctx.answerCallback(`Session: ${sessionId.slice(0, 12)}`);
         await ctx.editReply(ctx.messageId,
           `Switched to session: <code>${escapeHtml(sessionId.slice(0, 16))}</code>`,
@@ -870,6 +889,7 @@ export class TelegramBot extends Bot {
       }
       cs.agent = agent;
       cs.sessionId = null;
+      cs.codexCumulative = undefined;
       this.log(`agent switched to ${agent} chat=${ctx.chatId}`);
       await ctx.answerCallback(`Switched to ${agent}`);
       await ctx.editReply(ctx.messageId,
@@ -889,6 +909,7 @@ export class TelegramBot extends Bot {
       }
       this.setModelForAgent(cs.agent, modelId);
       cs.sessionId = null;
+      cs.codexCumulative = undefined;
       this.log(`model switched to ${modelId} for ${cs.agent} chat=${ctx.chatId}`);
       await ctx.answerCallback(`Switched to ${modelId}`);
       await ctx.editReply(ctx.messageId,

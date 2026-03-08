@@ -15,7 +15,7 @@ import {
 } from './code-agent.js';
 
 export { type Agent, type StreamResult, type SessionInfo, type UsageResult, type ModelInfo, type ModelListResult };
-export const VERSION = '0.2.8';
+export const VERSION = '0.2.9';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -119,6 +119,8 @@ export function buildPrompt(text: string, files: string[]): string {
 export interface ChatState {
   agent: Agent;
   sessionId: string | null;
+  /** Cumulative Codex token totals for this session, used to compute per-invocation deltas */
+  codexCumulative?: { input: number; output: number; cached: number };
 }
 
 // ---------------------------------------------------------------------------
@@ -188,7 +190,7 @@ export class Bot {
   }
 
   fetchModels(agent: Agent) {
-    return listModels(agent);
+    return listModels(agent, { workdir: this.workdir, currentModel: this.modelForAgent(agent) });
   }
 
   setModelForAgent(agent: Agent, modelId: string) {
@@ -232,7 +234,7 @@ export class Bot {
   switchWorkdir(newPath: string) {
     const old = this.workdir;
     this.workdir = newPath;
-    for (const [, cs] of this.chats) cs.sessionId = null;
+    for (const [, cs] of this.chats) { cs.sessionId = null; cs.codexCumulative = undefined; }
     this.log(`switch workdir: ${old} -> ${newPath}`);
     return old;
   }
@@ -254,6 +256,7 @@ export class Bot {
       attachments: attachments.length ? attachments : undefined,
       codexModel: this.codexModel, codexFullAccess: this.codexFullAccess,
       codexExtraArgs: this.codexExtraArgs.length ? this.codexExtraArgs : undefined,
+      codexPrevCumulative: cs.codexCumulative,
       claudeModel: this.claudeModel, claudePermissionMode: this.claudePermissionMode,
       claudeExtraArgs: this.claudeExtraArgs.length ? this.claudeExtraArgs : undefined,
     };
@@ -262,6 +265,8 @@ export class Bot {
     if (result.inputTokens) this.stats.totalInputTokens += result.inputTokens;
     if (result.outputTokens) this.stats.totalOutputTokens += result.outputTokens;
     if (result.cachedInputTokens) this.stats.totalCachedTokens += result.cachedInputTokens;
+    // Store cumulative Codex totals for next invocation delta
+    if (result.codexCumulative) cs.codexCumulative = result.codexCumulative;
     // Only update sessionId if it hasn't been changed externally (e.g. user switched session during run)
     if (result.sessionId && cs.sessionId === snapshotSessionId) cs.sessionId = result.sessionId;
     this.log(`[runStream] completed turn=${this.stats.totalTurns} cumulative: in=${fmtTokens(this.stats.totalInputTokens)} out=${fmtTokens(this.stats.totalOutputTokens)} cached=${fmtTokens(this.stats.totalCachedTokens)}`);

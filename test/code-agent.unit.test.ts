@@ -5,7 +5,7 @@
  * This avoids hitting real APIs while testing all parsing and control flow.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import { doStream, doCodexStream, doClaudeStream, getUsage, type StreamOpts } from '../src/code-agent.ts';
+import { doStream, doCodexStream, doClaudeStream, getUsage, listModels, type StreamOpts } from '../src/code-agent.ts';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -45,7 +45,7 @@ beforeEach(() => {
 // --- codex parsing ---
 
 describe('codex stream', () => {
-  it('parses single-turn conversation', async () => {
+  it('parses single-turn conversation (first invocation, no prevCumulative)', async () => {
     writeFakeScript('codex', [
       { type: 'thread.started', thread_id: 'thread-abc', model: 'gpt-5.4' },
       { type: 'turn.started' },
@@ -58,9 +58,32 @@ describe('codex stream', () => {
     expect(result.message).toBe('Hello world');
     expect(result.sessionId).toBe('thread-abc');
     expect(result.model).toBe('gpt-5.4');
+    // First invocation: no prevCumulative, so per-turn = cumulative
     expect(result.inputTokens).toBe(100);
     expect(result.cachedInputTokens).toBe(20);
     expect(result.outputTokens).toBe(50);
+    // codexCumulative should be set for storing
+    expect(result.codexCumulative).toEqual({ input: 100, output: 50, cached: 20 });
+  });
+
+  it('computes per-invocation delta when codexPrevCumulative is provided', async () => {
+    writeFakeScript('codex', [
+      { type: 'thread.started', thread_id: 'thread-delta', model: 'gpt-5.4' },
+      { type: 'item.completed', item: { type: 'agent_message', text: 'Second turn' } },
+      // Cumulative session totals after second invocation
+      { type: 'turn.completed', usage: { input_tokens: 5000, cached_input_tokens: 4000, output_tokens: 300 }, model: 'gpt-5.4' },
+    ]);
+
+    const result = await doCodexStream(baseOpts('codex', {
+      codexPrevCumulative: { input: 2000, output: 100, cached: 1500 },
+    }));
+    expect(result.ok).toBe(true);
+    // Per-invocation delta
+    expect(result.inputTokens).toBe(3000);   // 5000 - 2000
+    expect(result.cachedInputTokens).toBe(2500); // 4000 - 1500
+    expect(result.outputTokens).toBe(200);   // 300 - 100
+    // Raw cumulative for next invocation
+    expect(result.codexCumulative).toEqual({ input: 5000, output: 300, cached: 4000 });
   });
 
   it('parses reasoning + multiple messages', async () => {
@@ -110,12 +133,12 @@ describe('codex stream', () => {
 // --- claude parsing ---
 
 describe('claude stream', () => {
-  it('parses stream-json events', async () => {
+  it('parses stream-json events and extracts contextWindow from modelUsage', async () => {
     writeFakeScript('claude', [
       { type: 'system', session_id: 'sess-123', model: 'claude-opus-4-6', thinking_level: 'high' },
       { type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Hello ' } } },
       { type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'world' } } },
-      { type: 'result', session_id: 'sess-123', usage: { input_tokens: 150, cache_read_input_tokens: 30, output_tokens: 60 } },
+      { type: 'result', session_id: 'sess-123', usage: { input_tokens: 150, cache_read_input_tokens: 30, output_tokens: 60 }, modelUsage: { 'claude-opus-4-6': { contextWindow: 200000, maxOutputTokens: 64000 } } },
     ]);
 
     const result = await doClaudeStream(baseOpts('claude'));
@@ -127,6 +150,7 @@ describe('claude stream', () => {
     expect(result.inputTokens).toBe(150);
     expect(result.cachedInputTokens).toBe(30);
     expect(result.outputTokens).toBe(60);
+    expect(result.contextWindow).toBe(200000);
     expect(result.stopReason).toBe(null);
     expect(result.error).toBe(null);
     expect(result.incomplete).toBe(false);
@@ -423,6 +447,130 @@ echo '${JSON.stringify({ type: 'turn.completed', usage: {} })}'`;
     const result = await doCodexStream(baseOpts('codex', { model: 'my-model', thinkingEffort: 'xhigh' }));
     expect(result.model).toBe('my-model');
     expect(result.thinkingEffort).toBe('xhigh');
+  });
+});
+
+describe('listModels', () => {
+  it('discovers Claude models from CLI help and local state', () => {
+    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codeclaw-home-'));
+    const oldHome = process.env.HOME;
+
+    try {
+      process.env.HOME = homeDir;
+      fs.writeFileSync(path.join(homeDir, '.claude.json'), JSON.stringify({
+        projects: {
+          [tmpDir]: {
+            lastModelUsage: {
+              'claude-haiku-4-5-20250929': { costUSD: 0.1 },
+            },
+          },
+          '/tmp/other-project': {
+            lastModelUsage: {
+              'claude-opus-4-5-20251101': { costUSD: 0.2 },
+            },
+          },
+        },
+      }));
+      const projectDir = path.join(homeDir, '.claude', 'projects', tmpDir.replace(/\//g, '-'));
+      fs.mkdirSync(projectDir, { recursive: true });
+      fs.writeFileSync(path.join(projectDir, 'sess.jsonl'), [
+        JSON.stringify({ type: 'user', message: { content: 'hello' } }),
+        JSON.stringify({ type: 'assistant', message: { model: 'claude-haiku-4-5-20250929' } }),
+      ].join('\n'));
+
+      const script = `#!/bin/sh
+if [ "$1" = "--help" ]; then
+  cat <<'EOF'
+--model <model>  Model for the current session. Provide an alias for the latest model (e.g. 'sonnet' or 'opus') or a model's full name (e.g. 'claude-sonnet-4-5-20250929').
+EOF
+  exit 0
+fi
+exit 0`;
+      fs.writeFileSync(path.join(fakeBin, 'claude'), script, { mode: 0o755 });
+
+      const result = listModels('claude', {
+        workdir: tmpDir,
+        currentModel: 'claude-opus-4-6',
+      });
+
+      expect(result.models.map(m => m.id)).toEqual([
+        'claude-opus-4-6',
+        'claude-haiku-4-5-20250929',
+        'claude-opus-4-5-20251101',
+        'claude-sonnet-4-5-20250929',
+      ]);
+      expect(result.models.map(m => m.alias)).toEqual([
+        'opus',
+        'haiku',
+        'opus',
+        'sonnet',
+      ]);
+      expect(result.sources).toEqual(['current config', '~/.claude.json', 'claude --help', 'recent sessions']);
+      expect(result.note).toContain('does not expose a machine-readable model list');
+    } finally {
+      if (oldHome == null) delete process.env.HOME;
+      else process.env.HOME = oldHome;
+    }
+  });
+
+  it('discovers Codex models from CLI help, config, and recent sessions', () => {
+    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codeclaw-home-'));
+    const oldHome = process.env.HOME;
+
+    try {
+      process.env.HOME = homeDir;
+      fs.mkdirSync(path.join(homeDir, '.codex'), { recursive: true });
+      fs.writeFileSync(path.join(homeDir, '.codex', 'models_cache.json'), JSON.stringify({
+        fetched_at: '2026-03-08T05:07:47.914590Z',
+        models: [
+          { slug: 'gpt-5.3-codex', visibility: 'list', priority: 0 },
+          { slug: 'gpt-5.4', visibility: 'list', priority: 1 },
+          { slug: 'gpt-5.2-codex', visibility: 'list', priority: 2 },
+        ],
+      }));
+      fs.writeFileSync(path.join(homeDir, '.codex', 'config.toml'), [
+        'model = "gpt-5.4"',
+        '',
+        '[notice.model_migrations]',
+        '"gpt-5.1-codex-max" = "gpt-5.2-codex"',
+      ].join('\n'));
+
+      const sessionsDir = path.join(homeDir, '.codex', 'sessions', '2026', '03', '08');
+      fs.mkdirSync(sessionsDir, { recursive: true });
+      fs.writeFileSync(path.join(sessionsDir, 'sess.jsonl'), [
+        JSON.stringify({ type: 'session_meta', payload: { id: 'sess-1', cwd: tmpDir, timestamp: '2026-03-08T00:00:00.000Z', model_provider: 'openai' } }),
+        JSON.stringify({ type: 'turn_context', payload: { model: 'gpt-5.2-codex' } }),
+        JSON.stringify({ type: 'response_item', payload: { role: 'user', type: 'message', content: [{ type: 'input_text', text: 'hello' }] } }),
+        JSON.stringify({ type: 'event_msg', payload: { type: 'task_complete' } }),
+      ].join('\n'));
+
+      const script = `#!/bin/sh
+if [ "$1" = "--help" ]; then
+  cat <<'EOF'
+Examples: - \`-c model="o3"\`
+EOF
+  exit 0
+fi
+exit 0`;
+      fs.writeFileSync(path.join(fakeBin, 'codex'), script, { mode: 0o755 });
+
+      const result = listModels('codex', {
+        workdir: tmpDir,
+        currentModel: 'gpt-5.4',
+      });
+
+      expect(result.models.map(m => m.id)).toEqual([
+        'gpt-5.3-codex',
+        'gpt-5.4',
+        'gpt-5.2-codex',
+        'o3',
+      ]);
+      expect(result.sources).toEqual(['~/.codex/models_cache.json', 'codex --help', 'current config', '~/.codex/config.toml', 'recent sessions']);
+      expect(result.note).toContain('local Codex model cache');
+    } finally {
+      if (oldHome == null) delete process.env.HOME;
+      else process.env.HOME = oldHome;
+    }
   });
 });
 
