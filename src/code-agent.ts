@@ -782,6 +782,92 @@ function getCodexUsageFromSessions(home: string): UsageResult | null {
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// Claude usage from OAuth API (https://api.anthropic.com/api/oauth/usage)
+// ---------------------------------------------------------------------------
+
+function getClaudeOAuthToken(): string | null {
+  try {
+    const raw = execSync('security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null', {
+      encoding: 'utf-8', timeout: 3000,
+    }).trim();
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed?.claudeAiOauth?.accessToken || null;
+  } catch {
+    return null;
+  }
+}
+
+function getClaudeUsageFromOAuth(): UsageResult | null {
+  const token = getClaudeOAuthToken();
+  if (!token) return null;
+
+  try {
+    const raw = execSync(
+      `curl -s --max-time 5 -H "Authorization: Bearer ${token}" -H "anthropic-beta: oauth-2025-04-20" -H "Content-Type: application/json" "https://api.anthropic.com/api/oauth/usage"`,
+      { encoding: 'utf-8', timeout: 8000 },
+    ).trim();
+    if (!raw || raw[0] !== '{') return null;
+
+    const data = JSON.parse(raw);
+    const capturedAt = new Date().toISOString();
+
+    const makeWindow = (label: string, entry: any): UsageWindowInfo | null => {
+      if (!entry || typeof entry !== 'object') return null;
+      const usedPercent = roundPercent(entry.utilization);
+      if (usedPercent == null) return null;
+      const remainingPercent = Math.max(0, Math.round((100 - usedPercent) * 10) / 10);
+      const resetAt = typeof entry.resets_at === 'string' ? entry.resets_at : null;
+      let resetAfterSeconds: number | null = null;
+      if (resetAt) {
+        const resetAtMs = Date.parse(resetAt);
+        if (Number.isFinite(resetAtMs)) {
+          resetAfterSeconds = Math.max(0, Math.round((resetAtMs - Date.now()) / 1000));
+        }
+      }
+      return {
+        label,
+        usedPercent,
+        remainingPercent,
+        resetAt,
+        resetAfterSeconds,
+        status: usedPercent >= 100 ? 'limit_reached' : usedPercent >= 80 ? 'warning' : 'allowed',
+      };
+    };
+
+    const windows: UsageWindowInfo[] = [];
+    const w5h = makeWindow('5h', data.five_hour);
+    if (w5h) windows.push(w5h);
+    const w7d = makeWindow('7d', data.seven_day);
+    if (w7d) windows.push(w7d);
+    const w7dOpus = makeWindow('7d Opus', data.seven_day_opus);
+    if (w7dOpus) windows.push(w7dOpus);
+    const w7dSonnet = makeWindow('7d Sonnet', data.seven_day_sonnet);
+    if (w7dSonnet) windows.push(w7dSonnet);
+    const wExtra = makeWindow('Extra', data.extra_usage);
+    if (wExtra) windows.push(wExtra);
+
+    if (!windows.length) return null;
+
+    const overallStatus = windows.some(w => w.status === 'limit_reached') ? 'limit_reached'
+      : windows.some(w => w.status === 'warning') ? 'warning'
+      : 'allowed';
+
+    return {
+      ok: true,
+      agent: 'claude',
+      source: 'oauth-api',
+      capturedAt,
+      status: overallStatus,
+      windows,
+      error: null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 function getClaudeUsageFromTelemetry(home: string, model?: string | null): UsageResult | null {
   const telemetryRoot = path.join(home, '.claude', 'telemetry');
   if (!fs.existsSync(telemetryRoot)) return null;
@@ -877,6 +963,7 @@ export function getUsage(opts: UsageOpts): UsageResult {
       || emptyUsage('codex', 'No recent Codex usage data found.');
   }
 
-  return getClaudeUsageFromTelemetry(home, opts.model)
+  return getClaudeUsageFromOAuth()
+    || getClaudeUsageFromTelemetry(home, opts.model)
     || emptyUsage('claude', 'No recent Claude usage data found.');
 }

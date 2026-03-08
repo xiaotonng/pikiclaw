@@ -14,7 +14,7 @@ import {
 } from './code-agent.js';
 
 export { type Agent, type StreamResult, type SessionInfo, type UsageResult };
-export const VERSION = '0.2.6';
+export const VERSION = '0.2.7';
 
 // ---------------------------------------------------------------------------
 // Helpers

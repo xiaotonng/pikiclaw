@@ -11,7 +11,7 @@ Every time this skill is invoked, execute ALL steps below in order:
 ## 1. Bump patch version
 
 1. Read current version from `package.json`.
-2. Increment the **patch** number (e.g. `0.2.6` → `0.2.7`).
+2. Increment the **patch** number (e.g. `0.2.7` → `0.2.8`).
 3. Update **both** `package.json` `"version"` field and `src/bot.ts` `VERSION` constant to the new version.
 4. Update the version examples in **this file** (SKILL.md) step 1's comments to reflect the new base version.
 
@@ -19,7 +19,7 @@ Every time this skill is invoked, execute ALL steps below in order:
 
 1. Run `npm run build` to compile TypeScript to `dist/`.
 2. Run `npm link` in the project root.
-3. Run `codeclaw --version` and confirm output matches the new version.
+3. Verify the new version with **`node dist/cli.js --version`** (do NOT use `codeclaw --version` — the npx cache may shadow the global link with a stale version).
 4. If verification fails, diagnose and fix before proceeding.
 
 ## 3. Git commit, tag & push
