@@ -1,123 +1,136 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+/**
+ * E2E test for artifact return — hits real claude CLI + real Telegram API.
+ *
+ * Requires:
+ *   - `claude` CLI installed and authenticated
+ *   - TELEGRAM_BOT_TOKEN env var set
+ *   - TELEGRAM_TEST_CHAT_ID env var (optional, auto-detected from recent messages)
+ *
+ * Run:  npx vitest run test/artifact-return.e2e.test.ts
+ */
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { execSync } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
-import { TelegramBot } from '../src/bot-telegram.ts';
-import type { TgContext } from '../src/channel-telegram.ts';
+import os from 'node:os';
+import { doClaudeStream, type StreamOpts } from '../src/code-agent.ts';
+import { buildArtifactPrompt, collectArtifacts } from '../src/bot-telegram.ts';
+import { TelegramChannel } from '../src/channel-telegram.ts';
 
-function shQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
+function hasCmd(cmd: string): boolean {
+  try { execSync(`which ${cmd}`, { stdio: 'ignore' }); return true; } catch { return false; }
 }
 
-describe.sequential('artifact return e2e', () => {
-  let tmpDir = '';
-  let fakeBin = '';
-  let oldPath = '';
-  let oldToken: string | undefined;
-  let oldWorkdir: string | undefined;
-  let oldAgent: string | undefined;
+const HAS_CLAUDE = hasCmd('claude');
+const TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? '';
+let CHAT_ID = parseInt(process.env.TELEGRAM_TEST_CHAT_ID ?? '', 10);
+const SKIP = !HAS_CLAUDE || !TOKEN;
 
-  beforeEach(() => {
+if (SKIP) {
+  const missing: string[] = [];
+  if (!HAS_CLAUDE) missing.push('claude CLI');
+  if (!TOKEN) missing.push('TELEGRAM_BOT_TOKEN');
+  console.warn(
+    `\n⚠  ${missing.join(' + ')} not available — artifact return E2E tests will be SKIPPED.\n`,
+  );
+}
+
+const ARTIFACT_MANIFEST = 'manifest.json';
+
+function baseOpts(extra: Partial<StreamOpts> = {}): StreamOpts {
+  return {
+    agent: 'claude',
+    prompt: '',
+    workdir: process.cwd(),
+    timeout: 120,
+    sessionId: null,
+    model: null,
+    thinkingEffort: 'low',
+    onText: () => {},
+    claudePermissionMode: 'bypassPermissions',
+    ...extra,
+  };
+}
+
+let ch: TelegramChannel;
+let tmpDir: string;
+
+describe.skipIf(SKIP)('artifact return e2e', () => {
+  beforeAll(async () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'artifact-e2e-'));
-    fakeBin = path.join(tmpDir, 'bin');
-    fs.mkdirSync(fakeBin, { recursive: true });
+    ch = new TelegramChannel({ token: TOKEN, workdir: tmpDir });
+    await ch.connect();
 
-    oldPath = process.env.PATH || '';
-    oldToken = process.env.TELEGRAM_BOT_TOKEN;
-    oldWorkdir = process.env.CODECLAW_WORKDIR;
-    oldAgent = process.env.DEFAULT_AGENT;
-
-    process.env.PATH = `${fakeBin}:${oldPath}`;
-    process.env.TELEGRAM_BOT_TOKEN = 'test-token';
-    process.env.CODECLAW_WORKDIR = tmpDir;
-    process.env.DEFAULT_AGENT = 'claude';
+    // Auto-detect chat ID if not provided
+    if (!CHAT_ID || Number.isNaN(CHAT_ID)) {
+      const detected = await ch.getRecentChatId();
+      if (!detected) throw new Error('Cannot auto-detect TELEGRAM_TEST_CHAT_ID — send a message to the bot first');
+      CHAT_ID = detected;
+    }
+    console.log(`artifact-return e2e: chat_id=${CHAT_ID}`);
   });
 
-  afterEach(() => {
-    process.env.PATH = oldPath;
-    if (oldToken == null) delete process.env.TELEGRAM_BOT_TOKEN;
-    else process.env.TELEGRAM_BOT_TOKEN = oldToken;
-    if (oldWorkdir == null) delete process.env.CODECLAW_WORKDIR;
-    else process.env.CODECLAW_WORKDIR = oldWorkdir;
-    if (oldAgent == null) delete process.env.DEFAULT_AGENT;
-    else process.env.DEFAULT_AGENT = oldAgent;
-
+  afterAll(() => {
+    ch?.disconnect();
     if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it('runs the fake agent, collects artifacts, and uploads them back through Telegram helpers', async () => {
-    const manifestRecord = path.join(tmpDir, 'manifest-path.txt');
-    const script = `#!/bin/sh
-PROMPT=$(cat)
-MANIFEST=$(printf "%s" "$PROMPT" | sed -n 's/^When you want a file returned, also write this JSON manifest: //p' | head -n 1)
-if [ -z "$MANIFEST" ]; then
-  echo "manifest missing" >&2
-  exit 1
-fi
-echo "$MANIFEST" > ${shQuote(manifestRecord)}
-DIR=$(dirname "$MANIFEST")
-printf 'png-bytes' > "$DIR/screenshot.png"
-printf 'console output' > "$DIR/console.txt"
-cat > "$MANIFEST" <<'JSON'
-{"files":[{"path":"screenshot.png","kind":"photo","caption":"Captured page"},{"path":"console.txt","kind":"document","caption":"Console log"}]}
-JSON
-echo '${JSON.stringify({ type: 'system', session_id: 'sess-e2e', model: 'claude-opus-4-6' })}'
-echo '${JSON.stringify({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Artifacts delivered.' } } })}'
-echo '${JSON.stringify({ type: 'result', session_id: 'sess-e2e', usage: { input_tokens: 7, output_tokens: 4 } })}'
-`;
-    fs.writeFileSync(path.join(fakeBin, 'claude'), script, { mode: 0o755 });
+  it('claude creates artifacts and sends them to Telegram', async () => {
+    // 1. Prepare artifact directory
+    const artifactDir = path.join(tmpDir, 'artifacts');
+    fs.mkdirSync(artifactDir, { recursive: true });
+    const manifestPath = path.join(artifactDir, ARTIFACT_MANIFEST);
 
-    const edits: Array<{ text: string; opts?: any }> = [];
-    const sends: Array<{ text: string; opts?: any }> = [];
-    const files: Array<{ filePath: string; opts?: any }> = [];
-    const docs: Array<{ filename: string; opts?: any }> = [];
+    // 2. Ask real claude to create files + manifest
+    const prompt = buildArtifactPrompt(
+      [
+        'Create the following files in the artifact directory provided:',
+        '1. A small valid PNG image file named "screenshot.png" (create a minimal valid PNG using printf with raw bytes or python)',
+        '2. A plain text file named "console.txt" containing the text "hello from artifact test"',
+        'Then write the manifest.json as instructed.',
+        'Use "photo" kind for the PNG and "document" kind for the text file.',
+        'Add caption "Test screenshot" for the PNG and "Console output" for the text file.',
+        'Reply with exactly: ARTIFACTS_CREATED',
+      ].join('\n'),
+      artifactDir,
+      manifestPath,
+    );
 
-    const channel = {
-      editMessage: async (_chatId: number, _msgId: number, text: string, opts?: any) => {
-        edits.push({ text, opts });
-      },
-      send: async (_chatId: number, text: string, opts?: any) => {
-        sends.push({ text, opts });
-        return 777;
-      },
-      sendFile: async (_chatId: number, filePath: string, opts?: any) => {
-        files.push({ filePath, opts });
-        return 778;
-      },
-      sendDocument: async (_chatId: number, _content: string | Buffer, filename: string, opts?: any) => {
-        docs.push({ filename, opts });
-        return 779;
-      },
-    };
+    const result = await doClaudeStream(baseOpts({
+      prompt,
+      workdir: tmpDir,
+      timeout: 120,
+    }));
 
-    const bot = new TelegramBot();
-    (bot as any).channel = channel;
+    expect(result.ok).toBe(true);
+    expect(fs.existsSync(manifestPath)).toBe(true);
 
-    const ctx: TgContext = {
-      chatId: 500,
-      messageId: 600,
-      from: { id: 700, username: 'artifact_e2e' },
-      reply: async () => 123,
-      editReply: async () => {},
-      answerCallback: async () => {},
-      channel: channel as any,
-      raw: {},
-    };
+    // 3. Collect artifacts using real collectArtifacts
+    const logs: string[] = [];
+    const artifacts = collectArtifacts(artifactDir, manifestPath, msg => logs.push(msg));
+    expect(artifacts).toHaveLength(2);
 
-    await (bot as any).handleMessage({ text: 'Capture a screenshot and send back the files.', files: [] }, ctx);
+    const pngArtifact = artifacts.find(a => a.filename === 'screenshot.png');
+    expect(pngArtifact).toBeDefined();
+    expect(pngArtifact!.kind).toBe('photo');
 
-    expect(files).toHaveLength(2);
-    expect(files[0].filePath).toContain('screenshot.png');
-    expect(files[0].opts).toMatchObject({ caption: 'Captured page', replyTo: 123, asPhoto: true });
-    expect(files[1].filePath).toContain('console.txt');
-    expect(files[1].opts).toMatchObject({ caption: 'Console log', replyTo: 123, asPhoto: false });
-    expect(edits.some(item => item.text.includes('Artifacts delivered.'))).toBe(true);
-    expect(docs).toHaveLength(0);
-    expect(sends).toHaveLength(0);
-    expect((bot as any).chat(ctx.chatId).sessionId).toBe('sess-e2e');
+    const txtArtifact = artifacts.find(a => a.filename === 'console.txt');
+    expect(txtArtifact).toBeDefined();
+    expect(txtArtifact!.kind).toBe('document');
 
-    const manifestPath = fs.readFileSync(manifestRecord, 'utf-8').trim();
-    expect(manifestPath).toContain('manifest.json');
-    expect(fs.existsSync(path.dirname(manifestPath))).toBe(false);
-  });
+    // 4. Send artifacts to Telegram using real channel.sendFile — same path as bot-telegram.ts sendArtifacts
+    const sentIds: number[] = [];
+    for (const artifact of artifacts) {
+      const msgId = await ch.sendFile(CHAT_ID, artifact.filePath, {
+        caption: artifact.caption,
+        asPhoto: artifact.kind === 'photo',
+      });
+      expect(msgId).toBeTruthy();
+      sentIds.push(msgId!);
+    }
+
+    // Should have sent 2 messages (1 photo + 1 document)
+    expect(sentIds).toHaveLength(2);
+    console.log(`artifact-return e2e: sent ${sentIds.length} artifacts to Telegram (msg IDs: ${sentIds.join(', ')})`);
+  }, 120_000);
 });

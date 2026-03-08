@@ -14,7 +14,7 @@ import {
 } from './code-agent.js';
 
 export { type Agent, type StreamResult, type SessionInfo, type UsageResult };
-export const VERSION = '0.2.4';
+export const VERSION = '0.2.5';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -236,9 +236,10 @@ export class Bot {
     } else if (cs.agent === 'codex') {
       this.log(`[runStream] codex config: model=${this.codexModel} reasoning=${this.codexReasoningEffort} fullAccess=${this.codexFullAccess} extraArgs=[${this.codexExtraArgs.join(' ')}]`);
     }
+    const snapshotSessionId = cs.sessionId;
     const opts: StreamOpts = {
       agent: cs.agent, prompt, workdir: this.workdir, timeout: this.runTimeout,
-      sessionId: cs.sessionId, model: null, thinkingEffort: this.codexReasoningEffort, onText,
+      sessionId: snapshotSessionId, model: null, thinkingEffort: this.codexReasoningEffort, onText,
       attachments: attachments.length ? attachments : undefined,
       codexModel: this.codexModel, codexFullAccess: this.codexFullAccess,
       codexExtraArgs: this.codexExtraArgs.length ? this.codexExtraArgs : undefined,
@@ -250,7 +251,8 @@ export class Bot {
     if (result.inputTokens) this.stats.totalInputTokens += result.inputTokens;
     if (result.outputTokens) this.stats.totalOutputTokens += result.outputTokens;
     if (result.cachedInputTokens) this.stats.totalCachedTokens += result.cachedInputTokens;
-    if (result.sessionId) cs.sessionId = result.sessionId;
+    // Only update sessionId if it hasn't been changed externally (e.g. user switched session during run)
+    if (result.sessionId && cs.sessionId === snapshotSessionId) cs.sessionId = result.sessionId;
     this.log(`[runStream] completed turn=${this.stats.totalTurns} cumulative: in=${fmtTokens(this.stats.totalInputTokens)} out=${fmtTokens(this.stats.totalOutputTokens)} cached=${fmtTokens(this.stats.totalCachedTokens)}`);
     return result;
   }

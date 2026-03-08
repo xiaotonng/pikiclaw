@@ -93,9 +93,9 @@ function ensureNonInteractiveRestartArgs(bin: string, args: string[]): string[] 
   return ['--yes', ...args];
 }
 
-type ArtifactKind = 'photo' | 'document';
+export type ArtifactKind = 'photo' | 'document';
 
-interface BotArtifact {
+export interface BotArtifact {
   filePath: string;
   filename: string;
   kind: ArtifactKind;
@@ -112,7 +112,79 @@ function isPhotoFilename(filename: string): boolean {
   return ARTIFACT_PHOTO_EXTS.has(path.extname(filename).toLowerCase());
 }
 
-function buildArtifactPrompt(prompt: string, artifactDir: string, manifestPath: string): string {
+export function collectArtifacts(dirPath: string, manifestPath: string, log?: (msg: string) => void): BotArtifact[] {
+  const _log = log || (() => {});
+  if (!fs.existsSync(manifestPath)) return [];
+
+  let parsed: any;
+  try {
+    parsed = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+  } catch (e) {
+    _log(`artifact manifest parse error: ${e}`);
+    return [];
+  }
+
+  const entries = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.files) ? parsed.files : [];
+  if (!entries.length) return [];
+
+  const realDir = fs.realpathSync(dirPath);
+  const artifacts: BotArtifact[] = [];
+
+  for (const entry of entries.slice(0, ARTIFACT_MAX_FILES)) {
+    const rawPath = typeof entry?.path === 'string' ? entry.path
+      : typeof entry?.name === 'string' ? entry.name
+      : '';
+    const relPath = rawPath.trim();
+    if (!relPath || path.isAbsolute(relPath)) {
+      _log(`artifact skipped: invalid path "${rawPath}"`);
+      continue;
+    }
+
+    const resolved = path.resolve(dirPath, relPath);
+    const relative = path.relative(dirPath, resolved);
+    if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+      _log(`artifact skipped: outside turn dir "${relPath}"`);
+      continue;
+    }
+    if (!fs.existsSync(resolved)) {
+      _log(`artifact skipped: missing file "${relPath}"`);
+      continue;
+    }
+
+    const realFile = fs.realpathSync(resolved);
+    const realRelative = path.relative(realDir, realFile);
+    if (realRelative.startsWith('..') || path.isAbsolute(realRelative)) {
+      _log(`artifact skipped: symlink outside turn dir "${relPath}"`);
+      continue;
+    }
+
+    const stat = fs.statSync(realFile);
+    if (!stat.isFile()) {
+      _log(`artifact skipped: not a file "${relPath}"`);
+      continue;
+    }
+    if (stat.size > ARTIFACT_MAX_BYTES) {
+      _log(`artifact skipped: too large "${relPath}" (${stat.size} bytes)`);
+      continue;
+    }
+
+    const filename = path.basename(realFile);
+    const requestedKind = typeof entry?.kind === 'string' ? entry.kind.toLowerCase()
+      : typeof entry?.type === 'string' ? entry.type.toLowerCase()
+      : '';
+    let kind: ArtifactKind = requestedKind === 'document' ? 'document'
+      : requestedKind === 'photo' ? 'photo'
+      : isPhotoFilename(filename) ? 'photo' : 'document';
+    if (kind === 'photo' && !isPhotoFilename(filename)) kind = 'document';
+
+    const caption = typeof entry?.caption === 'string' ? entry.caption.trim().slice(0, 1024) || undefined : undefined;
+    artifacts.push({ filePath: realFile, filename, kind, caption });
+  }
+
+  return artifacts;
+}
+
+export function buildArtifactPrompt(prompt: string, artifactDir: string, manifestPath: string): string {
   const base = prompt.trim() || 'Please help with this request.';
   return [
     base,
@@ -462,12 +534,17 @@ export class TelegramBot extends Bot {
     const allArgs = [...baseArgs, ...process.argv.slice(2)];
 
     this.log(`restart: spawning \`${bin} ${allArgs.join(' ')}\``);
+    // Collect all known chat IDs so the new process can send startup notices
+    const knownIds = new Set(this.allowedChatIds);
+    for (const cid of this.channel.knownChats) knownIds.add(cid);
+
     const child = spawn(bin, allArgs, {
       stdio: 'inherit',
       detached: true,
       env: {
         ...process.env,
         npm_config_yes: process.env.npm_config_yes || 'true',
+        ...(knownIds.size ? { TELEGRAM_ALLOWED_CHAT_IDS: [...knownIds].join(',') } : {}),
       },
     });
     child.unref();
@@ -561,74 +638,7 @@ export class TelegramBot extends Bot {
   }
 
   private collectArtifacts(dirPath: string, manifestPath: string): BotArtifact[] {
-    if (!fs.existsSync(manifestPath)) return [];
-
-    let parsed: any;
-    try {
-      parsed = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
-    } catch (e) {
-      this.log(`artifact manifest parse error: ${e}`);
-      return [];
-    }
-
-    const entries = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.files) ? parsed.files : [];
-    if (!entries.length) return [];
-
-    const realDir = fs.realpathSync(dirPath);
-    const artifacts: BotArtifact[] = [];
-
-    for (const entry of entries.slice(0, ARTIFACT_MAX_FILES)) {
-      const rawPath = typeof entry?.path === 'string' ? entry.path
-        : typeof entry?.name === 'string' ? entry.name
-        : '';
-      const relPath = rawPath.trim();
-      if (!relPath || path.isAbsolute(relPath)) {
-        this.log(`artifact skipped: invalid path "${rawPath}"`);
-        continue;
-      }
-
-      const resolved = path.resolve(dirPath, relPath);
-      const relative = path.relative(dirPath, resolved);
-      if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
-        this.log(`artifact skipped: outside turn dir "${relPath}"`);
-        continue;
-      }
-      if (!fs.existsSync(resolved)) {
-        this.log(`artifact skipped: missing file "${relPath}"`);
-        continue;
-      }
-
-      const realFile = fs.realpathSync(resolved);
-      const realRelative = path.relative(realDir, realFile);
-      if (realRelative.startsWith('..') || path.isAbsolute(realRelative)) {
-        this.log(`artifact skipped: symlink outside turn dir "${relPath}"`);
-        continue;
-      }
-
-      const stat = fs.statSync(realFile);
-      if (!stat.isFile()) {
-        this.log(`artifact skipped: not a file "${relPath}"`);
-        continue;
-      }
-      if (stat.size > ARTIFACT_MAX_BYTES) {
-        this.log(`artifact skipped: too large "${relPath}" (${stat.size} bytes)`);
-        continue;
-      }
-
-      const filename = path.basename(realFile);
-      const requestedKind = typeof entry?.kind === 'string' ? entry.kind.toLowerCase()
-        : typeof entry?.type === 'string' ? entry.type.toLowerCase()
-        : '';
-      let kind: ArtifactKind = requestedKind === 'document' ? 'document'
-        : requestedKind === 'photo' ? 'photo'
-        : isPhotoFilename(filename) ? 'photo' : 'document';
-      if (kind === 'photo' && !isPhotoFilename(filename)) kind = 'document';
-
-      const caption = typeof entry?.caption === 'string' ? entry.caption.trim().slice(0, 1024) || undefined : undefined;
-      artifacts.push({ filePath: realFile, filename, kind, caption });
-    }
-
-    return artifacts;
+    return collectArtifacts(dirPath, manifestPath, msg => this.log(msg));
   }
 
   private async sendArtifacts(ctx: TgContext, replyTo: number, artifacts: BotArtifact[]) {
