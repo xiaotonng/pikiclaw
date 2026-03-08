@@ -94,7 +94,7 @@ Uses fake shell scripts that emit JSONL to simulate CLI output. No real API call
 - **codex stream** — Single-turn parsing, reasoning, incremental `onText`, resume command
 - **claude stream** — `stream-json` events, thinking deltas, `assistant` fallback, expired session retry, error handling
 - **doStream** — Unified routing to codex/claude
-- **attachments** — Verifies `--image` flags (codex), `--input-file` flags (claude), empty/undefined cases
+- **attachments** — Verifies `--image` flags (codex), `--input-format stream-json` multimodal stdin (claude), empty/undefined cases
 - **edge cases** — Process crash, empty output, non-JSON noise, preserving initial model/thinkingEffort
 
 ## E2E Tests

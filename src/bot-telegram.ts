@@ -15,6 +15,7 @@ import {
   thinkLabel, parseAllowedChatIds, shellSplit,
 } from './bot.js';
 import { TelegramChannel, type TgContext, type TgCallbackContext, type TgMessage } from './channel-telegram.js';
+import { splitText } from './channel-base.js';
 
 // ---------------------------------------------------------------------------
 // Telegram HTML formatting
@@ -725,23 +726,37 @@ export class TelegramBot extends Bot {
         finalMsgId = await this.channel.send(ctx.chatId, fullHtml, { parseMode: 'HTML', replyTo: ctx.messageId, keyboard });
       }
     } else {
-      let preview = bodyHtml.slice(0, 3200);
-      if (bodyHtml.length > 3200) preview += '\n<i>... (see full response below)</i>';
-      const previewHtml = `${statusHtml}${thinkingHtml}${preview}\n\n${meta}${tokenBlock}`;
+      // Send full content as split plain-text messages instead of a file.
+      // First message: edit placeholder with meta + thinking + beginning of body.
+      const headerHtml = `${statusHtml}${thinkingHtml}`;
+      const footerHtml = `\n\n${meta}${tokenBlock}`;
+      const maxFirst = 3900 - headerHtml.length - footerHtml.length;
+      let firstBody: string;
+      let remaining: string;
+      if (maxFirst > 200) {
+        // find a newline-friendly cut in the HTML body
+        let cut = bodyHtml.lastIndexOf('\n', maxFirst);
+        if (cut < maxFirst * 0.3) cut = maxFirst;
+        firstBody = bodyHtml.slice(0, cut);
+        remaining = bodyHtml.slice(cut);
+      } else {
+        firstBody = '';
+        remaining = bodyHtml;
+      }
+      const firstHtml = `${headerHtml}${firstBody}${footerHtml}`;
       try {
-        await this.channel.editMessage(ctx.chatId, phId, previewHtml, { parseMode: 'HTML', keyboard });
+        await this.channel.editMessage(ctx.chatId, phId, firstHtml, { parseMode: 'HTML', keyboard });
       } catch {
-        finalMsgId = await this.channel.send(ctx.chatId, previewHtml, { parseMode: 'HTML', replyTo: ctx.messageId, keyboard });
+        finalMsgId = await this.channel.send(ctx.chatId, firstHtml, { parseMode: 'HTML', replyTo: ctx.messageId, keyboard });
       }
 
-      const thinkingMd = result.thinking
-        ? `> **${thinkLabel(agent)}**\n${result.thinking.split('\n').map(l => `> ${l}`).join('\n')}\n\n---\n\n`
-        : '';
-      await this.channel.sendDocument(
-        ctx.chatId, thinkingMd + result.message,
-        `response_${phId}.md`,
-        { caption: `Full response (${result.message.length} chars)`, replyTo: finalMsgId ?? phId },
-      );
+      // Send remaining body as continuation messages (split at ~3800 chars)
+      if (remaining.trim()) {
+        const chunks = splitText(remaining, 3800);
+        for (const chunk of chunks) {
+          await this.channel.send(ctx.chatId, chunk, { parseMode: 'HTML', replyTo: finalMsgId ?? phId });
+        }
+      }
     }
     return finalMsgId;
   }

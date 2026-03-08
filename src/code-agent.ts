@@ -24,6 +24,8 @@ export interface StreamOpts {
   claudeModel?: string;
   claudePermissionMode?: string;
   claudeExtraArgs?: string[];
+  /** Override stdin payload (used for stream-json multimodal input) */
+  _stdinOverride?: string;
 }
 
 export interface StreamResult {
@@ -68,7 +70,7 @@ async function run(cmd: string[], opts: StreamOpts, parseLine: (ev: any, s: any)
 
   const proc = spawn(shellCmd, { cwd: opts.workdir, stdio: ['pipe', 'pipe', 'pipe'], shell: true });
   agentLog(`[spawn] pid=${proc.pid}`);
-  try { proc.stdin!.write(opts.prompt); proc.stdin!.end(); } catch {}
+  try { proc.stdin!.write(opts._stdinOverride ?? opts.prompt); proc.stdin!.end(); } catch {}
   proc.stderr?.on('data', (c: Buffer) => {
     const chunk = c.toString();
     stderr += chunk;
@@ -171,13 +173,57 @@ export function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
 
 // --- claude ---
 
+const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp']);
+
+function mimeForExt(ext: string): string {
+  switch (ext) {
+    case '.jpg': case '.jpeg': return 'image/jpeg';
+    case '.png': return 'image/png';
+    case '.gif': return 'image/gif';
+    case '.webp': return 'image/webp';
+    default: return 'application/octet-stream';
+  }
+}
+
+/**
+ * Build a stream-json stdin payload that includes images as base64 content
+ * blocks alongside the text prompt.
+ */
+function buildClaudeMultimodalStdin(prompt: string, attachments: string[]): string {
+  const content: any[] = [];
+  for (const filePath of attachments) {
+    const ext = path.extname(filePath).toLowerCase();
+    if (IMAGE_EXTS.has(ext)) {
+      try {
+        const data = fs.readFileSync(filePath);
+        content.push({
+          type: 'image',
+          source: { type: 'base64', media_type: mimeForExt(ext), data: data.toString('base64') },
+        });
+      } catch (e: any) {
+        agentLog(`[attach] failed to read image ${filePath}: ${e.message}`);
+      }
+    } else {
+      // For non-image files, tell Claude the path so it can Read it
+      content.push({ type: 'text', text: `[Attached file: ${filePath}]` });
+    }
+  }
+  content.push({ type: 'text', text: prompt });
+  const msg = {
+    type: 'user',
+    message: { role: 'user', content },
+  };
+  return JSON.stringify(msg) + '\n';
+}
+
 function claudeCmd(o: StreamOpts): string[] {
   const args = ['claude', '-p', '--verbose', '--output-format', 'stream-json', '--include-partial-messages'];
   if (o.claudeModel) args.push('--model', o.claudeModel);
   if (o.claudePermissionMode) args.push('--permission-mode', o.claudePermissionMode);
   if (o.sessionId) args.push('--resume', o.sessionId);
   if (o.attachments?.length) {
-    for (const f of o.attachments) args.push('--input-file', f);
+    args.push('--input-format', 'stream-json');
+    o._stdinOverride = buildClaudeMultimodalStdin(o.prompt, o.attachments);
   }
   if (o.claudeExtraArgs?.length) args.push(...o.claudeExtraArgs);
   return args;

@@ -269,13 +269,50 @@ echo '{"type":"turn.completed","usage":{}}'`;
     expect(args).toContain('/tmp/b.jpg');
   });
 
-  it('claude passes --input-file flags for attachments', async () => {
+  it('claude uses --input-format stream-json for attachments', async () => {
     const argsFile = path.join(tmpDir, 'claude-args.txt');
+    const stdinFile = path.join(tmpDir, 'claude-stdin.txt');
     const script = `#!/bin/sh
 echo "$@" > ${argsFile}
+cat > ${stdinFile}
 echo '{"type":"system","session_id":"s-file"}'
 echo '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"ok"}}}'
 echo '{"type":"result","session_id":"s-file"}'`;
+    fs.writeFileSync(path.join(fakeBin, 'claude'), script, { mode: 0o755 });
+
+    // Create a tiny test image
+    const imgPath = path.join(tmpDir, 'test.png');
+    fs.writeFileSync(imgPath, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==', 'base64'));
+
+    const result = await doClaudeStream(baseOpts('claude', {
+      attachments: [imgPath],
+    }));
+    expect(result.ok).toBe(true);
+    const args = fs.readFileSync(argsFile, 'utf-8');
+    expect(args).toContain('--input-format');
+    expect(args).toContain('stream-json');
+    expect(args).not.toContain('--input-file');
+    // Verify stdin contains the multimodal JSON message
+    const stdin = fs.readFileSync(stdinFile, 'utf-8');
+    const msg = JSON.parse(stdin.trim());
+    expect(msg.type).toBe('user');
+    expect(msg.message.content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'image', source: expect.objectContaining({ type: 'base64', media_type: 'image/png' }) }),
+        expect.objectContaining({ type: 'text' }),
+      ]),
+    );
+  });
+
+  it('claude includes non-image files as text references in stream-json', async () => {
+    const argsFile = path.join(tmpDir, 'claude-args2.txt');
+    const stdinFile = path.join(tmpDir, 'claude-stdin2.txt');
+    const script = `#!/bin/sh
+echo "$@" > ${argsFile}
+cat > ${stdinFile}
+echo '{"type":"system","session_id":"s-file2"}'
+echo '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"ok"}}}'
+echo '{"type":"result","session_id":"s-file2"}'`;
     fs.writeFileSync(path.join(fakeBin, 'claude'), script, { mode: 0o755 });
 
     const result = await doClaudeStream(baseOpts('claude', {
@@ -283,8 +320,16 @@ echo '{"type":"result","session_id":"s-file"}'`;
     }));
     expect(result.ok).toBe(true);
     const args = fs.readFileSync(argsFile, 'utf-8');
-    expect(args).toContain('--input-file');
-    expect(args).toContain('/tmp/doc.pdf');
+    expect(args).toContain('--input-format');
+    expect(args).toContain('stream-json');
+    const stdin = fs.readFileSync(stdinFile, 'utf-8');
+    const msg = JSON.parse(stdin.trim());
+    expect(msg.type).toBe('user');
+    expect(msg.message.content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'text', text: expect.stringContaining('/tmp/doc.pdf') }),
+      ]),
+    );
   });
 
   it('no flags when attachments is empty', async () => {
@@ -299,7 +344,7 @@ echo '{"type":"result","session_id":"s-no"}'`;
     const result = await doClaudeStream(baseOpts('claude', { attachments: [] }));
     expect(result.ok).toBe(true);
     const args = fs.readFileSync(argsFile, 'utf-8');
-    expect(args).not.toContain('--input-file');
+    expect(args).not.toContain('--input-format');
   });
 
   it('no flags when attachments is undefined', async () => {
