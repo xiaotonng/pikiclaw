@@ -317,7 +317,7 @@ function compactLogLine(text: string, max = 120): string {
   return `${line.slice(0, max - 3)}...`;
 }
 
-function pushRecentActivity(lines: string[], line: string, maxLines = 6) {
+function pushRecentActivity(lines: string[], line: string, maxLines = 12) {
   const cleaned = compactLogLine(line, 140);
   if (!cleaned) return;
   if (lines[lines.length - 1] === cleaned) return;
@@ -326,19 +326,27 @@ function pushRecentActivity(lines: string[], line: string, maxLines = 6) {
 }
 
 function buildCodexActivityPreview(s: {
-  recentActivity: string[];
+  recentNarrative: string[];
+  recentFailures: string[];
   commentaryByItem: Map<string, string>;
   activeCommands: Map<string, string>;
+  completedCommands: number;
 }): string {
-  const lines = [...s.recentActivity];
+  const lines = [...s.recentNarrative];
   for (const text of s.commentaryByItem.values()) {
     const cleaned = compactLogLine(text, 140);
-    if (cleaned) lines.push(cleaned);
+    if (cleaned && lines[lines.length - 1] !== cleaned) lines.push(cleaned);
   }
-  for (const cmd of s.activeCommands.values()) {
-    lines.push(`$ ${compactLogLine(cmd, 120)}`);
+  for (const failure of s.recentFailures) {
+    if (lines[lines.length - 1] !== failure) lines.push(failure);
   }
-  return lines.slice(-6).join('\n');
+  if (s.completedCommands > 0) {
+    lines.push(s.completedCommands === 1 ? 'Executed 1 command.' : `Executed ${s.completedCommands} commands.`);
+  }
+  if (s.activeCommands.size > 0) {
+    lines.push(s.activeCommands.size === 1 ? 'Running 1 command...' : `Running ${s.activeCommands.size} commands...`);
+  }
+  return lines.join('\n');
 }
 
 export function buildCodexTurnInput(prompt: string, attachments: string[]): any[] {
@@ -399,7 +407,9 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
     messagePhases: new Map<string, string>(),
     commentaryByItem: new Map<string, string>(),
     activeCommands: new Map<string, string>(),
-    recentActivity: [] as string[],
+    recentNarrative: [] as string[],
+    recentFailures: [] as string[],
+    completedCommands: 0,
   };
 
   // Step 1: thread/start or thread/resume
@@ -505,7 +515,7 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
             if (item.text?.trim()) s.msgs.push(item.text.trim());
           } else {
             const commentary = item.text?.trim() || s.commentaryByItem.get(item.id)?.trim() || '';
-            if (commentary) pushRecentActivity(s.recentActivity, commentary);
+            if (commentary) pushRecentActivity(s.recentNarrative, commentary);
             s.commentaryByItem.delete(item.id);
             emit();
           }
@@ -524,8 +534,11 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
           s.activeCommands.delete(item.id);
           if (cmd) {
             const exitCode = typeof item.exitCode === 'number' ? item.exitCode : null;
-            const prefix = exitCode != null && exitCode !== 0 ? `Command failed (${exitCode}): ` : 'Ran: ';
-            pushRecentActivity(s.recentActivity, `${prefix}${cmd}`);
+            if (exitCode != null && exitCode !== 0) {
+              pushRecentActivity(s.recentFailures, `Command failed (${exitCode}): ${cmd}`, 4);
+            } else {
+              s.completedCommands++;
+            }
           }
           emit();
         }

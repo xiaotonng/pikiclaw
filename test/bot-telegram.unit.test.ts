@@ -233,6 +233,48 @@ describe('TelegramBot.handleMessage streaming', () => {
     expect(preview).not.toContain('npm test');
   });
 
+  it('preserves early codex stage descriptions when activity becomes long', async () => {
+    const { bot, ctx, edits } = createBot();
+    bot.chat(ctx.chatId).agent = 'codex';
+
+    const stages = Array.from({ length: 7 }, (_value, idx) => `阶段${idx + 1}: ${'进度'.repeat(70)}`);
+
+    vi.spyOn(bot, 'runStream').mockImplementation(async (_prompt: string, _cs: any, _files: string[], onText: any) => {
+      onText('', '', [
+        ...stages,
+        'Ran: /bin/zsh -lc npm run build',
+        'Ran: /bin/zsh -lc npm test',
+        '$ /bin/zsh -lc git diff --stat',
+      ].join('\n'));
+      return {
+        ok: true,
+        message: 'done',
+        thinking: null,
+        sessionId: 'sess-stream-1c',
+        model: 'gpt-5.4',
+        thinkingEffort: 'high',
+        elapsedS: 1.2,
+        inputTokens: 9,
+        outputTokens: 3,
+        cachedInputTokens: null,
+        error: null,
+        stopReason: null,
+        incomplete: false,
+      };
+    });
+
+    await (bot as any).handleMessage({ text: 'Inspect this repo', files: [] }, ctx);
+
+    const preview = edits.find(e => !e.opts?.parseMode)?.text || '';
+    expect(preview).toContain('阶段1:');
+    expect(preview).toContain('阶段2:');
+    expect(preview).toContain('Executed 2 commands.');
+    expect(preview).toContain('Running 1 command...');
+    expect(preview).toContain('\n...\n');
+    expect(preview).not.toContain('Ran:');
+    expect(preview).not.toContain('git diff --stat');
+  });
+
   it('waits for pending preview edits before sending the final reply', async () => {
     const { bot, ctx, channel, edits } = createBot();
     let previewCalls = 0;

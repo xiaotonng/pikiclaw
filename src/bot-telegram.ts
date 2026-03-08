@@ -243,7 +243,32 @@ function summarizePromptForStatus(prompt: string, maxLen = 50): string {
   return clean.slice(0, Math.max(0, maxLen - 3)).trimEnd() + '...';
 }
 
-function summarizeActivityForPreview(activity: string, maxLines = 6): string {
+function trimActivityForPreview(text: string, maxChars = 900): string {
+  if (text.length <= maxChars) return text;
+
+  const lines = text.split('\n').filter(line => line.trim());
+  if (lines.length <= 1) return text.slice(0, Math.max(0, maxChars - 3)).trimEnd() + '...';
+
+  const tailCount = Math.min(2, Math.max(1, lines.length - 1));
+  const tail = lines.slice(-tailCount);
+  const headCandidates = lines.slice(0, Math.max(0, lines.length - tailCount));
+  const reserved = tail.join('\n').length + 5; // "\n...\n"
+  const budget = Math.max(0, maxChars - reserved);
+  const head: string[] = [];
+  let used = 0;
+
+  for (const line of headCandidates) {
+    const extra = line.length + (head.length ? 1 : 0);
+    if (used + extra > budget) break;
+    head.push(line);
+    used += extra;
+  }
+
+  if (!head.length) return text.slice(0, Math.max(0, maxChars - 3)).trimEnd() + '...';
+  return [...head, '...', ...tail].join('\n');
+}
+
+function summarizeActivityForPreview(activity: string): string {
   const narrative: string[] = [];
   const failures: string[] = [];
   let activeCommands = 0;
@@ -260,9 +285,23 @@ function summarizeActivityForPreview(activity: string, maxLines = 6): string {
       completedCommands++;
       continue;
     }
+    const executed = line.match(/^Executed (\d+) command(?:s)?\.$/);
+    if (executed) {
+      completedCommands = Math.max(completedCommands, parseInt(executed[1], 10) || 0);
+      continue;
+    }
+    const running = line.match(/^Running (\d+) command(?:s)?\.\.\.$/);
+    if (running) {
+      activeCommands = Math.max(activeCommands, parseInt(running[1], 10) || 0);
+      continue;
+    }
     const failed = line.match(/^Command failed \((\d+)\):/);
     if (failed) {
       failures.push(`Command failed (${failed[1]})`);
+      continue;
+    }
+    if (/^Command failed \(\d+\)$/.test(line)) {
+      failures.push(line);
       continue;
     }
     narrative.push(line);
@@ -273,13 +312,14 @@ function summarizeActivityForPreview(activity: string, maxLines = 6): string {
     ...failures,
   ];
 
-  if (activeCommands > 0) {
-    lines.push(activeCommands === 1 ? 'Running 1 command...' : `Running ${activeCommands} commands...`);
-  } else if (!narrative.length && !failures.length && completedCommands > 0) {
+  if (completedCommands > 0) {
     lines.push(completedCommands === 1 ? 'Executed 1 command.' : `Executed ${completedCommands} commands.`);
   }
+  if (activeCommands > 0) {
+    lines.push(activeCommands === 1 ? 'Running 1 command...' : `Running ${activeCommands} commands...`);
+  }
 
-  return lines.slice(-maxLines).join('\n');
+  return lines.join('\n');
 }
 
 function humanizeUsageStatus(status: string | null | undefined): string {
@@ -747,7 +787,7 @@ export class TelegramBot extends Bot {
         const tLabel = thinkLabel(cs.agent);
 
         if (activityDisplay) {
-          const preview = activityDisplay.length > maxActivity ? '...\n' + activityDisplay.slice(-maxActivity) : activityDisplay;
+          const preview = trimActivityForPreview(activityDisplay, maxActivity);
           parts.push(`Activity\n${preview}`);
         }
 

@@ -79,6 +79,32 @@ describe('TelegramChannel.connect', () => {
   });
 });
 
+describe('TelegramChannel.listen', () => {
+  it('stops immediately on getUpdates polling conflicts', async () => {
+    const { ch } = createTestChannel();
+    const onError = vi.fn();
+    const api = vi.fn(async (method: string, payload?: any) => {
+      if (method === 'getUpdates') {
+        throw new Error('Telegram polling conflict: Conflict: terminated by other getUpdates request; make sure that only one bot instance is running');
+      }
+      return { ok: true, result: payload ?? {} };
+    });
+    (ch as any).api = api;
+    ch.onError(onError);
+
+    await ch.listen();
+
+    expect(api).toHaveBeenCalledTimes(1);
+    expect(api).toHaveBeenCalledWith('getUpdates', {
+      offset: 0,
+      timeout: 45,
+      allowed_updates: ['message', 'callback_query'],
+    });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0]?.[0]?.message).toContain('Telegram polling conflict:');
+  });
+});
+
 // ---------------------------------------------------------------------------
 // send / edit / delete
 // ---------------------------------------------------------------------------

@@ -137,6 +137,11 @@ function mimeTypeForFilename(filename: string): string {
   }
 }
 
+function isPollingConflictError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? '');
+  return msg.startsWith('Telegram polling conflict:');
+}
+
 // ---------------------------------------------------------------------------
 // TelegramChannel
 // ---------------------------------------------------------------------------
@@ -221,6 +226,13 @@ class TelegramChannel extends Channel {
         }
       } catch (e: any) {
         if (!this.running || e.name === 'AbortError') break;
+        if (isPollingConflictError(e)) {
+          const err = e instanceof Error ? e : new Error(String(e));
+          this.running = false;
+          this._log(`[poll] conflict: ${err.message} — stopping`);
+          this._hError?.(err);
+          break;
+        }
         this._log(`[poll] error: ${e.message ?? e} — retrying in ${backoff / 1000}s`);
         this._hError?.(e);
         await sleep(backoff);
@@ -441,7 +453,15 @@ class TelegramChannel extends Channel {
       body: JSON.stringify(payload ?? {}), signal,
     });
     const data = await resp.json();
-    if (!data.ok) throw new Error(`Telegram API ${method}: ${JSON.stringify(data)}`);
+    if (!data.ok) {
+      if (method === 'getUpdates' && Number(data.error_code) === 409) {
+        const detail = typeof data.description === 'string' && data.description.trim()
+          ? data.description.trim()
+          : 'another getUpdates request is already running for this bot token';
+        throw new Error(`Telegram polling conflict: ${detail}`);
+      }
+      throw new Error(`Telegram API ${method}: ${JSON.stringify(data)}`);
+    }
     return data;
   }
 

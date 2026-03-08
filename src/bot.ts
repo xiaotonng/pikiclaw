@@ -16,7 +16,7 @@ import {
 } from './code-agent.js';
 
 export { type Agent, type StreamResult, type SessionInfo, type UsageResult, type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult, type SkillInfo, type SkillListResult };
-export const VERSION = '0.2.13';
+export const VERSION = '0.2.14';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -248,7 +248,7 @@ export class Bot {
 
   async runStream(
     prompt: string, cs: ChatState, attachments: string[],
-    onText: (text: string, thinking: string) => void,
+    onText: (text: string, thinking: string, activity?: string) => void,
     systemPrompt?: string,
   ): Promise<StreamResult> {
     this.log(`[runStream] agent=${cs.agent} session=${cs.sessionId || '(new)'} workdir=${this.workdir} timeout=${this.runTimeout}s attachments=${attachments.length}`);
