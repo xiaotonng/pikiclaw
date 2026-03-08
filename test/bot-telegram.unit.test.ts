@@ -35,6 +35,7 @@ function createBot() {
       files.push({ filePath, opts });
       return 779;
     }),
+    deleteMessage: vi.fn(async () => {}),
     disconnect: vi.fn(),
   };
 
@@ -178,12 +179,15 @@ describe('TelegramBot.handleMessage artifacts', () => {
 
     await (bot as any).handleMessage({ text: 'Take a screenshot', files: [] }, ctx);
 
-    expect(edits).toHaveLength(1);
+    // canCombine=true: placeholder deleted, text sent as photo caption
+    expect(edits).toHaveLength(0);
+    expect(channel.deleteMessage).toHaveBeenCalledTimes(1);
     expect(files).toHaveLength(2);
     expect(files[0].filePath).toContain('shot.png');
-    expect(files[0].opts).toMatchObject({ caption: 'Screenshot', replyTo: 1, asPhoto: true });
+    // First photo gets the text response as caption instead of its own caption
+    expect(files[0].opts).toMatchObject({ caption: 'Artifacts ready.', replyTo: ctx.messageId, asPhoto: true });
     expect(files[1].filePath).toContain('notes.txt');
-    expect(files[1].opts).toMatchObject({ caption: 'Notes', replyTo: 1, asPhoto: false });
+    expect(files[1].opts).toMatchObject({ caption: 'Notes', replyTo: ctx.messageId, asPhoto: false });
     expect(channel.sendFile).toHaveBeenCalledTimes(2);
     expect(fs.existsSync(artifactDir)).toBe(false);
   });

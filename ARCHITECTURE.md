@@ -104,9 +104,9 @@ Direct messages (no command prefix) are forwarded to the current AI agent.
 
 | File                              | Tests                              | API calls? |
 |-----------------------------------|------------------------------------|------------|
-| `test/codeclaw.e2e.test.ts`       | Bot commands + callbacks (real fs)  | No         |
-| `test/channel-telegram.e2e.test.ts` | Telegram channel (real API)       | Yes        |
+| `test/e2e/codeclaw.e2e.test.ts`       | Bot commands + callbacks (real fs)  | No         |
+| `test/e2e/channel-telegram.e2e.test.ts` | Telegram channel (real API)       | Yes        |
 | `test/channel-telegram.unit.test.ts` | Telegram channel (mocked)        | No         |
-| `test/code-agent.e2e.test.ts`     | Real claude/codex CLI              | Yes        |
+| `test/e2e/code-agent.e2e.test.ts`     | Real claude/codex CLI              | Yes        |
 | `test/code-agent.unit.test.ts`    | Stream parsing (fake scripts)      | No         |
-| `test/restart.e2e.test.ts`        | Restart: PID change (standalone)   | Yes        |
+| `test/e2e/restart.e2e.test.ts`        | Restart: PID change (standalone)   | Yes        |

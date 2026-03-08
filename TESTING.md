@@ -23,39 +23,39 @@ Additionally:
 ## Quick Reference
 
 ```sh
-# Run ALL tests (unit + e2e, needs env vars + CLI auth)
-set -a && source .env && set +a && npx vitest run
+# Run unit tests only (default — no API calls, fast, no env vars needed)
+npx vitest run
 
-# Run all unit tests only (no API calls, fast, no env vars needed)
-npx vitest run test/channel-telegram.unit.test.ts test/code-agent.unit.test.ts
+# Run ALL e2e tests (needs env vars + CLI auth)
+set -a && source .env && set +a && npm run test:e2e
 
 # Run code-agent e2e (requires CLI auth, costs tokens)
-npx vitest run test/code-agent.e2e.test.ts
+npx vitest run test/e2e/code-agent.e2e.test.ts
 
 # Run switch-workdir e2e (requires CLI auth, costs tokens)
-npx vitest run test/switch-workdir.e2e.test.ts
+npx vitest run test/e2e/switch-workdir.e2e.test.ts
 
 # Run restart e2e (requires TELEGRAM_BOT_TOKEN, standalone script)
-set -a && source .env && set +a && npx tsx test/restart.e2e.test.ts
+set -a && source .env && set +a && npx tsx test/e2e/restart.e2e.test.ts
 
 # Run getSessions e2e (requires real session files on disk)
-npx vitest run test/getSessions.e2e.test.ts
+npx vitest run test/e2e/getSessions.e2e.test.ts
 
 # Run Telegram channel e2e (requires TELEGRAM_BOT_TOKEN, interactive)
-set -a && source .env && set +a && npx vitest run test/channel-telegram.e2e.test.ts
+set -a && source .env && set +a && npx vitest run test/e2e/channel-telegram.e2e.test.ts
 
 # Run bot-telegram e2e — automated (requires TELEGRAM_BOT_TOKEN + claude/codex)
-set -a && source .env && set +a && npx vitest run test/bot-telegram.e2e.test.ts
+set -a && source .env && set +a && npx vitest run test/e2e/bot-telegram.e2e.test.ts
 
 # Run bot-telegram e2e — interactive (user clicks buttons / types commands in Telegram)
 set -a && source .env && set +a && \
-  TELEGRAM_INTERACTIVE=1 npx vitest run test/bot-telegram.e2e.test.ts
+  TELEGRAM_INTERACTIVE=1 npx vitest run test/e2e/bot-telegram.e2e.test.ts
 
 # Run a single interactive scenario
 set -a && source .env && set +a && TELEGRAM_INTERACTIVE=1 \
-  npx vitest run test/bot-telegram.e2e.test.ts -t "interactive: agent switch"
+  npx vitest run test/e2e/bot-telegram.e2e.test.ts -t "interactive: agent switch"
 
-# Watch mode
+# Watch mode (unit tests only)
 npx vitest
 ```
 
@@ -65,12 +65,12 @@ npx vitest
 |------|------|---------------|------------|
 | `test/channel-telegram.unit.test.ts` | Unit | TelegramChannel: mocked API, dispatch, handlers, filtering, send/edit/delete | No |
 | `test/code-agent.unit.test.ts` | Unit | Code agent (`code-agent.ts`): codex/claude stream parsing, routing, attachments, edge cases | No |
-| `test/channel-telegram.e2e.test.ts` | E2E (live) | TelegramChannel: real Telegram Bot API, send/receive/edit/photo/file/keyboard/callback | **Yes** (Telegram) |
-| `test/code-agent.e2e.test.ts` | E2E (live) | Code agent against real codex/claude CLIs: single/multi-turn, attachments, browser automation | **Yes** (AI) |
-| `test/bot-telegram.e2e.test.ts` | E2E (live) | TelegramBot: commands, real agent calls, callbacks, session/agent switch, directory browser | **Yes** (Telegram + AI) |
-| `test/switch-workdir.e2e.test.ts` | E2E (live) | `/switch` workdir: switch to `src/`, verify agent sees correct files via real CLI | **Yes** (AI) |
-| `test/restart.e2e.test.ts` | E2E (live) | `/restart`: spawn → SIGUSR2 → new process with different PID | **Yes** (Telegram) |
-| `test/getSessions.e2e.test.ts` | E2E (local) | `getSessions()`: reads real claude/codex session files from disk | No (disk only) |
+| `test/e2e/channel-telegram.e2e.test.ts` | E2E (live) | TelegramChannel: real Telegram Bot API, send/receive/edit/photo/file/keyboard/callback | **Yes** (Telegram) |
+| `test/e2e/code-agent.e2e.test.ts` | E2E (live) | Code agent against real codex/claude CLIs: single/multi-turn, attachments, browser automation | **Yes** (AI) |
+| `test/e2e/bot-telegram.e2e.test.ts` | E2E (live) | TelegramBot: commands, real agent calls, callbacks, session/agent switch, directory browser | **Yes** (Telegram + AI) |
+| `test/e2e/switch-workdir.e2e.test.ts` | E2E (live) | `/switch` workdir: switch to `src/`, verify agent sees correct files via real CLI | **Yes** (AI) |
+| `test/e2e/restart.e2e.test.ts` | E2E (live) | `/restart`: spawn → SIGUSR2 → new process with different PID | **Yes** (Telegram) |
+| `test/e2e/getSessions.e2e.test.ts` | E2E (local) | `getSessions()`: reads real claude/codex session files from disk | No (disk only) |
 
 ## Unit Tests
 
@@ -99,34 +99,34 @@ Uses fake shell scripts that emit JSONL to simulate CLI output. No real API call
 
 ## E2E Tests
 
-### `test/channel-telegram.e2e.test.ts` — TelegramChannel (Live Telegram)
+### `test/e2e/channel-telegram.e2e.test.ts` — TelegramChannel (Live Telegram)
 
 Real Telegram Bot API, interactive. Requires `TELEGRAM_BOT_TOKEN`.
 
 ```sh
-set -a && source .env && set +a && npx vitest run test/channel-telegram.e2e.test.ts
+set -a && source .env && set +a && npx vitest run test/e2e/channel-telegram.e2e.test.ts
 ```
 
 - **SEND** — plain text, HTML rich text, photo (generated PNG), file, inline keyboard, streaming simulation (send + edit + edit), set bottom menu
 - **RECEIVE** — text, photo, file, inline button click (callback), bottom menu command, batch (5 rapid messages)
 - **CLEANUP** — drain pending updates
 
-### `test/bot-telegram.e2e.test.ts` — TelegramBot (Live Telegram + Agent)
+### `test/e2e/bot-telegram.e2e.test.ts` — TelegramBot (Live Telegram + Agent)
 
 Full end-to-end: real Telegram API + real code agent (claude/codex). Interactive.
 Requires `TELEGRAM_BOT_TOKEN` and at least one of `claude` / `codex` installed.
 
 ```sh
 # Automated (no user interaction needed, CHAT_ID auto-detected):
-set -a && source .env && set +a && npx vitest run test/bot-telegram.e2e.test.ts
+set -a && source .env && set +a && npx vitest run test/e2e/bot-telegram.e2e.test.ts
 
 # Interactive (user clicks buttons / types commands in Telegram):
 set -a && source .env && set +a && \
-  TELEGRAM_INTERACTIVE=1 npx vitest run test/bot-telegram.e2e.test.ts
+  TELEGRAM_INTERACTIVE=1 npx vitest run test/e2e/bot-telegram.e2e.test.ts
 
 # Run a single interactive scenario:
 set -a && source .env && set +a && TELEGRAM_INTERACTIVE=1 \
-  npx vitest run test/bot-telegram.e2e.test.ts -t "interactive: agent switch"
+  npx vitest run test/e2e/bot-telegram.e2e.test.ts -t "interactive: agent switch"
 # also: "interactive: session", "interactive: directory",
 #        "interactive: command", "interactive: free text"
 ```
@@ -146,7 +146,7 @@ Each scenario is an independent describe block, runnable individually via `-t`:
 
 Agent-dependent tests auto-skip if neither `claude` nor `codex` is installed.
 
-### `test/code-agent.e2e.test.ts` — Code Agent (Live CLI)
+### `test/e2e/code-agent.e2e.test.ts` — Code Agent (Live CLI)
 
 Hits real `codex` and `claude` CLIs. Requires authentication and costs tokens. Tests are auto-skipped if the CLI is not installed.
 
@@ -154,13 +154,13 @@ Run by category with `-t`:
 
 ```sh
 # Basic: single turn, multi-turn, routing
-npx vitest run test/code-agent.e2e.test.ts -t "codex e2e|claude e2e|doStream e2e"
+npx vitest run test/e2e/code-agent.e2e.test.ts -t "codex e2e|claude e2e|doStream e2e"
 
 # Attachments: image recognition, file summarization
-npx vitest run test/code-agent.e2e.test.ts -t "attachments"
+npx vitest run test/e2e/code-agent.e2e.test.ts -t "attachments"
 
 # Browser: open Chrome, run JS, take screenshot
-npx vitest run test/code-agent.e2e.test.ts -t "browser"
+npx vitest run test/e2e/code-agent.e2e.test.ts -t "browser"
 ```
 
 #### Basic
@@ -179,12 +179,12 @@ npx vitest run test/code-agent.e2e.test.ts -t "browser"
 
 - **Screenshot** — Opens Chrome via shell, runs JS via AppleScript, captures screenshot
 
-### `test/restart.e2e.test.ts` — Restart (Standalone Script)
+### `test/e2e/restart.e2e.test.ts` — Restart (Standalone Script)
 
 Standalone executable script (not vitest). Verifies that `/restart` spawns a new process with a different PID and the old process exits cleanly. Uses `SIGUSR2` to trigger the same code path as the `/restart` Telegram command. Requires `TELEGRAM_BOT_TOKEN`.
 
 ```sh
-set -a && source .env && set +a && npx tsx test/restart.e2e.test.ts
+set -a && source .env && set +a && npx tsx test/e2e/restart.e2e.test.ts
 ```
 
 - **Step 1–2** — Spawn bot, wait for "polling started"
@@ -193,26 +193,26 @@ set -a && source .env && set +a && npx tsx test/restart.e2e.test.ts
 - **Step 7–8** — New process starts polling, verify it is alive
 - **Step 9** — Clean up (SIGTERM new process)
 
-### `test/switch-workdir.e2e.test.ts` — Switch Workdir (Live CLI)
+### `test/e2e/switch-workdir.e2e.test.ts` — Switch Workdir (Live CLI)
 
 Verifies that after `switchWorkdir()`, the agent truly operates inside the new directory. Uses real project subdirectories (`src/`) — no temp dirs, no mocking.
 
 Requires `claude` or `codex` CLI installed and authenticated. Auto-skips if neither is available.
 
 ```sh
-npx vitest run test/switch-workdir.e2e.test.ts
+npx vitest run test/e2e/switch-workdir.e2e.test.ts
 ```
 
 - **switchWorkdir updates bot.workdir and resets all sessions** — workdir changes, all chat sessions reset to null
 - **agent lists src/ files after switching workdir to src/** — real agent call, response contains `code-agent.ts`, `bot.ts`, `cli.ts`
 - **runStream also respects switched workdir** — same verification through `bot.runStream()` full chain
 
-### `test/getSessions.e2e.test.ts` — getSessions (Local Disk)
+### `test/e2e/getSessions.e2e.test.ts` — getSessions (Local Disk)
 
 Reads real session files from `~/.claude` and `~/.codex` directories. No network calls — only disk I/O. Requires that you have previously used `claude` or `codex` in the target workdir so session files exist.
 
 ```sh
-npx vitest run test/getSessions.e2e.test.ts
+npx vitest run test/e2e/getSessions.e2e.test.ts
 ```
 
 - **claude sessions** — Reads session list, verifies `sessionId`, `workdir`, `model`, `createdAt`, `title`

@@ -29,8 +29,8 @@
  *  └──────────────────────────────────────────────────────────┘
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { TelegramChannel } from '../src/channel-telegram.ts';
-import type { TgMessage, TgContext, TgCallbackContext } from '../src/channel-telegram.ts';
+import { TelegramChannel } from '../../src/channel-telegram.ts';
+import type { TgMessage, TgContext, TgCallbackContext } from '../../src/channel-telegram.ts';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';

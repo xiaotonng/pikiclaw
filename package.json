@@ -1,6 +1,6 @@
 {
   "name": "codeclaw",
-  "version": "0.2.11",
+  "version": "0.2.12",
   "description": "The best IM-driven remote coding experience. Bridge AI coding agents to any IM.",
   "type": "module",
   "bin": {
@@ -27,9 +27,12 @@
     "url": "git+https://github.com/xiaotonng/codeclaw.git"
   },
   "scripts": {
+    "dev": "tsx src/cli.ts",
+    "command": "tsx src/run.ts",
     "build": "tsc",
     "prepublishOnly": "npm run build",
     "test": "vitest run",
+    "test:e2e": "vitest run test/e2e/",
     "test:watch": "vitest"
   },
   "engines": {

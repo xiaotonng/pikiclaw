@@ -11,7 +11,7 @@
  *   browser:      npx vitest run test/code-agent.e2e.test.ts -t "browser"
  */
 import { describe, it, expect } from 'vitest';
-import { doStream, doCodexStream, doClaudeStream, type StreamOpts } from '../src/code-agent.ts';
+import { doStream, doCodexStream, doClaudeStream, type StreamOpts } from '../../src/code-agent.ts';
 import { execSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';

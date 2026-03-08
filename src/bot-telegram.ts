@@ -14,6 +14,7 @@ import {
   fmtTokens, fmtUptime, fmtBytes, whichSync, listSubdirs, buildPrompt,
   thinkLabel, parseAllowedChatIds, shellSplit,
 } from './bot.js';
+import { getCodexUsageLive, shutdownCodexServer } from './code-agent.js';
 import { TelegramChannel, type TgContext, type TgCallbackContext, type TgMessage } from './channel-telegram.js';
 import { splitText } from './channel-base.js';
 
@@ -206,11 +207,11 @@ export function collectArtifacts(dirPath: string, manifestPath: string, log?: (m
   return artifacts;
 }
 
-export function buildArtifactPrompt(prompt: string, artifactDir: string, manifestPath: string): string {
-  const base = prompt.trim() || 'Please help with this request.';
+/**
+ * Build the system-level artifact return instructions (for --append-system-prompt / developerInstructions).
+ */
+export function buildArtifactSystemPrompt(artifactDir: string, manifestPath: string): string {
   return [
-    base,
-    '',
     '[Telegram Artifact Return]',
     'If you create screenshots, images, logs, or other files that should be sent back to the Telegram user, write them only inside this directory:',
     artifactDir,
@@ -223,6 +224,16 @@ export function buildArtifactPrompt(prompt: string, artifactDir: string, manifes
     '- Use "photo" for png/jpg/jpeg/webp images. Use "document" for everything else.',
     '- Omit the manifest entirely if there is nothing to send back.',
   ].join('\n');
+}
+
+/**
+ * @deprecated Use buildArtifactSystemPrompt() for the system prompt path.
+ * Kept for Codex resume (thread-level instructions are only set on thread/start,
+ * so resumed threads need the fallback of appending to the user prompt).
+ */
+export function buildArtifactPrompt(prompt: string, artifactDir: string, manifestPath: string): string {
+  const base = prompt.trim() || 'Please help with this request.';
+  return base + '\n\n' + buildArtifactSystemPrompt(artifactDir, manifestPath);
 }
 
 function humanizeUsageStatus(status: string | null | undefined): string {
@@ -436,9 +447,9 @@ export class TelegramBot extends Bot {
 
   private sessionsPageSize = 5;
 
-  private buildSessionsPage(chatId: number, page: number): { text: string; keyboard: { inline_keyboard: { text: string; callback_data: string }[][] } } {
+  private async buildSessionsPage(chatId: number, page: number): Promise<{ text: string; keyboard: { inline_keyboard: { text: string; callback_data: string }[][] } }> {
     const cs = this.chat(chatId);
-    const res = this.fetchSessions(cs.agent);
+    const res = await this.fetchSessions(cs.agent);
     const sessions = res.ok ? res.sessions : [];
     const total = sessions.length;
     const totalPages = Math.max(1, Math.ceil(total / this.sessionsPageSize));
@@ -470,16 +481,22 @@ export class TelegramBot extends Bot {
 
   private async cmdSessions(ctx: TgContext) {
     const cs = this.chat(ctx.chatId);
-    const res = this.fetchSessions(cs.agent);
+    const res = await this.fetchSessions(cs.agent);
     if (!res.ok) { await ctx.reply(`Error: ${res.error}`); return; }
     if (!res.sessions.length) { await ctx.reply(`No ${cs.agent} sessions found in:\n<code>${escapeHtml(this.workdir)}</code>`, { parseMode: 'HTML' }); return; }
 
-    const { text, keyboard } = this.buildSessionsPage(ctx.chatId, 0);
+    const { text, keyboard } = await this.buildSessionsPage(ctx.chatId, 0);
     await ctx.reply(text, { parseMode: 'HTML', keyboard });
   }
 
   private async cmdStatus(ctx: TgContext) {
     const d = this.getStatusData(ctx.chatId);
+
+    // For codex, fetch real-time usage via WebSocket instead of stale DB data.
+    const usage = d.agent === 'codex'
+      ? await getCodexUsageLive().catch(() => d.usage)
+      : d.usage;
+
     const lines = [
       `<b>codeclaw</b> v${d.version}\n`,
       `<b>Uptime:</b> ${fmtUptime(d.uptime)}`,
@@ -494,7 +511,7 @@ export class TelegramBot extends Bot {
     if (d.running) {
       lines.push(`<b>Running:</b> ${fmtUptime(Date.now() - d.running.startedAt)} - ${escapeHtml(d.running.prompt.slice(0, 50))}`);
     }
-    lines.push(...formatProviderUsageLines(d.usage), '', '<b>Bot Usage</b>', `  Turns: ${d.stats.totalTurns}`);
+    lines.push(...formatProviderUsageLines(usage), '', '<b>Bot Usage</b>', `  Turns: ${d.stats.totalTurns}`);
     if (d.stats.totalInputTokens || d.stats.totalOutputTokens) {
       lines.push(`  In: ${fmtTokens(d.stats.totalInputTokens)}  Out: ${fmtTokens(d.stats.totalOutputTokens)}`);
       if (d.stats.totalCachedTokens) lines.push(`  Cached: ${fmtTokens(d.stats.totalCachedTokens)}`);
@@ -550,7 +567,7 @@ export class TelegramBot extends Bot {
 
   private async cmdModels(ctx: TgContext) {
     const cs = this.chat(ctx.chatId);
-    const res = this.fetchModels(cs.agent);
+    const res = await this.fetchModels(cs.agent);
     const currentModel = this.modelForAgent(cs.agent);
     const lines = [`<b>Models for ${escapeHtml(cs.agent)}</b>`];
     if (res.sources.length) lines.push(`<i>Source: ${escapeHtml(res.sources.join(', '))}</i>`);
@@ -630,11 +647,14 @@ export class TelegramBot extends Bot {
 
     const cs = this.chat(ctx.chatId);
     const artifactTurn = this.createArtifactTurn(ctx.chatId);
-    const prompt = buildArtifactPrompt(
-      buildPrompt(text, msg.files),
-      artifactTurn.dir,
-      artifactTurn.manifestPath,
-    );
+    const artifactSystemPrompt = buildArtifactSystemPrompt(artifactTurn.dir, artifactTurn.manifestPath);
+    const basePrompt = buildPrompt(text, msg.files);
+    // Codex: developerInstructions only takes effect on thread/start (new session).
+    // For resumed Codex sessions, fall back to appending artifact instructions to the user prompt.
+    const needsPromptFallback = cs.agent === 'codex' && !!cs.sessionId;
+    const prompt = needsPromptFallback
+      ? basePrompt + '\n\n' + artifactSystemPrompt
+      : basePrompt;
     this.log(`[handleMessage] chat=${ctx.chatId} agent=${cs.agent} session=${cs.sessionId || '(new)'} prompt="${prompt.slice(0, 100)}" files=${msg.files.length}`);
 
     const phId = await ctx.reply(`<code>${escapeHtml(cs.agent)} | thinking ...</code>`, { parseMode: 'HTML' });
@@ -678,18 +698,34 @@ export class TelegramBot extends Bot {
         editCount++;
       };
 
-      const result = await this.runStream(prompt, cs, msg.files, onText);
+      const result = await this.runStream(prompt, cs, msg.files, onText, needsPromptFallback ? undefined : artifactSystemPrompt);
       const artifacts = this.collectArtifacts(artifactTurn.dir, artifactTurn.manifestPath);
 
       this.log(
         `[handleMessage] done agent=${cs.agent} ok=${result.ok} session=${result.sessionId || '?'} elapsed=${result.elapsedS.toFixed(1)}s edits=${editCount} ` +
-        `tokens=in:${fmtTokens(result.inputTokens)}/cached:${fmtTokens(result.cachedInputTokens)}/out:${fmtTokens(result.outputTokens)}`
+        `tokens=in:${fmtTokens(result.inputTokens)}/cached:${fmtTokens(result.cachedInputTokens)}/out:${fmtTokens(result.outputTokens)} artifacts=${artifacts.length}`
       );
       this.log(`[handleMessage] response preview: "${result.message.slice(0, 150)}"`);
 
-      const finalMsgId = await this.sendFinalReply(ctx, phId, cs.agent, result);
-      await this.sendArtifacts(ctx, finalMsgId ?? phId, artifacts);
-      this.log(`[handleMessage] final reply sent to chat=${ctx.chatId}`);
+      // If artifacts were collected successfully, suppress the "incomplete" warning
+      if (artifacts.length && result.incomplete && result.message.trim()) {
+        result.incomplete = false;
+        this.log(`[handleMessage] suppressed incomplete flag: artifacts present`);
+      }
+
+      // Combine photo + text into one message when text is short enough for caption
+      const hasPhoto = artifacts.some(a => a.kind === 'photo');
+      const msgText = result.message.trim();
+      const canCombine = hasPhoto && msgText.length > 0 && msgText.length <= 1024;
+
+      if (canCombine) {
+        await this.channel.deleteMessage(ctx.chatId, phId);
+        await this.sendArtifacts(ctx, ctx.messageId, artifacts, msgText);
+      } else {
+        const finalMsgId = await this.sendFinalReply(ctx, phId, cs.agent, result);
+        await this.sendArtifacts(ctx, finalMsgId ?? phId, artifacts);
+      }
+      this.log(`[handleMessage] final reply sent to chat=${ctx.chatId} combined=${canCombine}`);
     } finally {
       this.activeTasks.delete(ctx.chatId);
       this.cleanupArtifactTurn(artifactTurn.dir);
@@ -711,11 +747,14 @@ export class TelegramBot extends Bot {
     return collectArtifacts(dirPath, manifestPath, msg => this.log(msg));
   }
 
-  private async sendArtifacts(ctx: TgContext, replyTo: number, artifacts: BotArtifact[]) {
-    for (const artifact of artifacts) {
+  private async sendArtifacts(ctx: TgContext, replyTo: number, artifacts: BotArtifact[], textCaption?: string) {
+    for (let i = 0; i < artifacts.length; i++) {
+      const artifact = artifacts[i];
+      // For the first photo artifact, use the text response as caption when provided
+      const caption = (i === 0 && textCaption && artifact.kind === 'photo') ? textCaption : artifact.caption;
       try {
         await this.channel.sendFile(ctx.chatId, artifact.filePath, {
-          caption: artifact.caption,
+          caption,
           replyTo,
           asPhoto: artifact.kind === 'photo',
         });
@@ -742,13 +781,9 @@ export class TelegramBot extends Bot {
       if (result.inputTokens != null) tp.push(`in: ${fmtTokens(result.inputTokens)}`);
       if (result.cachedInputTokens) tp.push(`cached: ${fmtTokens(result.cachedInputTokens)}`);
       if (result.outputTokens != null) tp.push(`out: ${fmtTokens(result.outputTokens)}`);
-      // Context window usage percentage from CLI-reported contextWindow
-      // For Codex use cumulative input (= full session context); for Claude use inputTokens
-      const ctxMax = result.contextWindow;
-      const ctxInput = result.codexCumulative?.input ?? result.inputTokens;
-      if (ctxMax && ctxInput != null) {
-        const pct = (ctxInput / ctxMax * 100).toFixed(1);
-        tp.push(`ctx: ${pct}%`);
+      // Context window usage percentage (input + cached + cacheCreation + output)
+      if (result.contextPercent != null) {
+        tp.push(`ctx: ${result.contextPercent}%`);
       }
       tokenBlock = `\n<blockquote expandable>${tp.join('  ')}</blockquote>`;
     }
@@ -873,7 +908,7 @@ export class TelegramBot extends Bot {
 
     if (data.startsWith('sp:')) {
       const page = parseInt(data.slice(3), 10) || 0;
-      const { text, keyboard } = this.buildSessionsPage(ctx.chatId, page);
+      const { text, keyboard } = await this.buildSessionsPage(ctx.chatId, page);
       await ctx.editReply(ctx.messageId, text, { parseMode: 'HTML', keyboard });
       await ctx.answerCallback('');
       return;
@@ -884,17 +919,31 @@ export class TelegramBot extends Bot {
       const cs = this.chat(ctx.chatId);
       if (sessionId === 'new') {
         cs.sessionId = null;
-        cs.codexCumulative = undefined;
         await ctx.answerCallback('New session');
         await ctx.editReply(ctx.messageId, 'Session reset. Send a message to start.', {});
       } else {
         cs.sessionId = sessionId;
-        cs.codexCumulative = undefined;
         await ctx.answerCallback(`Session: ${sessionId.slice(0, 12)}`);
+
         await ctx.editReply(ctx.messageId,
           `Switched to session: <code>${escapeHtml(sessionId.slice(0, 16))}</code>`,
           { parseMode: 'HTML' },
         );
+
+        // Send the last turn as a separate message (auto-splits if too long)
+        try {
+          const tail = await this.fetchSessionTail(cs.agent, sessionId, 10);
+          if (tail.ok && tail.messages.length) {
+            const lastUser = [...tail.messages].reverse().find(m => m.role === 'user');
+            const lastAssistant = [...tail.messages].reverse().find(m => m.role === 'assistant');
+            const parts: string[] = [];
+            if (lastUser) parts.push(`<b>You:</b>\n${escapeHtml(lastUser.text)}`);
+            if (lastAssistant) parts.push(`<b>${escapeHtml(cs.agent)}:</b>\n${escapeHtml(lastAssistant.text)}`);
+            if (parts.length) {
+              await ctx.reply(parts.join('\n\n'), { parseMode: 'HTML' });
+            }
+          }
+        } catch { /* non-critical */ }
       }
       return;
     }
@@ -908,7 +957,6 @@ export class TelegramBot extends Bot {
       }
       cs.agent = agent;
       cs.sessionId = null;
-      cs.codexCumulative = undefined;
       this.log(`agent switched to ${agent} chat=${ctx.chatId}`);
       await ctx.answerCallback(`Switched to ${agent}`);
       await ctx.editReply(ctx.messageId,
@@ -928,7 +976,6 @@ export class TelegramBot extends Bot {
       }
       this.setModelForAgent(cs.agent, modelId);
       cs.sessionId = null;
-      cs.codexCumulative = undefined;
       this.log(`model switched to ${modelId} for ${cs.agent} chat=${ctx.chatId}`);
       await ctx.answerCallback(`Switched to ${modelId}`);
       await ctx.editReply(ctx.messageId,
@@ -993,6 +1040,7 @@ export class TelegramBot extends Bot {
       this.log(`${sig}, shutting down...`);
       this.channel.disconnect();
       this.stopKeepAlive();
+      shutdownCodexServer();
     };
     process.on('SIGINT', () => shutdown('SIGINT'));
     process.on('SIGTERM', () => shutdown('SIGTERM'));

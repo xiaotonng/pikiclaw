@@ -13,9 +13,9 @@ import { execSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { doClaudeStream, type StreamOpts } from '../src/code-agent.ts';
-import { buildArtifactPrompt, collectArtifacts } from '../src/bot-telegram.ts';
-import { TelegramChannel } from '../src/channel-telegram.ts';
+import { doClaudeStream, type StreamOpts } from '../../src/code-agent.ts';
+import { buildArtifactSystemPrompt, collectArtifacts } from '../../src/bot-telegram.ts';
+import { TelegramChannel } from '../../src/channel-telegram.ts';
 
 function hasCmd(cmd: string): boolean {
   try { execSync(`which ${cmd}`, { stdio: 'ignore' }); return true; } catch { return false; }
@@ -82,24 +82,21 @@ describe.skipIf(SKIP)('artifact return e2e', () => {
     const manifestPath = path.join(artifactDir, ARTIFACT_MANIFEST);
 
     // 2. Ask real claude to create files + manifest
-    const prompt = buildArtifactPrompt(
-      [
-        'Create the following files in the artifact directory provided:',
-        '1. A small valid PNG image file named "screenshot.png" (create a minimal valid PNG using printf with raw bytes or python)',
-        '2. A plain text file named "console.txt" containing the text "hello from artifact test"',
-        'Then write the manifest.json as instructed.',
-        'Use "photo" kind for the PNG and "document" kind for the text file.',
-        'Add caption "Test screenshot" for the PNG and "Console output" for the text file.',
-        'Reply with exactly: ARTIFACTS_CREATED',
-      ].join('\n'),
-      artifactDir,
-      manifestPath,
-    );
+    const prompt = [
+      'Create the following files in the artifact directory provided:',
+      '1. A small valid PNG image file named "screenshot.png" (create a minimal valid PNG using printf with raw bytes or python)',
+      '2. A plain text file named "console.txt" containing the text "hello from artifact test"',
+      'Then write the manifest.json as instructed.',
+      'Use "photo" kind for the PNG and "document" kind for the text file.',
+      'Add caption "Test screenshot" for the PNG and "Console output" for the text file.',
+      'Reply with exactly: ARTIFACTS_CREATED',
+    ].join('\n');
 
     const result = await doClaudeStream(baseOpts({
       prompt,
       workdir: tmpDir,
       timeout: 120,
+      claudeAppendSystemPrompt: buildArtifactSystemPrompt(artifactDir, manifestPath),
     }));
 
     expect(result.ok).toBe(true);

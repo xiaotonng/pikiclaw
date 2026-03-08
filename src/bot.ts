@@ -9,13 +9,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execSync, spawn } from 'node:child_process';
 import {
-  doStream, getSessions, getUsage, listAgents, listModels,
+  doStream, getSessions, getSessionTail, getUsage, listAgents, listModels,
   type Agent, type StreamOpts, type StreamResult, type SessionInfo, type UsageResult,
-  type ModelInfo, type ModelListResult,
+  type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult,
 } from './code-agent.js';
 
-export { type Agent, type StreamResult, type SessionInfo, type UsageResult, type ModelInfo, type ModelListResult };
-export const VERSION = '0.2.11';
+export { type Agent, type StreamResult, type SessionInfo, type UsageResult, type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult };
+export const VERSION = '0.2.12';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -119,8 +119,6 @@ export function buildPrompt(text: string, files: string[]): string {
 export interface ChatState {
   agent: Agent;
   sessionId: string | null;
-  /** Cumulative Codex token totals for this session, used to compute per-invocation deltas */
-  codexCumulative?: { input: number; output: number; cached: number };
 }
 
 // ---------------------------------------------------------------------------
@@ -185,6 +183,10 @@ export class Bot {
     return getSessions({ agent, workdir: this.workdir });
   }
 
+  fetchSessionTail(agent: Agent, sessionId: string, limit?: number) {
+    return getSessionTail({ agent, sessionId, workdir: this.workdir, limit });
+  }
+
   fetchAgents() {
     return listAgents();
   }
@@ -234,7 +236,7 @@ export class Bot {
   switchWorkdir(newPath: string) {
     const old = this.workdir;
     this.workdir = newPath;
-    for (const [, cs] of this.chats) { cs.sessionId = null; cs.codexCumulative = undefined; }
+    for (const [, cs] of this.chats) { cs.sessionId = null; }
     this.log(`switch workdir: ${old} -> ${newPath}`);
     return old;
   }
@@ -242,6 +244,7 @@ export class Bot {
   async runStream(
     prompt: string, cs: ChatState, attachments: string[],
     onText: (text: string, thinking: string) => void,
+    systemPrompt?: string,
   ): Promise<StreamResult> {
     this.log(`[runStream] agent=${cs.agent} session=${cs.sessionId || '(new)'} workdir=${this.workdir} timeout=${this.runTimeout}s attachments=${attachments.length}`);
     if (cs.agent === 'claude') {
@@ -255,9 +258,10 @@ export class Bot {
       sessionId: snapshotSessionId, model: null, thinkingEffort: this.codexReasoningEffort, onText,
       attachments: attachments.length ? attachments : undefined,
       codexModel: this.codexModel, codexFullAccess: this.codexFullAccess,
+      codexDeveloperInstructions: systemPrompt || undefined,
       codexExtraArgs: this.codexExtraArgs.length ? this.codexExtraArgs : undefined,
-      codexPrevCumulative: cs.codexCumulative,
       claudeModel: this.claudeModel, claudePermissionMode: this.claudePermissionMode,
+      claudeAppendSystemPrompt: systemPrompt || undefined,
       claudeExtraArgs: this.claudeExtraArgs.length ? this.claudeExtraArgs : undefined,
     };
     const result = await doStream(opts);
@@ -265,8 +269,6 @@ export class Bot {
     if (result.inputTokens) this.stats.totalInputTokens += result.inputTokens;
     if (result.outputTokens) this.stats.totalOutputTokens += result.outputTokens;
     if (result.cachedInputTokens) this.stats.totalCachedTokens += result.cachedInputTokens;
-    // Store cumulative Codex totals for next invocation delta
-    if (result.codexCumulative) cs.codexCumulative = result.codexCumulative;
     // Only update sessionId if it hasn't been changed externally (e.g. user switched session during run)
     if (result.sessionId && cs.sessionId === snapshotSessionId) cs.sessionId = result.sessionId;
     this.log(`[runStream] completed turn=${this.stats.totalTurns} cumulative: in=${fmtTokens(this.stats.totalInputTokens)} out=${fmtTokens(this.stats.totalOutputTokens)} cached=${fmtTokens(this.stats.totalCachedTokens)}`);

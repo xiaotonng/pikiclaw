@@ -10,8 +10,8 @@
  * Run:  npx vitest run test/switch-workdir.e2e.test.ts
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { doStream, type StreamOpts } from '../src/code-agent.ts';
-import { Bot } from '../src/bot.ts';
+import { doStream, type StreamOpts } from '../../src/code-agent.ts';
+import { Bot } from '../../src/bot.ts';
 import { execSync } from 'node:child_process';
 import path from 'node:path';
 

@@ -35,9 +35,9 @@
  *  +----------------------------------------------------------------------+
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { TelegramBot } from '../src/bot-telegram.ts';
-import { TelegramChannel } from '../src/channel-telegram.ts';
-import type { TgMessage, TgContext, TgCallbackContext } from '../src/channel-telegram.ts';
+import { TelegramBot } from '../../src/bot-telegram.ts';
+import { TelegramChannel } from '../../src/channel-telegram.ts';
+import type { TgMessage, TgContext, TgCallbackContext } from '../../src/channel-telegram.ts';
 import { execSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
