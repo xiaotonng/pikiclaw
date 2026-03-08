@@ -51,6 +51,7 @@ export interface StreamResult {
   error: string | null;
   stopReason: string | null;
   incomplete: boolean;
+  activity: string | null;
 }
 
 const Q = (a: string) => /[^a-zA-Z0-9_./:=@-]/.test(a) ? `'${a.replace(/'/g, "'\\''")}'` : a;
@@ -157,6 +158,7 @@ async function run(cmd: string[], opts: StreamOpts, parseLine: (ev: any, s: any)
     error,
     stopReason: s.stopReason,
     incomplete,
+    activity: null,
   };
 }
 
@@ -386,7 +388,7 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
       sessionId: opts.sessionId, model: opts.model, thinkingEffort: opts.thinkingEffort,
       elapsedS: (Date.now() - start) / 1000, inputTokens: null, outputTokens: null,
       cachedInputTokens: null, cacheCreationInputTokens: null, contextWindow: null, contextUsedTokens: null, contextPercent: null, error: 'Failed to start codex app-server.',
-      stopReason: null, incomplete: true,
+      stopReason: null, incomplete: true, activity: null,
     };
   }
 
@@ -442,7 +444,7 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
       sessionId: opts.sessionId, model: opts.model, thinkingEffort: opts.thinkingEffort,
       elapsedS: (Date.now() - start) / 1000, inputTokens: null, outputTokens: null,
       cachedInputTokens: null, cacheCreationInputTokens: null, contextWindow: null, contextUsedTokens: null, contextPercent: null, error: errMsg,
-      stopReason: null, incomplete: true,
+      stopReason: null, incomplete: true, activity: null,
     };
   }
 
@@ -598,7 +600,7 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
       sessionId: s.sessionId, model: s.model, thinkingEffort: s.thinkingEffort,
       elapsedS: (Date.now() - start) / 1000, inputTokens: null, outputTokens: null,
       cachedInputTokens: null, cacheCreationInputTokens: null, contextWindow: null, contextUsedTokens: null, contextPercent: null, error: errMsg,
-      stopReason: null, incomplete: true,
+      stopReason: null, incomplete: true, activity: null,
     };
   }
 
@@ -636,6 +638,7 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
     error,
     stopReason,
     incomplete,
+    activity: s.activity.trim() || null,
   };
 }
 

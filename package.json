@@ -1,6 +1,6 @@
 {
   "name": "codeclaw",
-  "version": "0.2.14",
+  "version": "0.2.15",
   "description": "The best IM-driven remote coding experience. Bridge AI coding agents to any IM.",
   "type": "module",
   "bin": {

@@ -165,6 +165,38 @@ describe('TelegramBot.cmdStatus', () => {
 });
 
 describe('TelegramBot.handleMessage streaming', () => {
+  it('keeps artifact instructions out of the user prompt for resumed codex sessions', async () => {
+    const { bot, ctx } = createBot();
+    const cs = bot.chat(ctx.chatId);
+    cs.agent = 'codex';
+    cs.sessionId = 'sess-existing';
+
+    const runStream = vi.spyOn(bot, 'runStream').mockImplementation(async (prompt: string, _cs: any, _files: string[], _onText: any, systemPrompt?: string) => {
+      expect(prompt).toBe('Inspect this repo');
+      expect(prompt).not.toContain('[Telegram Artifact Return]');
+      expect(systemPrompt).toContain('[Telegram Artifact Return]');
+      return {
+        ok: true,
+        message: 'done',
+        thinking: null,
+        sessionId: 'sess-existing',
+        model: 'gpt-5.4',
+        thinkingEffort: 'high',
+        elapsedS: 1.2,
+        inputTokens: 9,
+        outputTokens: 3,
+        cachedInputTokens: null,
+        error: null,
+        stopReason: null,
+        incomplete: false,
+      };
+    });
+
+    await (bot as any).handleMessage({ text: 'Inspect this repo', files: [] }, ctx);
+
+    expect(runStream).toHaveBeenCalledOnce();
+  });
+
   it('keeps codex commentary while hiding raw command details in the streaming preview', async () => {
     const { bot, ctx, edits } = createBot();
     bot.chat(ctx.chatId).agent = 'codex';

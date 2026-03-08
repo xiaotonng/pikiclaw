@@ -64,6 +64,20 @@ function mdToTgHtml(text: string): string {
       i++; continue;
     }
     if (inCode) { codeLines.push(line); i++; continue; }
+    // Markdown table: collect consecutive lines starting with '|'
+    if (stripped.startsWith('|') && stripped.endsWith('|')) {
+      const tableLines: string[] = [];
+      while (i < lines.length) {
+        const tl = lines[i].trim();
+        if (!tl.startsWith('|')) break;
+        // skip separator rows like |---|---|
+        if (/^\|[\s\-:|]+\|$/.test(tl)) { i++; continue; }
+        tableLines.push(tl);
+        i++;
+      }
+      if (tableLines.length) result.push(`<pre>${escapeHtml(tableLines.join('\n'))}</pre>`);
+      continue;
+    }
     const hm = line.match(/^(#{1,6})\s+(.+)$/);
     if (hm) { result.push(`<b>${mdInline(hm[2])}</b>`); i++; continue; }
     result.push(mdInline(line)); i++;
@@ -219,8 +233,7 @@ export function buildArtifactSystemPrompt(artifactDir: string, manifestPath: str
 
 /**
  * @deprecated Use buildArtifactSystemPrompt() for the system prompt path.
- * Kept for Codex resume (thread-level instructions are only set on thread/start,
- * so resumed threads need the fallback of appending to the user prompt).
+ * Kept for legacy prompt sanitization tests and historical sessions only.
  */
 export function buildArtifactPrompt(prompt: string, artifactDir: string, manifestPath: string): string {
   const base = prompt.trim() || 'Please help with this request.';
@@ -750,12 +763,7 @@ export class TelegramBot extends Bot {
     const artifactTurn = this.createArtifactTurn(ctx.chatId);
     const artifactSystemPrompt = buildArtifactSystemPrompt(artifactTurn.dir, artifactTurn.manifestPath);
     const basePrompt = buildPrompt(text, msg.files);
-    // Codex: developerInstructions only takes effect on thread/start (new session).
-    // For resumed Codex sessions, fall back to appending artifact instructions to the user prompt.
-    const needsPromptFallback = cs.agent === 'codex' && !!cs.sessionId;
-    const prompt = needsPromptFallback
-      ? basePrompt + '\n\n' + artifactSystemPrompt
-      : basePrompt;
+    const prompt = basePrompt;
     this.log(`[handleMessage] chat=${ctx.chatId} agent=${cs.agent} session=${cs.sessionId || '(new)'} prompt="${prompt.slice(0, 100)}" files=${msg.files.length}`);
 
     const phId = await ctx.reply(`<code>${escapeHtml(cs.agent)} | thinking ...</code>`, { parseMode: 'HTML' });
@@ -859,7 +867,7 @@ export class TelegramBot extends Bot {
         schedulePreviewEdit();
       };
 
-      const result = await this.runStream(prompt, cs, msg.files, onText, needsPromptFallback ? undefined : artifactSystemPrompt);
+      const result = await this.runStream(prompt, cs, msg.files, onText, artifactSystemPrompt);
       await flushPreviewEdits();
       const artifacts = this.collectArtifacts(artifactTurn.dir, artifactTurn.manifestPath);
 
@@ -875,19 +883,9 @@ export class TelegramBot extends Bot {
         this.log(`[handleMessage] suppressed incomplete flag: artifacts present`);
       }
 
-      // Combine photo + text into one message when text is short enough for caption
-      const hasPhoto = artifacts.some(a => a.kind === 'photo');
-      const msgText = result.message.trim();
-      const canCombine = hasPhoto && msgText.length > 0 && msgText.length <= 1024;
-
-      if (canCombine) {
-        await this.channel.deleteMessage(ctx.chatId, phId);
-        await this.sendArtifacts(ctx, ctx.messageId, artifacts, msgText);
-      } else {
-        const finalMsgId = await this.sendFinalReply(ctx, phId, cs.agent, result);
-        await this.sendArtifacts(ctx, finalMsgId ?? phId, artifacts);
-      }
-      this.log(`[handleMessage] final reply sent to chat=${ctx.chatId} combined=${canCombine}`);
+      const finalMsgId = await this.sendFinalReply(ctx, phId, cs.agent, result);
+      await this.sendArtifacts(ctx, finalMsgId ?? phId, artifacts);
+      this.log(`[handleMessage] final reply sent to chat=${ctx.chatId}`);
     } finally {
       this.activeTasks.delete(ctx.chatId);
       this.cleanupArtifactTurn(artifactTurn.dir);
@@ -909,11 +907,9 @@ export class TelegramBot extends Bot {
     return collectArtifacts(dirPath, manifestPath, msg => this.log(msg));
   }
 
-  private async sendArtifacts(ctx: TgContext, replyTo: number, artifacts: BotArtifact[], textCaption?: string) {
-    for (let i = 0; i < artifacts.length; i++) {
-      const artifact = artifacts[i];
-      // For the first photo artifact, use the text response as caption when provided
-      const caption = (i === 0 && textCaption && artifact.kind === 'photo') ? textCaption : artifact.caption;
+  private async sendArtifacts(ctx: TgContext, replyTo: number, artifacts: BotArtifact[]) {
+    for (const artifact of artifacts) {
+      const caption = artifact.caption;
       try {
         await this.channel.sendFile(ctx.chatId, artifact.filePath, {
           caption,
@@ -950,6 +946,16 @@ export class TelegramBot extends Bot {
       tokenBlock = `\n<blockquote expandable>${tp.join('  ')}</blockquote>`;
     }
 
+    let activityHtml = '';
+    if (result.activity) {
+      const summary = summarizeActivityForPreview(result.activity);
+      if (summary) {
+        let display = summary;
+        if (display.length > 800) display = '...\n' + display.slice(-800);
+        activityHtml = `<blockquote><b>Activity</b>\n${escapeHtml(display)}</blockquote>\n\n`;
+      }
+    }
+
     let thinkingHtml = '';
     if (result.thinking) {
       const label = thinkLabel(agent);
@@ -971,7 +977,7 @@ export class TelegramBot extends Bot {
     }
 
     const bodyHtml = mdToTgHtml(result.message);
-    const fullHtml = `${statusHtml}${thinkingHtml}${bodyHtml}\n\n${meta}${tokenBlock}`;
+    const fullHtml = `${activityHtml}${statusHtml}${thinkingHtml}${bodyHtml}\n\n${meta}${tokenBlock}`;
     let finalMsgId: number | null = phId;
 
     if (fullHtml.length <= 3900) {
@@ -983,7 +989,7 @@ export class TelegramBot extends Bot {
     } else {
       // Send full content as split plain-text messages instead of a file.
       // First message: edit placeholder with meta + thinking + beginning of body.
-      const headerHtml = `${statusHtml}${thinkingHtml}`;
+      const headerHtml = `${activityHtml}${statusHtml}${thinkingHtml}`;
       const footerHtml = `\n\n${meta}${tokenBlock}`;
       const maxFirst = 3900 - headerHtml.length - footerHtml.length;
       let firstBody: string;
