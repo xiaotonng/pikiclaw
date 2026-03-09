@@ -1,550 +1,284 @@
 <div align="center">
 
-# codeclaw
+# codeclaw 🦞
 
-**Turn your laptop into a chat-controlled AI agent.**
+**为您组合最顶级的工具，将长程自动化的体验推向极致。**
 
-Super-light local agent control plane for Telegram.
+*一切在本地运行。将全球最好的 IM 入口（Telegram / 飞书）与全球最强的本地执行引擎（Claude Code / Codex）完美连接。不需要云端，不需要沙盒，你的电脑就是最强的 Agent 平台。*
 
+```bash
+npx codeclaw -t YOUR_BOT_TOKEN
+```
+
+[![npm](https://img.shields.io/npm/v/codeclaw)](https://www.npmjs.com/package/codeclaw)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node.js 18+](https://img.shields.io/badge/Node.js-18+-green.svg)](https://nodejs.org)
-[![npm](https://img.shields.io/npm/v/codeclaw)](https://www.npmjs.com/package/codeclaw)
 
-[English](#english) | [中文](#中文)
+<!-- TODO: 替换为实际 demo GIF -->
+<!-- ![demo](docs/assets/demo.gif) -->
+`📹 GIF 占位：手机 Telegram 发送任务 → 电脑执行 → 流式进度 → 收到结果文件`
 
 </div>
 
 ---
 
-<a id="english"></a>
+## 🚀 快速开始
 
-## What is codeclaw?
+### 1. 准备
 
-`codeclaw` runs on **your machine** and lets you control local AI agents from **Telegram**.
+- Node.js 18+
+- 本机已安装并登录 [`claude`](https://docs.anthropic.com/en/docs/claude-code) 或 [`codex`](https://github.com/openai/codex)
+- 一个 [Telegram Bot Token](https://t.me/BotFather)（飞书即将支持）
 
-It is not a hosted platform and not a giant agent operating system. It is a small, execution-first control layer for your own laptop:
-
-- **Chat-native** — send tasks from Telegram instead of living in a terminal window
-- **Local-first** — agents run against your real machine, real files, real browser, real tools
-- **Execution-first** — optimized for getting work done, not just chatting about work
-- **Coding-strong** — Claude Code + Codex CLI make software tasks the strongest use case
-- **General-purpose** — also useful for browser tasks, file review, screenshots, host inspection, and project-specific workflows
-
-If you want “an AI assistant in chat”, there are many options.
-If you want “my laptop, remotely, with strong agents attached”, that is what `codeclaw` is for.
-
-## Why it exists
-
-Most remote agent setups break in one of four ways:
-
-- **Too heavy** — too much setup, too many moving parts
-- **Too weak** — the control layer is fine, but the underlying agent cannot really execute hard tasks
-- **Too black-box** — you send a task and wait with no idea what is happening
-- **Too fragile** — long tasks die when the laptop sleeps or the session gets interrupted
-
-`codeclaw` focuses on a tighter loop:
-
-- **Use the best local agents you already trust** — Claude Code and Codex CLI
-- **Control them from the chat app you already open all day** — Telegram today
-- **See progress while the task is running** — streaming previews, activity, reasoning, token stats
-- **Get actual outputs back** — screenshots, logs, documents, long markdown responses
-
-## Best-fit scenarios
-
-### 1. Remote coding from your phone
-
-Ask your machine to:
-
-- inspect a repo
-- modify files
-- run tests
-- summarize failures
-- continue a multi-turn session
-
-This is the strongest use case because `codeclaw` plugs directly into `claude` and `codex`.
-
-### 2. Continuous browser / GUI tasks
-
-When the underlying agent can operate browser or desktop tools, `codeclaw` makes those tasks usable over chat:
-
-- you start the task from Telegram
-- you see streaming progress instead of waiting blindly
-- the machine stays awake during long runs
-- screenshots or generated files can be returned to Telegram
-
-This is especially valuable for multi-step GUI verification and “go do it and show me what happened” workflows.
-
-### 3. Visual triage
-
-Send a screenshot, diagram, or document and ask the agent to:
-
-- explain what is wrong
-- compare UI states
-- inspect a design
-- summarize an attached file
-
-### 4. Host-side assistance
-
-Use chat to inspect the machine itself:
-
-- CPU / memory / disk
-- top processes
-- current workdir
-- active session
-- provider usage windows
-
-### 5. Project-defined workflows
-
-Expose custom project skills from `.claude/commands/` or `.claude/skills/` as Telegram commands.
-
-## What makes it different
-
-- **Runs locally** — no server, no Docker, no hosted control plane
-- **Starts fast** — `npx codeclaw -t ...`
-- **Built for long-running work** — session persistence, keep-alive, streaming updates
-- **Strong by default** — uses Claude Code and Codex CLI instead of a weaker built-in agent
-- **Practical over chat** — file input, image input, artifact return, long-output handling, quick replies
-
-## Current scope
-
-- **Production-ready channel:** Telegram
-- **Supported agents:** Claude Code, Codex CLI
-- **Planned channels:** Feishu / WhatsApp
-- **Platform note:** keep-alive support is implemented for macOS and Linux
-
-## Features
-
-- **Telegram control surface** — use Telegram as the remote front-end for your local agent
-- **Multi-agent switching** — switch between Claude Code and Codex via `/agents`
-- **Model switching** — list and switch models with `/models`
-- **Real-time streaming** — live message updates while the agent is working
-- **Multi-session continuity** — resume named sessions instead of starting over every turn
-- **Workdir switching** — browse directories and switch projects from chat
-- **Image and file input** — send screenshots and documents to the agent
-- **Artifact return** — send screenshots, logs, and generated files back to Telegram
-- **Long-output fallback** — oversized replies are split and attached as a `.md` file when needed
-- **Reasoning display** — show Claude/Codex thinking or reasoning blocks when available
-- **Provider usage visibility** — inspect recent Codex / Claude usage windows
-- **Host status** — view CPU, memory, disk, and top processes
-- **Access control** — restrict the bot to specific Telegram chat IDs
-- **Safe mode** — require confirmation for destructive operations
-- **Project skills** — auto-expose custom workflows from `.claude/commands/` and `.claude/skills/`
-- **Restart flow** — update and restart from Telegram
-
-## How it works
-
-```text
-Telegram
-  ↕
-codeclaw
-  ↕
-claude / codex CLI
-  ↕
-your laptop: files, browser, shell, project
-```
-
-`codeclaw` is the bridge between an IM channel and your local agent runtime.
-
-## Quick start
-
-### Using `npx`
+### 2. 一行启动
 
 ```bash
-cd your-project/
+cd your-workspace/
 npx codeclaw -t YOUR_BOT_TOKEN
 ```
 
-### Global install
+<!-- TODO: 替换为实际截图 -->
+`📸 截图占位：终端显示 "Bot is ready"，Telegram 收到欢迎消息`
 
-```bash
-npm install -g codeclaw
-cd your-project/
-codeclaw -t YOUR_BOT_TOKEN
-```
+### 3. 开始派活
 
-### Example configurations
+在 Telegram 给你的 bot 发消息：
 
-```bash
-# Telegram + Claude Code
-npx codeclaw -t $BOT_TOKEN -a claude
+> "把 docs/ 目录下所有零散文档整理汇总，提取核心指标，输出一份报告。"
 
-# Telegram + Codex
-npx codeclaw -t $BOT_TOKEN -a codex
-
-# Safe mode + restricted chat IDs
-npx codeclaw -t $BOT_TOKEN --safe-mode --allowed-ids 123456,789012
-
-# Start in a specific project
-npx codeclaw -t $BOT_TOKEN -w ~/projects/my-app
-```
-
-### Requirements
-
-- Node.js 18+
-- a Telegram Bot Token from [@BotFather](https://t.me/BotFather)
-- `claude` and/or `codex` installed on the same machine
-- authenticated local agent CLI(s)
-
-## Commands
-
-Once running in Telegram:
-
-| Command | Description |
-| --- | --- |
-| `/start` | Show menu and current agent/workdir |
-| `/sessions` | List and switch sessions |
-| `/agents` | List and switch agents |
-| `/models` | List and switch models |
-| `/switch` | Browse and switch working directory |
-| `/status` | Show bot status, session, usage, and token stats |
-| `/host` | Show host CPU, memory, disk, and top processes |
-| `/restart` | Restart with the latest package version |
-| `/sk_<name>` | Run a project-defined skill exposed from `.claude/` |
-
-Notes:
-
-- In private Telegram chats, plain text is forwarded directly to the current agent.
-- Unknown slash commands are forwarded as prompts.
-- Skill commands are generated dynamically from the current project.
-
-## CLI options
-
-```text
-codeclaw [options]
-```
-
-| Flag | Default | Description |
-| --- | --- | --- |
-| `-c, --channel` | `telegram` | IM channel; only Telegram is implemented today |
-| `-t, --token` | — | Channel token |
-| `-a, --agent` | `claude` | Default agent: `claude` or `codex` |
-| `-m, --model` | agent-specific | Override the default model |
-| `-w, --workdir` | current dir | Working directory |
-| `--full-access` | `true` | Let the agent run without confirmation |
-| `--safe-mode` | `false` | Require confirmation before destructive actions |
-| `--allowed-ids` | — | Restrict access to Telegram chat/user IDs |
-| `--timeout` | `900` | Max seconds per agent request |
-
-Important environment variables:
-
-| Variable | Description |
-| --- | --- |
-| `CODECLAW_TOKEN` | Channel token fallback |
-| `DEFAULT_AGENT` | Default agent |
-| `TELEGRAM_BOT_TOKEN` | Telegram bot token |
-| `TELEGRAM_ALLOWED_CHAT_IDS` | Telegram allowlist |
-| `CODECLAW_WORKDIR` | Default working directory |
-| `CODECLAW_TIMEOUT` | Per-turn timeout in seconds |
-| `CLAUDE_MODEL` | Claude model |
-| `CLAUDE_PERMISSION_MODE` | Claude permission mode |
-| `CLAUDE_EXTRA_ARGS` | Extra args passed to `claude` |
-| `CODEX_MODEL` | Codex model |
-| `CODEX_REASONING_EFFORT` | Codex reasoning effort |
-| `CODEX_FULL_ACCESS` | Codex full-access mode |
-| `CODEX_EXTRA_ARGS` | Extra args passed to `codex` |
-
-## Development
-
-```bash
-npm install
-echo "TELEGRAM_BOT_TOKEN=your_token_here" > .env
-set -a && source .env && npx tsx src/cli.ts
-npm test
-```
-
-## Architecture
-
-See [ARCHITECTURE.md](ARCHITECTURE.md).
-
-```text
-cli.ts → bot-telegram.ts → bot.ts → code-agent.ts
-                ↓
-         channel-telegram.ts
-```
-
-- `bot.ts` — shared bot logic, state, keep-alive, stream orchestration
-- `bot-telegram.ts` — Telegram rendering, menus, callbacks, artifact flow
-- `channel-telegram.ts` — Telegram transport layer
-- `code-agent.ts` — Claude/Codex process + stream handling
-
-## Philosophy
-
-`codeclaw` is not trying to be the biggest agent platform.
-
-It is trying to be the fastest way to turn:
-
-- **your laptop**
-- **your preferred strong agent**
-- **your existing chat app**
-
-into a practical remote execution loop.
-
-## License
-
-[MIT](LICENSE)
+**就这样。你的电脑现在是一个随时待命的远程执行中枢。**
 
 ---
 
-<a id="中文"></a>
+## 🔥 长程任务实战场景
 
-## codeclaw 是什么？
+codeclaw 专为那些 **"要跑很久、中间可能出错、你不想一直盯着"** 的任务设计。
 
-`codeclaw` 是一个跑在**你自己电脑上**的本地 Agent 控制层，让你可以直接通过 **Telegram** 远程调度本机 AI Agent。
+### 🛒 电商页面复刻与自动装修
 
-它不是一个托管平台，也不是一个很重的 Agent OS。它更像一个小而狠的执行层：
+> **你（在咖啡厅）：** "去看看竞品网站的新版落地页，分析布局和配色，然后把我们本地的页面改成类似风格。改完截图发我。"
 
-- **IM 原生**：直接在聊天窗口里派任务
-- **本地优先**：操作你真实的文件、浏览器、终端和项目
-- **执行优先**：重点不是“陪聊”，而是“把事做完”
-- **编码最强**：接 Claude Code 和 Codex CLI，技术任务上限非常高
-- **不止编码**：也适合浏览器任务、截图分析、文件处理、主机巡检、项目自定义工作流
+Agent 联网分析竞品、阅读本地项目、重写样式、截图回传。你只管喝咖啡等结果。
 
-如果你想要的是“聊天里的 AI 助手”，有很多产品。
-如果你想要的是“我电脑上的强 Agent，可以随时在聊天里被调度”，这就是 `codeclaw`。
+<!-- TODO: 替换为实际截图 -->
+`📸 截图占位：Telegram 中收到的页面截图对比（修改前 vs 修改后）`
 
-## 为什么做它
+### 📱 社媒运营与舆情监控
 
-很多远程 Agent 产品会卡在下面几件事里：
+> **你：** "监控 Twitter 和 Hacker News 上关于我们产品的讨论，分析情感倾向，生成一份舆情周报。"
 
-- **太重**：安装和运行链路太长
-- **太弱**：控制层看起来不错，但底层 Agent 真正做事能力不够
-- **太黑盒**：任务发出去后，不知道做到哪一步
-- **太脆**：长任务一休眠、一中断就挂
+Agent 采集数据、分类分析、生成带图表的报告文件回传。
 
-`codeclaw` 只抓一个更紧的闭环：
+### 📚 学术研究与文献综述
 
-- 用你已经认可的强 Agent：Claude Code / Codex CLI
-- 放进你本来就在用的聊天入口：现在是 Telegram
-- 做任务时能看到进度：流式预览、活动状态、reasoning、token 统计
-- 做完以后能带结果回来：截图、日志、文件、长文本
+> **你（睡前）：** "下载这 5 篇论文的 PDF，逐篇阅读并提取核心观点，写一份 3000 字的综述报告。"
 
-## 最适合的场景
+Agent 下载、解析、处理数万字上下文。第二天早上你收到结构化的 `.md` 综述文件。
 
-### 1. 远程编码
+### 🏗️ 长程工程重构
 
-这是当前最强场景。你可以在手机上让电脑去：
+> **你（睡前）：** "把整个项目从 JavaScript 迁移到 TypeScript，解决所有类型错误，一直跑测试直到全部通过。搞定告诉我。"
 
-- 看代码库
-- 改文件
-- 跑测试
-- 总结报错
-- 基于同一会话连续推进任务
+Agent 连续工作数小时，自动循环"改代码 → 跑测试 → 读报错 → 再改"，第二天早上向你汇报结果。
 
-原因很简单：`codeclaw` 直接接的是 `claude` 和 `codex`。
+<!-- TODO: 替换为实际截图 -->
+`📸 截图占位：流式输出的重构进度 + 最终"全部通过"的通知`
 
-### 2. 连续 GUI / 浏览器任务
+### 📊 海量文件批处理
 
-如果底层 Agent 本身具备浏览器或桌面操作能力，`codeclaw` 会把这类任务变得适合在 IM 里使用：
+> **你（通勤路上）：** "把 data/ 下所有旧版财务报表转换成新格式，汇总成一份报表，确认数据条数。"
 
-- 从 Telegram 发起任务
-- 过程中能看到流式进展
-- 长任务期间尽量防止电脑休眠
-- 截图、日志、生成文件可以回传到 Telegram
+Agent 逐个处理、遇到异常自动重试。20 分钟后你收到完整报表。
 
-所以它很适合那种“你去做一串 GUI 操作，然后把结果发我”的场景。
+### 🔧 自动化巡检与故障自愈
 
-### 3. 视觉输入与分析
+> **你：** "跑一下数据同步任务，把所有报错自动修好，直到全部通过。"
 
-直接发截图、设计图、文档给 Agent：
+Agent 进入"执行 → 读报错 → 分析 → 修复 → 重跑"的自动循环，直到你收到全部通过的通知。
 
-- 分析界面问题
-- 对比页面状态
-- 看图理解上下文
-- 总结附件内容
+### 📑 合同/文档审阅与比对
 
-### 4. 主机侧协助
+> **你：** "把新旧两版合同逐条比对，标出所有修改点，按风险等级分类输出审阅意见。"
 
-直接在聊天里查看：
+Agent 解析文档、逐条对比、生成审阅报告回传。
 
-- CPU / 内存 / 磁盘
-- Top 进程
-- 当前工作目录
-- 当前会话
-- Provider 用量窗口
+### 🎬 视频/音频素材批量加工
 
-### 5. 项目自定义工作流
+> **你：** "把 20 个会议录音转成文字稿，按发言人分段，每份生成摘要，最后输出一份总结。"
 
-把项目里的 `.claude/commands/` 和 `.claude/skills/` 暴露成 Telegram 命令。
+Agent 调用本地工具链转写、分段、摘要，全程流式汇报进度。
 
-## 它和一般 IM Agent 工具的区别
+### 🌐 多语言内容本地化
 
-- **本地运行**：没有服务端，没有 Docker，没有 hosted control plane
-- **极轻启动**：`npx codeclaw -t ...`
-- **适合长任务**：会话持续、保活、流式进度、回传产物
-- **底层足够强**：直接使用 Claude Code / Codex CLI
-- **更适合真实执行**：图片输入、文件输入、长文本、快捷回复、artifact 回传
+> **你：** "把所有英文翻译文件翻译成日语、韩语、法语三个版本，保持格式不变。"
 
-## 当前能力边界
+Agent 逐文件翻译、校验、写入目标目录，完成后汇报处理结果。
 
-- **已完成渠道**：Telegram
-- **已支持 Agent**：Claude Code、Codex CLI
-- **规划中的渠道**：Feishu / WhatsApp
-- **平台说明**：保活当前在 macOS / Linux 上实现
+---
 
-## 功能特性
+## 💡 为什么选择 codeclaw
 
-- **Telegram 控制台**：把 Telegram 作为本机 Agent 的远程前端
-- **多 Agent 切换**：通过 `/agents` 在 Claude Code 和 Codex 之间切换
-- **模型切换**：通过 `/models` 查看并切换模型
-- **实时流式输出**：Agent 运行时持续更新消息
-- **多会话延续**：在同一会话上继续推进任务
-- **工作目录切换**：直接在聊天里切换项目目录
-- **图片 / 文件输入**：把截图和文档发给 Agent
-- **产物回传**：把截图、日志、生成文件发回 Telegram
-- **长文本处理**：超长回复自动拆分，必要时附 `.md` 文件
-- **思考 / 推理展示**：展示 Claude / Codex 可用的 reasoning 内容
-- **Provider 用量展示**：查看最近 Codex / Claude 用量窗口
-- **主机状态查看**：查看 CPU、内存、磁盘和进程
-- **访问控制**：可限制 Telegram chat/user ID
-- **安全模式**：危险操作前要求确认
-- **项目技能命令**：自动暴露 `.claude/` 里的项目技能
-- **远程重启**：直接在 Telegram 更新并重启
+当你想 **"把活交出去、人走开"**，你的选择：
 
-## 工作方式
-
-```text
-Telegram
-  ↕
-codeclaw
-  ↕
-claude / codex CLI
-  ↕
-你的电脑：文件、浏览器、终端、项目
+```
+          在你的环境里执行
+               │
+    终端 CLI   │   codeclaw
+    (人要守着)  │   (人可以走)
+               │
+  ─────────────┼─────────────
+    不方便控制  │  随时随地控制
+               │
+    SSH+tmux   │   云端 Agent
+    (手机上很痛苦) │ (不是你的环境)
+               │
+          在沙盒/远端执行
 ```
 
-`codeclaw` 的角色，就是把 IM 和本地 Agent 运行时连接起来。
+| | 终端直接跑 | SSH + tmux | 云端 Agent | **codeclaw** |
+|---|---|---|---|---|
+| 执行环境 | ✅ 本地 | ✅ 本地 | ❌ 沙盒 | ✅ 本地 |
+| 走开后还能跑 | ❌ 合盖就断 | ⚠️ 要配 tmux | ✅ | ✅ 自动防休眠 |
+| 手机可控 | ❌ | ⚠️ 打字痛苦 | ✅ | ✅ IM 原生 |
+| 实时看进度 | ✅ 终端 | ⚠️ 得连上去看 | ❌ 多数是黑盒 | ✅ 流式推到聊天 |
+| 结果自动回传 | ❌ | ❌ | ⚠️ 看平台 | ✅ 截图/文件/长文本 |
+| 配置门槛 | 无 | SSH/穿透/tmux | 注册/付费 | `npx` 一行 |
 
-## 快速开始
+**codeclaw 是唯一同时满足 "本地执行 + 随时控制 + 长程保活 + 产物回传" 的方案。**
 
-### 用 `npx`
+### ⚔️ 竞品对比
 
-```bash
-cd your-project/
-npx codeclaw -t YOUR_BOT_TOKEN
-```
+市面上也有一些优秀的开源方案，它们的侧重点各有不同：
 
-### 全局安装
+| 特性 | **codeclaw** 🦞 | OpenClaw | cc-connect |
+|---|---|---|---|
+| **核心定位** | **专为长程任务优化的本地执行中枢** | 开源自主 AI 智能体生态 | 多渠道多端 Agent 连接器 |
+| **执行引擎** | 本地极强 CLI (Claude Code / Codex) | 内置 Agent (自接模型) | 多种本地 CLI / Agent |
+| **长程任务护航** | ✅ **深度定制：系统级防休眠、异常自愈** | ❌ 偏向即时/轻量级任务 | ❌ 偏向常规指令与短对话 |
+| **产物与长文本** | ✅ **原生支持截图、文件、超长输出打包** | ⚠️ 依赖画布或客户端支持 | ⚠️ 基础附件支持 |
+| **流式体验** | ✅ **极致平滑的 IM 实时流式进度** | ✅ 支持 | ⚠️ 依赖底层桥接能力 |
+| **上手配置** | **极简：一行 `npx`，零额外配置** | 较重：需部署完整后端/配置 | 中等：需安装对应服务端 |
 
-```bash
-npm install -g codeclaw
-cd your-project/
-codeclaw -t YOUR_BOT_TOKEN
-```
+> **总结：**
+> - 如果你需要一个**独立开源的完整 Agent 平台**（自带 Canvas 和多模态交互），推荐尝试 **OpenClaw**。
+> - 如果你需要将本地 Agent 接入尽可能多的平台（如 Slack、Discord、LINE），推荐使用 **cc-connect**。
+> - 但如果你重度依赖 Claude Code / Codex，并且核心诉求是 **"把一个复杂/耗时的任务扔给电脑跑几小时，自己能在手机上随时看流式进度、收产物文件，且保证任务不断线"**，那么 **codeclaw** 是目前体验最极致的选择。
 
-### 常见启动方式
+---
 
-```bash
-# Telegram + Claude Code
-npx codeclaw -t $BOT_TOKEN -a claude
+## ⚡ 核心能力
 
-# Telegram + Codex
-npx codeclaw -t $BOT_TOKEN -a codex
+- **实时流式输出** — Agent 工作时消息持续更新，不用干等
+- **产物回传** — 截图、日志、生成文件自动发回聊天
+- **长程防休眠** — 自动阻止系统休眠，小时级任务不中断
+- **长文本处理** — 超长输出自动拆分或附 `.md` 文件
+- **Reasoning 展示** — 实时查看 Agent 的思考过程
+- **多 Agent / 模型 / 会话** — 随时切换引擎、模型，在同一会话上继续推进
+- **图片/文件输入** — 发截图、PDF、文档给 Agent 处理
+- **安全模式** — 危险操作推送确认卡片到手机，白名单限制访问
 
-# 安全模式 + 限制聊天 ID
-npx codeclaw -t $BOT_TOKEN --safe-mode --allowed-ids 123456,789012
+---
 
-# 指定项目目录启动
-npx codeclaw -t $BOT_TOKEN -w ~/projects/my-app
-```
-
-### 前置条件
-
-- Node.js 18+
-- 从 [@BotFather](https://t.me/BotFather) 获取 Telegram Bot Token
-- 本机安装 `claude` 和/或 `codex`
-- 本机已完成对应 CLI 登录
-
-## Telegram 命令
+## 🛠️ 聊天命令
 
 | 命令 | 说明 |
-| --- | --- |
-| `/start` | 显示菜单和当前 agent/workdir |
-| `/sessions` | 查看并切换会话 |
-| `/agents` | 查看并切换 agent |
+|------|------|
+| `/start` | 显示菜单、当前 Agent 和工作目录 |
+| `/agents` | 切换 Claude Code / Codex |
 | `/models` | 查看并切换模型 |
+| `/sessions` | 查看并切换历史会话 |
 | `/switch` | 浏览并切换工作目录 |
-| `/status` | 查看 bot 状态、会话、用量和 token 信息 |
-| `/host` | 查看宿主机 CPU、内存、磁盘和进程 |
+| `/status` | 状态、会话信息、Token 统计 |
+| `/host` | 主机 CPU、内存、磁盘、进程 |
 | `/restart` | 拉取最新版本并重启 |
-| `/sk_<name>` | 执行项目在 `.claude/` 中定义的技能 |
+| `/sk_<name>` | 执行 `.claude/` 中定义的项目技能 |
 
-说明：
+> 私聊中，普通文本直接发给当前 Agent。未识别的 `/命令` 也会被当作指令转发。
 
-- 在 Telegram 私聊里，普通文本会直接转发给当前 Agent。
-- 未识别的 `/命令` 会被当作 prompt 转发。
-- 技能命令会根据当前项目动态生成。
+---
 
-## CLI 参数
+## ⚙️ 启动配置
 
-```text
-codeclaw [options]
-```
-
-| 参数 | 默认值 | 说明 |
-| --- | --- | --- |
-| `-c, --channel` | `telegram` | IM 渠道；当前真正可用的是 Telegram |
-| `-t, --token` | — | 渠道 token |
-| `-a, --agent` | `claude` | 默认 agent：`claude` 或 `codex` |
-| `-m, --model` | agent-specific | 覆盖默认模型 |
-| `-w, --workdir` | 当前目录 | 工作目录 |
-| `--full-access` | `true` | 允许 agent 无确认执行 |
-| `--safe-mode` | `false` | 危险操作前需要确认 |
-| `--allowed-ids` | — | 限制 Telegram chat/user ID |
-| `--timeout` | `900` | 单次请求最大秒数 |
-
-常用环境变量：
-
-| 环境变量 | 说明 |
-| --- | --- |
-| `CODECLAW_TOKEN` | 通用渠道 token 回退值 |
-| `DEFAULT_AGENT` | 默认 agent |
-| `TELEGRAM_BOT_TOKEN` | Telegram bot token |
-| `TELEGRAM_ALLOWED_CHAT_IDS` | Telegram allowlist |
-| `CODECLAW_WORKDIR` | 默认工作目录 |
-| `CODECLAW_TIMEOUT` | 单轮请求超时 |
-| `CLAUDE_MODEL` | Claude 模型 |
-| `CLAUDE_PERMISSION_MODE` | Claude 权限模式 |
-| `CLAUDE_EXTRA_ARGS` | 传给 `claude` 的额外参数 |
-| `CODEX_MODEL` | Codex 模型 |
-| `CODEX_REASONING_EFFORT` | Codex 推理强度 |
-| `CODEX_FULL_ACCESS` | Codex 完全访问模式 |
-| `CODEX_EXTRA_ARGS` | 传给 `codex` 的额外参数 |
-
-## 本地开发
+### 常见用法
 
 ```bash
+# 默认使用 Claude Code
+npx codeclaw -t $BOT_TOKEN
+
+# 使用 Codex CLI
+npx codeclaw -t $BOT_TOKEN -a codex
+
+# 安全模式：危险操作需要手机确认
+npx codeclaw -t $BOT_TOKEN --safe-mode
+
+# 白名单：只允许你的账号控制
+npx codeclaw -t $BOT_TOKEN --allowed-ids YOUR_ID
+
+# 指定工作目录
+npx codeclaw -t $BOT_TOKEN -w ~/workspace/my-task
+
+# 指定模型
+npx codeclaw -t $BOT_TOKEN -m claude-sonnet-4-6
+```
+
+### 完整 CLI 参数
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `-t, --token` | — | Bot Token（必填） |
+| `-a, --agent` | `claude` | 默认 Agent：`claude` 或 `codex` |
+| `-m, --model` | Agent 默认 | 覆盖模型 |
+| `-w, --workdir` | 当前目录 | 工作目录 |
+| `-c, --channel` | `telegram` | IM 渠道 |
+| `--safe-mode` | `false` | 危险操作前要求确认 |
+| `--full-access` | `true` | 允许 Agent 无确认执行 |
+| `--allowed-ids` | — | 限制 chat/user ID |
+| `--timeout` | `900` | 单次请求最大秒数 |
+
+<details>
+<summary>环境变量</summary>
+
+| 变量 | 说明 |
+|------|------|
+| `TELEGRAM_BOT_TOKEN` | Bot Token（替代 `-t`） |
+| `TELEGRAM_ALLOWED_CHAT_IDS` | 白名单 |
+| `DEFAULT_AGENT` | 默认 Agent |
+| `CODECLAW_WORKDIR` | 默认工作目录 |
+| `CODECLAW_TIMEOUT` | 请求超时（秒） |
+| `CLAUDE_MODEL` / `CODEX_MODEL` | 模型覆盖 |
+| `CLAUDE_EXTRA_ARGS` / `CODEX_EXTRA_ARGS` | 额外 CLI 参数 |
+| `CLAUDE_PERMISSION_MODE` | Claude 权限模式 |
+| `CODEX_REASONING_EFFORT` | Codex 推理强度 |
+| `CODEX_FULL_ACCESS` | Codex 完全访问模式 |
+
+</details>
+
+---
+
+## 📦 当前状态
+
+| 维度 | 状态 |
+|------|------|
+| IM 渠道 | Telegram ✅ · 飞书 / WhatsApp（规划中） |
+| Agent | Claude Code ✅ · Codex CLI ✅ |
+| 平台 | macOS ✅ · Linux ✅ |
+
+---
+
+## 👨‍💻 本地开发
+
+```bash
+git clone https://github.com/nicepkg/codeclaw.git
+cd codeclaw
 npm install
-echo "TELEGRAM_BOT_TOKEN=your_token_here" > .env
+echo "TELEGRAM_BOT_TOKEN=your_token" > .env
 set -a && source .env && npx tsx src/cli.ts
 npm test
 ```
 
-## 架构
+架构详情参见 [ARCHITECTURE.md](ARCHITECTURE.md)。
 
-详见 [ARCHITECTURE.md](ARCHITECTURE.md)。
-
-```text
-cli.ts → bot-telegram.ts → bot.ts → code-agent.ts
-                ↓
-         channel-telegram.ts
-```
-
-- `bot.ts` — 通用 bot 逻辑、状态、保活、流式编排
-- `bot-telegram.ts` — Telegram 渲染、菜单、回调、artifact 回传
-- `channel-telegram.ts` — Telegram 传输层
-- `code-agent.ts` — Claude/Codex 进程与流处理
-
-## 项目理念
-
-`codeclaw` 不想成为最大的 Agent 平台。
-
-它想做的是：把
-
-- **你的电脑**
-- **你偏好的强 Agent**
-- **你已经在用的聊天入口**
-
-拼成一个真正能远程执行任务的闭环。
+---
 
 ## License
 
