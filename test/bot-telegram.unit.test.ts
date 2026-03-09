@@ -35,6 +35,7 @@ function createBot() {
       files.push({ filePath, opts });
       return 779;
     }),
+    setMenu: vi.fn(async () => {}),
     deleteMessage: vi.fn(async () => {}),
     disconnect: vi.fn(),
   };
@@ -114,6 +115,37 @@ describe('TelegramBot.sendFinalReply', () => {
     expect(edits).toHaveLength(1);
     expect(edits[0].text).toContain('Incomplete Response');
     expect(edits[0].text).toContain('Output limit reached. Response may be truncated.');
+  });
+
+  it('shows an explicit timeout warning when the agent does not complete in time', async () => {
+    const { bot, ctx, edits } = createBot();
+
+    await (bot as any).sendFinalReply(ctx, 100, 'codex', {
+      ok: false,
+      message: 'Timed out after 900s waiting for turn completion.',
+      thinking: null,
+      sessionId: 'sess-timeout',
+      model: 'gpt-5.4',
+      thinkingEffort: 'high',
+      elapsedS: 905,
+      inputTokens: 12,
+      outputTokens: 34,
+      cachedInputTokens: 56,
+      cacheCreationInputTokens: null,
+      contextWindow: null,
+      contextUsedTokens: null,
+      contextPercent: null,
+      codexCumulative: null,
+      error: 'Timed out after 900s waiting for turn completion.',
+      stopReason: 'timeout',
+      incomplete: true,
+      activity: null,
+    });
+
+    expect(edits).toHaveLength(1);
+    expect(edits[0].text).toContain('Incomplete Response');
+    expect(edits[0].text).toContain('Timed out after 15m 5s before the agent reported completion.');
+    expect(edits[0].text).toContain('Timed out after 900s waiting for turn completion.');
   });
 
   it('does not attach reply buttons for complete responses', async () => {
@@ -386,15 +418,15 @@ describe('TelegramBot.handleMessage artifacts', () => {
 
     await (bot as any).handleMessage({ text: 'Take a screenshot', files: [] }, ctx);
 
-    // canCombine=true: placeholder deleted, text sent as photo caption
-    expect(edits).toHaveLength(0);
-    expect(channel.deleteMessage).toHaveBeenCalledTimes(1);
+    // Production behavior: final text remains a normal message and artifacts are uploaded separately.
+    expect(edits).toHaveLength(1);
+    expect(edits[0].text).toContain('Artifacts ready.');
+    expect(channel.deleteMessage).not.toHaveBeenCalled();
     expect(files).toHaveLength(2);
     expect(files[0].filePath).toContain('shot.png');
-    // First photo gets the text response as caption instead of its own caption
-    expect(files[0].opts).toMatchObject({ caption: 'Artifacts ready.', replyTo: ctx.messageId, asPhoto: true });
+    expect(files[0].opts).toMatchObject({ caption: 'Screenshot', replyTo: 1, asPhoto: true });
     expect(files[1].filePath).toContain('notes.txt');
-    expect(files[1].opts).toMatchObject({ caption: 'Notes', replyTo: ctx.messageId, asPhoto: false });
+    expect(files[1].opts).toMatchObject({ caption: 'Notes', replyTo: 1, asPhoto: false });
     expect(channel.sendFile).toHaveBeenCalledTimes(2);
     expect(fs.existsSync(artifactDir)).toBe(false);
   });
@@ -468,6 +500,52 @@ describe('TelegramBot.cmdModels', () => {
   });
 });
 
+describe('TelegramBot skills', () => {
+  it('refreshes menu commands after switching workdirs', async () => {
+    const { bot, channel } = createBot();
+    const oldWorkdir = process.env.CODECLAW_WORKDIR!;
+    fs.mkdirSync(path.join(oldWorkdir, '.claude', 'skills', 'old-skill'), { recursive: true });
+    fs.writeFileSync(path.join(oldWorkdir, '.claude', 'skills', 'old-skill', 'SKILL.md'), '# Old Skill\n');
+
+    await bot.setupMenu();
+    expect(channel.setMenu).toHaveBeenLastCalledWith(expect.arrayContaining([
+      expect.objectContaining({ command: 'sk_old_skill' }),
+    ]));
+
+    const nextWorkdir = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-tg-skill-next-'));
+    fs.mkdirSync(path.join(nextWorkdir, '.claude', 'skills', 'new-skill'), { recursive: true });
+    fs.writeFileSync(path.join(nextWorkdir, '.claude', 'skills', 'new-skill', 'SKILL.md'), '# New Skill\n');
+
+    bot.switchWorkdir(nextWorkdir);
+    await Promise.resolve();
+
+    expect(channel.setMenu).toHaveBeenLastCalledWith(expect.arrayContaining([
+      expect.objectContaining({ command: 'sk_new_skill' }),
+    ]));
+    expect(channel.setMenu).toHaveBeenLastCalledWith(expect.not.arrayContaining([
+      expect.objectContaining({ command: 'sk_old_skill' }),
+    ]));
+  });
+
+  it('routes sanitized skill commands back to the original skill name', async () => {
+    const { bot, ctx } = createBot();
+    const workdir = process.env.CODECLAW_WORKDIR!;
+    const skillDir = path.join(workdir, '.claude', 'skills', 'My-Skill');
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(path.join(skillDir, 'SKILL.md'), '# My Skill\n');
+
+    bot.chat(ctx.chatId).agent = 'codex';
+    const handleMessage = vi.spyOn(bot as any, 'handleMessage').mockResolvedValue(undefined);
+
+    await bot.handleCommand('sk_my_skill', 'please run it', ctx);
+
+    expect(handleMessage).toHaveBeenCalledWith({
+      text: `In this project's .claude/skills/My-Skill/ directory (or .claude/commands/My-Skill.md), there is a custom skill definition. Please read and execute the instructions defined in that skill file. Additional context: please run it`,
+      files: [],
+    }, ctx);
+  });
+});
+
 describe('TelegramBot.performRestart', () => {
   it('uses a non-interactive default npx restart command', () => {
     const { bot, channel } = createBot();
@@ -527,6 +605,62 @@ describe('TelegramBot.performRestart', () => {
       process.argv = oldArgv;
       exitSpy.mockRestore();
       stopKeepAliveSpy.mockRestore();
+    }
+  });
+});
+
+describe('Bot.startKeepAlive', () => {
+  it('adds periodic macOS user-activity pulses alongside the long-lived caffeinate assertion', () => {
+    vi.useFakeTimers();
+    const spawnMock = vi.mocked(spawn);
+    const mainProc = { pid: 4321, unref: vi.fn(), kill: vi.fn() };
+    const pulseProc = { pid: 4322, unref: vi.fn() };
+    const fakeBin = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-keepalive-bin-'));
+    const oldPath = process.env.PATH;
+    const platformDesc = Object.getOwnPropertyDescriptor(process, 'platform');
+
+    fs.writeFileSync(path.join(fakeBin, 'caffeinate'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    process.env.PATH = `${fakeBin}:${oldPath || ''}`;
+    Object.defineProperty(process, 'platform', { value: 'darwin' });
+    spawnMock.mockImplementationOnce(() => mainProc as any).mockImplementation(() => pulseProc as any);
+
+    try {
+      const { bot } = createBot();
+
+      (bot as any).startKeepAlive();
+
+      expect(spawnMock).toHaveBeenNthCalledWith(
+        1,
+        'caffeinate',
+        ['-dis'],
+        expect.objectContaining({ stdio: 'ignore', detached: true }),
+      );
+      expect(spawnMock).toHaveBeenNthCalledWith(
+        2,
+        'caffeinate',
+        ['-u', '-t', '30'],
+        expect.objectContaining({ stdio: 'ignore', detached: true }),
+      );
+
+      vi.advanceTimersByTime(20_000);
+
+      expect(spawnMock).toHaveBeenNthCalledWith(
+        3,
+        'caffeinate',
+        ['-u', '-t', '30'],
+        expect.objectContaining({ stdio: 'ignore', detached: true }),
+      );
+
+      (bot as any).stopKeepAlive();
+      vi.advanceTimersByTime(60_000);
+
+      expect(mainProc.kill).toHaveBeenCalledWith('SIGTERM');
+      expect(spawnMock).toHaveBeenCalledTimes(3);
+    } finally {
+      if (platformDesc) Object.defineProperty(process, 'platform', platformDesc);
+      if (oldPath == null) delete process.env.PATH;
+      else process.env.PATH = oldPath;
+      vi.useRealTimers();
     }
   });
 });

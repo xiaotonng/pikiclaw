@@ -5,6 +5,12 @@ import path from 'node:path';
 
 export type Agent = 'codex' | 'claude';
 
+export interface CodexCumulativeUsage {
+  input: number;
+  output: number;
+  cached: number;
+}
+
 export interface StreamOpts {
   agent: Agent;
   prompt: string;
@@ -21,6 +27,8 @@ export interface StreamOpts {
   codexFullAccess?: boolean;
   codexDeveloperInstructions?: string;
   codexExtraArgs?: string[];
+  /** Previous cumulative token totals for this Codex session (used when a resumed turn only reports totals). */
+  codexPrevCumulative?: CodexCumulativeUsage;
   // claude
   claudeModel?: string;
   claudePermissionMode?: string;
@@ -48,6 +56,8 @@ export interface StreamResult {
   contextUsedTokens: number | null;
   /** Percentage of context window used, null if contextWindow is unknown */
   contextPercent: number | null;
+  /** Raw cumulative token totals reported by Codex when available (null for Claude). */
+  codexCumulative: CodexCumulativeUsage | null;
   error: string | null;
   stopReason: string | null;
   incomplete: boolean;
@@ -71,16 +81,71 @@ function computeContext(s: { inputTokens: number | null; outputTokens: number | 
   return { contextUsedTokens: used, contextPercent: pct };
 }
 
+function numberOrNull(...values: unknown[]): number | null {
+  for (const value of values) {
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+  }
+  return null;
+}
+
+function buildCodexCumulativeUsage(raw: any): CodexCumulativeUsage | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const input = numberOrNull(raw.inputTokens, raw.input_tokens);
+  const output = numberOrNull(raw.outputTokens, raw.output_tokens);
+  const cached = numberOrNull(raw.cachedInputTokens, raw.cached_input_tokens);
+  if (input == null && output == null && cached == null) return null;
+  return { input: input ?? 0, output: output ?? 0, cached: cached ?? 0 };
+}
+
+function applyCodexTokenUsage(
+  s: {
+    inputTokens: number | null;
+    outputTokens: number | null;
+    cachedInputTokens: number | null;
+    cacheCreationInputTokens: number | null;
+    contextWindow: number | null;
+    codexCumulative: CodexCumulativeUsage | null;
+  },
+  rawUsage: any,
+  prev?: CodexCumulativeUsage,
+) {
+  if (!rawUsage || typeof rawUsage !== 'object') return;
+
+  const last = rawUsage.last;
+  const lastInput = numberOrNull(last?.inputTokens, last?.input_tokens);
+  const lastOutput = numberOrNull(last?.outputTokens, last?.output_tokens);
+  const lastCached = numberOrNull(last?.cachedInputTokens, last?.cached_input_tokens);
+  const lastCacheCreation = numberOrNull(last?.cacheCreationInputTokens, last?.cache_creation_input_tokens);
+
+  if (lastInput != null) s.inputTokens = lastInput;
+  if (lastOutput != null) s.outputTokens = lastOutput;
+  if (lastCached != null) s.cachedInputTokens = lastCached;
+  if (lastCacheCreation != null) s.cacheCreationInputTokens = lastCacheCreation;
+
+  const total = buildCodexCumulativeUsage(rawUsage.total ?? rawUsage);
+  if (total) {
+    s.codexCumulative = total;
+    if (lastInput == null) s.inputTokens = prev ? Math.max(0, total.input - prev.input) : total.input;
+    if (lastOutput == null) s.outputTokens = prev ? Math.max(0, total.output - prev.output) : total.output;
+    if (lastCached == null) s.cachedInputTokens = prev ? Math.max(0, total.cached - prev.cached) : total.cached;
+  }
+
+  const contextWindow = numberOrNull(rawUsage.modelContextWindow, rawUsage.model_context_window);
+  if (contextWindow != null && contextWindow > 0) s.contextWindow = contextWindow;
+}
+
 async function run(cmd: string[], opts: StreamOpts, parseLine: (ev: any, s: any) => void): Promise<StreamResult> {
   const start = Date.now();
   const deadline = start + opts.timeout * 1000;
   let stderr = '';
   let lineCount = 0;
+  let timedOut = false;
   const s = {
     sessionId: opts.sessionId, text: '', thinking: '', msgs: [] as string[], thinkParts: [] as string[],
     model: opts.model, thinkingEffort: opts.thinkingEffort, errors: null as string[] | null,
     inputTokens: null as number | null, outputTokens: null as number | null, cachedInputTokens: null as number | null,
     cacheCreationInputTokens: null as number | null, contextWindow: null as number | null,
+    codexCumulative: null as CodexCumulativeUsage | null,
     stopReason: null as string | null,
   };
 
@@ -100,7 +165,13 @@ async function run(cmd: string[], opts: StreamOpts, parseLine: (ev: any, s: any)
 
   const rl = createInterface({ input: proc.stdout!, crlfDelay: Infinity });
   rl.on('line', raw => {
-    if (Date.now() > deadline) { agentLog(`[timeout] deadline exceeded, killing process`); proc.kill('SIGKILL'); return; }
+    if (Date.now() > deadline) {
+      timedOut = true;
+      s.stopReason = 'timeout';
+      agentLog(`[timeout] deadline exceeded, killing process`);
+      proc.kill('SIGKILL');
+      return;
+    }
     const line = raw.trim();
     if (!line || line[0] !== '{') return;
     lineCount++;
@@ -125,6 +196,8 @@ async function run(cmd: string[], opts: StreamOpts, parseLine: (ev: any, s: any)
 
   // Hard deadline timer: kill the process even if it produces no output (prevents infinite hang)
   const hardTimer = setTimeout(() => {
+    timedOut = true;
+    s.stopReason = 'timeout';
     agentLog(`[timeout] hard deadline reached (${opts.timeout}s), killing process pid=${proc.pid}`);
     try { proc.kill('SIGTERM'); } catch {}
     setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 5000);
@@ -138,9 +211,11 @@ async function run(cmd: string[], opts: StreamOpts, parseLine: (ev: any, s: any)
   if (!s.text.trim() && s.msgs.length) s.text = s.msgs.join('\n\n');
   if (!s.thinking.trim() && s.thinkParts.length) s.thinking = s.thinkParts.join('\n\n');
 
-  const ok = procOk && !s.errors;
-  const error = s.errors?.map(e => e.trim()).filter(Boolean).join('; ') || (!procOk ? (stderr.trim() || `Failed (exit=${code}).`) : null);
-  const incomplete = !ok || s.stopReason === 'max_tokens';
+  const ok = procOk && !s.errors && !timedOut;
+  const error = s.errors?.map(e => e.trim()).filter(Boolean).join('; ').trim()
+    || (timedOut ? `Timed out after ${opts.timeout}s before the agent reported completion.` : null)
+    || (!procOk ? (stderr.trim() || `Failed (exit=${code}).`) : null);
+  const incomplete = !ok || s.stopReason === 'max_tokens' || s.stopReason === 'timeout';
   const elapsed = ((Date.now() - start) / 1000).toFixed(1);
   agentLog(`[result] ok=${ok && !s.errors} elapsed=${elapsed}s text=${s.text.length}chars thinking=${s.thinking.length}chars session=${s.sessionId || '?'}`);
   if (s.errors) agentLog(`[result] errors: ${s.errors.join('; ')}`);
@@ -155,6 +230,7 @@ async function run(cmd: string[], opts: StreamOpts, parseLine: (ev: any, s: any)
     inputTokens: s.inputTokens, outputTokens: s.outputTokens, cachedInputTokens: s.cachedInputTokens,
     cacheCreationInputTokens: s.cacheCreationInputTokens, contextWindow: s.contextWindow,
     ...computeContext(s),
+    codexCumulative: s.codexCumulative,
     error,
     stopReason: s.stopReason,
     incomplete,
@@ -370,6 +446,7 @@ export function buildCodexTurnInput(prompt: string, attachments: string[]): any[
 export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
   const start = Date.now();
   const srv = getCodexServer();
+  let timedOut = false;
 
   // Build config overrides from opts
   const config: string[] = [];
@@ -388,7 +465,7 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
       sessionId: opts.sessionId, model: opts.model, thinkingEffort: opts.thinkingEffort,
       elapsedS: (Date.now() - start) / 1000, inputTokens: null, outputTokens: null,
       cachedInputTokens: null, cacheCreationInputTokens: null, contextWindow: null, contextUsedTokens: null, contextPercent: null, error: 'Failed to start codex app-server.',
-      stopReason: null, incomplete: true, activity: null,
+      codexCumulative: null, stopReason: null, incomplete: true, activity: null,
     };
   }
 
@@ -403,6 +480,7 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
     cachedInputTokens: null as number | null,
     cacheCreationInputTokens: null as number | null,
     contextWindow: null as number | null,
+    codexCumulative: null as CodexCumulativeUsage | null,
     turnId: null as string | null,
     turnStatus: null as string | null,
     turnError: null as string | null,
@@ -444,7 +522,7 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
       sessionId: opts.sessionId, model: opts.model, thinkingEffort: opts.thinkingEffort,
       elapsedS: (Date.now() - start) / 1000, inputTokens: null, outputTokens: null,
       cachedInputTokens: null, cacheCreationInputTokens: null, contextWindow: null, contextUsedTokens: null, contextPercent: null, error: errMsg,
-      stopReason: null, incomplete: true, activity: null,
+      codexCumulative: null, stopReason: null, incomplete: true, activity: null,
     };
   }
 
@@ -459,6 +537,7 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
   const turnDone = new Promise<void>((resolve) => {
     const deadline = start + opts.timeout * 1000;
     const hardTimer = setTimeout(() => {
+      timedOut = true;
       agentLog(`[codex-rpc] timeout: interrupting turn`);
       if (s.turnId && s.sessionId) {
         srv.call('turn/interrupt', { threadId: s.sessionId, turnId: s.turnId }).catch(() => {});
@@ -548,22 +627,13 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
 
       // Token usage updates
       if (method === 'thread/tokenUsage/updated' && params.threadId === s.sessionId) {
-        const usage = params.tokenUsage;
-        if (usage) {
-          const last = usage.last;
-          if (last) {
-            s.inputTokens = last.inputTokens ?? s.inputTokens;
-            s.outputTokens = last.outputTokens ?? s.outputTokens;
-            s.cachedInputTokens = last.cachedInputTokens ?? s.cachedInputTokens;
-            s.cacheCreationInputTokens = last.cacheCreationInputTokens ?? s.cacheCreationInputTokens;
-          }
-          if (usage.modelContextWindow > 0) s.contextWindow = usage.modelContextWindow;
-        }
+        applyCodexTokenUsage(s, params.tokenUsage, opts.codexPrevCumulative);
       }
 
       // Turn completed
       if (method === 'turn/completed' && params.threadId === s.sessionId) {
         const turn = params.turn || {};
+        applyCodexTokenUsage(s, params.tokenUsage || turn.tokenUsage || turn.usage, opts.codexPrevCumulative);
         s.turnStatus = turn.status ?? null;
         if (turn.error) s.turnError = turn.error.message || turn.error.code || JSON.stringify(turn.error);
         s.turnId = turn.id ?? s.turnId;
@@ -600,7 +670,7 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
       sessionId: s.sessionId, model: s.model, thinkingEffort: s.thinkingEffort,
       elapsedS: (Date.now() - start) / 1000, inputTokens: null, outputTokens: null,
       cachedInputTokens: null, cacheCreationInputTokens: null, contextWindow: null, contextUsedTokens: null, contextPercent: null, error: errMsg,
-      stopReason: null, incomplete: true, activity: null,
+      codexCumulative: null, stopReason: null, incomplete: true, activity: null,
     };
   }
 
@@ -614,9 +684,11 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
   if (!s.text.trim() && s.msgs.length) s.text = s.msgs.join('\n\n');
   if (!s.thinking.trim() && s.thinkParts.length) s.thinking = s.thinkParts.join('\n\n');
 
-  const ok = s.turnStatus === 'completed';
-  const error = s.turnError || (!ok ? `Turn ${s.turnStatus || 'unknown'}.` : null);
-  const stopReason = s.turnStatus === 'interrupted' ? 'interrupted' : null;
+  const ok = s.turnStatus === 'completed' && !timedOut;
+  const error = s.turnError
+    || (timedOut ? `Timed out after ${opts.timeout}s waiting for turn completion.` : null)
+    || (!ok ? `Turn ${s.turnStatus || 'unknown'}.` : null);
+  const stopReason = timedOut ? 'timeout' : (s.turnStatus === 'interrupted' ? 'interrupted' : null);
   const incomplete = !ok;
   const elapsed = ((Date.now() - start) / 1000).toFixed(1);
   agentLog(`[codex-rpc] result: ok=${ok} elapsed=${elapsed}s text=${s.text.length}chars session=${s.sessionId} status=${s.turnStatus}`);
@@ -635,6 +707,7 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
     cacheCreationInputTokens: s.cacheCreationInputTokens,
     contextWindow: s.contextWindow,
     ...computeContext(s),
+    codexCumulative: s.codexCumulative,
     error,
     stopReason,
     incomplete,

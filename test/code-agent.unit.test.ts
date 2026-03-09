@@ -393,7 +393,7 @@ exit 1`;
 });
 
 describe('listModels', () => {
-  it('discovers Claude models from CLI help and local state', async () => {
+  it('returns the built-in Claude model list', async () => {
     const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codeclaw-home-'));
     const oldHome = process.env.HOME;
 
@@ -437,18 +437,20 @@ exit 0`;
 
       expect(result.models.map(m => m.id)).toEqual([
         'claude-opus-4-6',
-        'claude-haiku-4-5-20250929',
-        'claude-opus-4-5-20251101',
-        'claude-sonnet-4-5-20250929',
+        'claude-opus-4-6[1m]',
+        'claude-sonnet-4-6',
+        'claude-sonnet-4-6[1m]',
+        'claude-haiku-4-5-20251001',
       ]);
       expect(result.models.map(m => m.alias)).toEqual([
         'opus',
-        'haiku',
-        'opus',
+        'opus-1m',
         'sonnet',
+        'sonnet-1m',
+        'haiku',
       ]);
-      expect(result.sources).toEqual(['current config', '~/.claude.json', 'claude --help', 'recent sessions']);
-      expect(result.note).toContain('does not expose a machine-readable model list');
+      expect(result.sources).toEqual([]);
+      expect(result.note).toBeNull();
     } finally {
       if (oldHome == null) delete process.env.HOME;
       else process.env.HOME = oldHome;

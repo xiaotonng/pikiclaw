@@ -10,13 +10,15 @@ import path from 'node:path';
 import { execSync, spawn } from 'node:child_process';
 import {
   doStream, getSessions, getSessionTail, getUsage, listAgents, listModels, listSkills,
-  type Agent, type StreamOpts, type StreamResult, type SessionInfo, type UsageResult,
+  type Agent, type CodexCumulativeUsage, type StreamOpts, type StreamResult, type SessionInfo, type UsageResult,
   type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult,
   type SkillInfo, type SkillListResult,
 } from './code-agent.js';
 
-export { type Agent, type StreamResult, type SessionInfo, type UsageResult, type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult, type SkillInfo, type SkillListResult };
-export const VERSION = '0.2.15';
+export { type Agent, type CodexCumulativeUsage, type StreamResult, type SessionInfo, type UsageResult, type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult, type SkillInfo, type SkillListResult };
+export const VERSION = '0.2.16';
+const MACOS_USER_ACTIVITY_PULSE_INTERVAL_MS = 20_000;
+const MACOS_USER_ACTIVITY_PULSE_TIMEOUT_S = 30;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -120,6 +122,7 @@ export function buildPrompt(text: string, files: string[]): string {
 export interface ChatState {
   agent: Agent;
   sessionId: string | null;
+  codexCumulative?: CodexCumulativeUsage;
 }
 
 // ---------------------------------------------------------------------------
@@ -147,11 +150,12 @@ export class Bot {
   stats = { totalTurns: 0, totalInputTokens: 0, totalOutputTokens: 0, totalCachedTokens: 0 };
 
   private keepAliveProc: ReturnType<typeof spawn> | null = null;
+  private keepAlivePulseTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor() {
     this.workdir = path.resolve((process.env.CODECLAW_WORKDIR || process.cwd()).replace(/^~/, process.env.HOME || ''));
     this.defaultAgent = normalizeAgent(process.env.DEFAULT_AGENT || 'claude');
-    this.runTimeout = envInt('CODECLAW_TIMEOUT', 300);
+    this.runTimeout = envInt('CODECLAW_TIMEOUT', 900);
     this.allowedChatIds = parseAllowedChatIds(process.env.CODECLAW_ALLOWED_IDS || '');
 
     this.codexModel = (process.env.CODEX_MODEL || 'gpt-5.4').trim();
@@ -241,10 +245,13 @@ export class Bot {
   switchWorkdir(newPath: string) {
     const old = this.workdir;
     this.workdir = newPath;
-    for (const [, cs] of this.chats) { cs.sessionId = null; }
+    for (const [, cs] of this.chats) { cs.sessionId = null; cs.codexCumulative = undefined; }
     this.log(`switch workdir: ${old} -> ${newPath}`);
+    this.afterSwitchWorkdir(old, newPath);
     return old;
   }
+
+  protected afterSwitchWorkdir(_oldPath: string, _newPath: string) {}
 
   async runStream(
     prompt: string, cs: ChatState, attachments: string[],
@@ -265,6 +272,7 @@ export class Bot {
       codexModel: this.codexModel, codexFullAccess: this.codexFullAccess,
       codexDeveloperInstructions: systemPrompt || undefined,
       codexExtraArgs: this.codexExtraArgs.length ? this.codexExtraArgs : undefined,
+      codexPrevCumulative: cs.codexCumulative,
       claudeModel: this.claudeModel, claudePermissionMode: this.claudePermissionMode,
       claudeAppendSystemPrompt: systemPrompt || undefined,
       claudeExtraArgs: this.claudeExtraArgs.length ? this.claudeExtraArgs : undefined,
@@ -274,6 +282,7 @@ export class Bot {
     if (result.inputTokens) this.stats.totalInputTokens += result.inputTokens;
     if (result.outputTokens) this.stats.totalOutputTokens += result.outputTokens;
     if (result.cachedInputTokens) this.stats.totalCachedTokens += result.cachedInputTokens;
+    if (result.codexCumulative) cs.codexCumulative = result.codexCumulative;
     // Only update sessionId if it hasn't been changed externally (e.g. user switched session during run)
     if (result.sessionId && cs.sessionId === snapshotSessionId) cs.sessionId = result.sessionId;
     this.log(`[runStream] completed turn=${this.stats.totalTurns} cumulative: in=${fmtTokens(this.stats.totalInputTokens)} out=${fmtTokens(this.stats.totalOutputTokens)} cached=${fmtTokens(this.stats.totalCachedTokens)}`);
@@ -282,13 +291,26 @@ export class Bot {
 
   startKeepAlive() {
     if (process.platform === 'darwin') {
+      if (this.keepAliveProc || this.keepAlivePulseTimer) return;
       const bin = whichSync('caffeinate');
       if (bin) {
         this.keepAliveProc = spawn('caffeinate', ['-dis'], { stdio: 'ignore', detached: true });
         this.keepAliveProc.unref();
         this.log(`keep-alive: caffeinate (PID ${this.keepAliveProc.pid})`);
+        const pulseUserActivity = () => {
+          const pulse = spawn('caffeinate', ['-u', '-t', String(MACOS_USER_ACTIVITY_PULSE_TIMEOUT_S)], {
+            stdio: 'ignore',
+            detached: true,
+          });
+          pulse.unref();
+        };
+        pulseUserActivity();
+        this.keepAlivePulseTimer = setInterval(pulseUserActivity, MACOS_USER_ACTIVITY_PULSE_INTERVAL_MS);
+        this.keepAlivePulseTimer.unref?.();
+        this.log(`keep-alive: macOS user activity pulse every ${MACOS_USER_ACTIVITY_PULSE_INTERVAL_MS / 1000}s`);
       }
     } else if (process.platform === 'linux') {
+      if (this.keepAliveProc) return;
       const bin = whichSync('systemd-inhibit');
       if (bin) {
         this.keepAliveProc = spawn('systemd-inhibit', [
@@ -301,6 +323,10 @@ export class Bot {
   }
 
   stopKeepAlive() {
+    if (this.keepAlivePulseTimer) {
+      clearInterval(this.keepAlivePulseTimer);
+      this.keepAlivePulseTimer = null;
+    }
     if (this.keepAliveProc) {
       try { this.keepAliveProc.kill('SIGTERM'); } catch {}
       this.keepAliveProc = null;

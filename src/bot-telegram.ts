@@ -121,6 +121,26 @@ function ensureNonInteractiveRestartArgs(bin: string, args: string[]): string[] 
   return ['--yes', ...args];
 }
 
+const SKILL_CMD_PREFIX = 'sk_';
+
+function buildSkillCommandName(skillName: string): string | null {
+  const normalized = skillName.trim().toLowerCase().replace(/[^a-z0-9_]/g, '_');
+  if (!normalized) return null;
+  const cmdName = `${SKILL_CMD_PREFIX}${normalized}`;
+  if (cmdName.length > 32) return null;
+  return cmdName;
+}
+
+function indexSkillsByCommand(skills: SkillInfo[]): Map<string, SkillInfo> {
+  const indexed = new Map<string, SkillInfo>();
+  for (const skill of skills) {
+    const cmdName = buildSkillCommandName(skill.name);
+    if (!cmdName || indexed.has(cmdName)) continue;
+    indexed.set(cmdName, skill);
+  }
+  return indexed;
+}
+
 export type ArtifactKind = 'photo' | 'document';
 
 export interface BotArtifact {
@@ -492,7 +512,7 @@ export class TelegramBot extends Bot {
   }
 
   /** Skill command prefix used in Telegram bot commands. */
-  private static readonly SKILL_CMD_PREFIX = 'sk_';
+  private static readonly SKILL_CMD_PREFIX = SKILL_CMD_PREFIX;
 
   private static buildMenuCommands(agentCount: number, skills: SkillInfo[] = []) {
     const commands = [
@@ -517,10 +537,7 @@ export class TelegramBot extends Bot {
     }
 
     // Inject project-defined skills as sk_<name> commands
-    for (const sk of skills) {
-      // Telegram commands: 1-32 chars, lowercase letters/digits/underscore only
-      const cmdName = `${TelegramBot.SKILL_CMD_PREFIX}${sk.name.toLowerCase().replace(/[^a-z0-9_]/g, '_')}`;
-      if (cmdName.length > 32) continue; // skip if too long for Telegram
+    for (const [cmdName, sk] of indexSkillsByCommand(skills)) {
       // Use short human-facing label; fall back to capitalized skill name
       const displayName = sk.label || sk.name.charAt(0).toUpperCase() + sk.name.slice(1);
       commands.push({ command: cmdName, description: `⚡ ${displayName}` });
@@ -533,22 +550,29 @@ export class TelegramBot extends Bot {
 
   /** Register bot menu commands. Called automatically after connect. */
   async setupMenu() {
+    const { commands, skillCount } = this.getCurrentMenuState();
+    await this.channel.setMenu(commands);
+    this.log(`menu: ${commands.length} commands (${skillCount} skills)`);
+  }
+
+  protected override afterSwitchWorkdir(_oldPath: string, _newPath: string) {
+    if (!(this as any).channel) return;
+    void this.setupMenu().catch(err => this.log(`menu refresh failed after workdir switch: ${err}`));
+  }
+
+  private getCurrentMenuState() {
     const res = this.fetchAgents();
     const installedCount = res.agents.filter(a => a.installed).length;
     const skillRes = this.fetchSkills();
     const commands = TelegramBot.buildMenuCommands(installedCount, skillRes.skills);
-    await this.channel.setMenu(commands);
-    this.log(`menu: ${commands.length} commands (${skillRes.skills.length} skills)`);
+    return { commands, skillCount: skillRes.skills.length, skills: skillRes.skills };
   }
 
   // ---- commands -------------------------------------------------------------
 
   private async cmdStart(ctx: TgContext) {
     const cs = this.chat(ctx.chatId);
-    const res = this.fetchAgents();
-    const installedCount = res.agents.filter(a => a.installed).length;
-    const skillRes = this.fetchSkills();
-    const commands = TelegramBot.buildMenuCommands(installedCount, skillRes.skills);
+    const { commands } = this.getCurrentMenuState();
 
     const lines = [`<b>codeclaw</b> v${VERSION}\n`];
     for (const cmd of commands) {
@@ -968,10 +992,13 @@ export class TelegramBot extends Bot {
     if (result.incomplete) {
       const statusLines: string[] = [];
       if (result.stopReason === 'max_tokens') statusLines.push('Output limit reached. Response may be truncated.');
+      if (result.stopReason === 'timeout') {
+        statusLines.push(`Timed out after ${fmtUptime(Math.max(0, Math.round(result.elapsedS * 1000)))} before the agent reported completion.`);
+      }
       if (!result.ok) {
         const detail = result.error?.trim();
-        if (detail && detail !== result.message.trim()) statusLines.push(detail);
-        else statusLines.push('Agent exited before reporting completion.');
+        if (detail && detail !== result.message.trim() && !statusLines.includes(detail)) statusLines.push(detail);
+        else if (result.stopReason !== 'timeout') statusLines.push('Agent exited before reporting completion.');
       }
       statusHtml = `<blockquote expandable><b>Incomplete Response</b>\n${statusLines.map(escapeHtml).join('\n')}</blockquote>\n\n`;
     }
@@ -1182,7 +1209,12 @@ export class TelegramBot extends Bot {
 
   /** Execute a project-defined skill by routing it to the current agent. */
   private async cmdSkill(cmd: string, args: string, ctx: TgContext) {
-    const skillName = cmd.slice(TelegramBot.SKILL_CMD_PREFIX.length);
+    const skill = indexSkillsByCommand(this.fetchSkills().skills).get(cmd);
+    if (!skill) {
+      await ctx.reply(`Skill not found for command /${cmd} in:\n<code>${escapeHtml(this.workdir)}</code>`, { parseMode: 'HTML' });
+      return;
+    }
+    const skillName = skill.name;
     const cs = this.chat(ctx.chatId);
     const extra = args.trim() ? ` ${args.trim()}` : '';
 

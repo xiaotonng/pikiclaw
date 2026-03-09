@@ -14,7 +14,7 @@ import type { Agent, StreamOpts } from './code-agent.js';
 
 function parseArgs(argv: string[]) {
   const args: Record<string, any> = {
-    command: null, model: null, workdir: null, prompt: null, timeout: 300, help: false,
+    command: null, model: null, workdir: null, prompt: null, timeout: 900, help: false,
     session: null, n: 4,
   };
   const positional: string[] = [];
@@ -26,7 +26,7 @@ function parseArgs(argv: string[]) {
       case '-p': case '--prompt': args.prompt = it.next().value; break;
       case '-s': case '--session': args.session = it.next().value; break;
       case '-n': args.n = parseInt(it.next().value ?? '', 10) || 4; break;
-      case '--timeout': args.timeout = parseInt(it.next().value ?? '', 10) || 300; break;
+      case '--timeout': args.timeout = parseInt(it.next().value ?? '', 10) || 900; break;
       case '-h': case '--help': args.help = true; break;
       default:
         if (arg.startsWith('-')) { process.stderr.write(`Unknown option: ${arg}\n`); process.exit(1); }
@@ -63,7 +63,7 @@ Options:
   -w, --workdir <dir>   Working directory  [default: cwd]
   -s, --session <id>    Session ID (for tail; omit to use latest session)
   -n <count>            Number of messages to show  [default: 4]
-  --timeout <seconds>   Max seconds per request  [default: 300]
+  --timeout <seconds>   Max seconds per request  [default: 900]
   -h, --help            Print this help
 
 Examples:

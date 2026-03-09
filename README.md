@@ -100,7 +100,7 @@ codeclaw [options]
 | `--full-access` | `CODECLAW_FULL_ACCESS` | `true` | Agent can read/write/execute without confirmation |
 | `--safe-mode` | — | `false` | Require confirmation before destructive operations |
 | `--allowed-ids` | `TELEGRAM_ALLOWED_CHAT_IDS` | — | Comma-separated chat/user ID whitelist |
-| `--timeout` | `CODECLAW_TIMEOUT` | `300` | Max seconds per agent request |
+| `--timeout` | `CODECLAW_TIMEOUT` | `900` | Max seconds per agent request |
 
 ### Channel-specific Environment Variables
 
@@ -284,7 +284,7 @@ codeclaw [选项]
 | `--full-access` | `CODECLAW_FULL_ACCESS` | `true` | Agent 可以无需确认地读写执行 |
 | `--safe-mode` | — | `false` | 执行危险操作前需确认 |
 | `--allowed-ids` | `TELEGRAM_ALLOWED_CHAT_IDS` | — | 允许交互的聊天/用户 ID，逗号分隔 |
-| `--timeout` | `CODECLAW_TIMEOUT` | `300` | 每次请求最大秒数 |
+| `--timeout` | `CODECLAW_TIMEOUT` | `900` | 每次请求最大秒数 |
 
 ### 渠道专属环境变量
 

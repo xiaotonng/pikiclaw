@@ -69,7 +69,7 @@ Options:
   --full-access             Skip confirmation prompts  [default]
   --safe-mode               Require confirmation before destructive actions
   --allowed-ids <id,id>     Comma-separated chat/user ID whitelist
-  --timeout <seconds>       Max seconds per agent request  [default: 300]
+  --timeout <seconds>       Max seconds per agent request  [default: 900]
   -v, --version             Print version
   -h, --help                Print this help
 
