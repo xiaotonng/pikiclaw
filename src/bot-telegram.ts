@@ -86,6 +86,15 @@ function mdToTgHtml(text: string): string {
   return result.join('\n');
 }
 
+function renderSessionTurnHtml(userText: string | null | undefined, assistantText: string | null | undefined): string {
+  const parts: string[] = [];
+  const user = String(userText || '').trim();
+  const assistant = String(assistantText || '').trim();
+  if (user) parts.push(`<blockquote expandable>${escapeHtml(user)}</blockquote>`);
+  if (assistant) parts.push(mdToTgHtml(assistant));
+  return parts.join('\n\n');
+}
+
 function mdInline(line: string): string {
   const parts: string[] = [];
   let rest = line;
@@ -400,12 +409,31 @@ function fmtCompactUptime(ms: number): string {
   return fmtUptime(ms).replace(/\s+/g, '');
 }
 
-function formatFooterLine(agent: Agent, elapsedMs: number, meta?: StreamPreviewMeta | null, contextPercent?: number | null): string {
+type FooterStatus = 'running' | 'done' | 'failed';
+
+function footerStatusSymbol(status: FooterStatus): string {
+  switch (status) {
+    case 'running': return '●';
+    case 'done': return '✓';
+    case 'failed': return '✗';
+  }
+}
+
+function formatFooterSummary(agent: Agent, elapsedMs: number, meta?: StreamPreviewMeta | null, contextPercent?: number | null): string {
   const parts: string[] = [agent];
   const ctx = contextPercent ?? meta?.contextPercent ?? null;
   if (ctx != null) parts.push(`${ctx}%`);
   parts.push(fmtCompactUptime(Math.max(0, Math.round(elapsedMs))));
-  return parts.join(' - ');
+  return parts.join(' · ');
+}
+
+function formatPreviewFooterLine(agent: Agent, elapsedMs: number, meta?: StreamPreviewMeta | null): string {
+  return `${footerStatusSymbol('running')} ${formatFooterSummary(agent, elapsedMs, meta)}`;
+}
+
+function formatFinalFooterHtml(status: FooterStatus, agent: Agent, elapsedMs: number, contextPercent?: number | null): string {
+  const line = `${footerStatusSymbol(status)} ${formatFooterSummary(agent, elapsedMs, null, contextPercent ?? null)}`;
+  return `<blockquote>${escapeHtml(line)}</blockquote>`;
 }
 
 function normalizePlanStep(step: string): string {
@@ -650,15 +678,20 @@ export class TelegramBot extends Bot {
     return { commands, skillCount: skillRes.skills.length, skills: skillRes.skills };
   }
 
+  private welcomeIntroLines(): string[] {
+    return [
+      `<b>Hi, I'm codeclaw</b> v${VERSION}`,
+      'Send me a message to get started.',
+    ];
+  }
+
   // ---- commands -------------------------------------------------------------
 
   private async cmdStart(ctx: TgContext) {
     const cs = this.chat(ctx.chatId);
     const { commands } = this.getCurrentMenuState();
     const lines = [
-      `<b>codeclaw</b> v${VERSION}`,
-      '',
-      `Hi, I'm codeclaw. Send me a message, and I will tell your remote assistant what to do.`,
+      ...this.welcomeIntroLines(),
       '',
       `<b>Agent:</b> ${escapeHtml(cs.agent)}`,
       `<b>Workdir:</b> <code>${escapeHtml(this.workdir)}</code>`,
@@ -756,8 +789,13 @@ export class TelegramBot extends Bot {
     const d = this.getHostData();
     const lines = [
       `<b>Host</b>\n`,
+      `<b>Name:</b> ${escapeHtml(d.hostName)}`,
       `<b>CPU:</b> ${escapeHtml(d.cpuModel)} x${d.cpuCount}`,
-      `<b>Memory:</b> ${fmtBytes(d.totalMem - d.freeMem)} / ${fmtBytes(d.totalMem)} (${((1 - d.freeMem / d.totalMem) * 100).toFixed(0)}%)`,
+      d.cpuUsage
+        ? `<b>CPU Usage:</b> ${d.cpuUsage.usedPercent.toFixed(1)}% (${d.cpuUsage.userPercent.toFixed(1)}% user, ${d.cpuUsage.sysPercent.toFixed(1)}% sys, ${d.cpuUsage.idlePercent.toFixed(1)}% idle)`
+        : '<b>CPU Usage:</b> unavailable',
+      `<b>Memory:</b> ${fmtBytes(d.memoryUsed)} / ${fmtBytes(d.totalMem)} (${d.memoryPercent.toFixed(0)}%)`,
+      `<b>Available:</b> ${fmtBytes(d.memoryAvailable)}`,
       `<b>Battery:</b> ${d.battery ? `${escapeHtml(d.battery.percent)} (${escapeHtml(d.battery.state)})` : 'unavailable'}`,
     ];
     if (d.disk) lines.push(`<b>Disk:</b> ${escapeHtml(d.disk.used)} used / ${escapeHtml(d.disk.total)} total (${escapeHtml(d.disk.percent)})`);
@@ -882,7 +920,7 @@ export class TelegramBot extends Bot {
       ? buildArtifactPrompt(basePrompt, artifactTurn.promptDir, artifactTurn.promptManifestPath)
       : basePrompt;
     const start = Date.now();
-    const initialPreview = `${cs.agent} | 0s ·`;
+    const initialPreview = formatPreviewFooterLine(cs.agent, 0);
     this.log(`[handleMessage] chat=${ctx.chatId} agent=${cs.agent} session=${cs.sessionId || '(new)'} prompt="${basePrompt.slice(0, 100)}" files=${msg.files.length}`);
 
     const phId = await ctx.reply(initialPreview);
@@ -948,7 +986,7 @@ export class TelegramBot extends Bot {
           parts.push(preview);
         }
 
-        parts.push(formatFooterLine(cs.agent, now - start, meta));
+        parts.push(formatPreviewFooterLine(cs.agent, now - start, meta));
         return parts.join('\n\n');
       };
 
@@ -1131,7 +1169,8 @@ export class TelegramBot extends Bot {
   }
 
   private async sendFinalReply(ctx: TgContext, phId: number, agent: Agent, result: StreamResult): Promise<number | null> {
-    const footer = escapeHtml(formatFooterLine(agent, result.elapsedS * 1000, null, result.contextPercent ?? null));
+    const footerStatus: FooterStatus = result.incomplete || !result.ok ? 'failed' : 'done';
+    const footer = formatFinalFooterHtml(footerStatus, agent, result.elapsedS * 1000, result.contextPercent ?? null);
 
     let activityHtml = '';
     let activityNoteHtml = '';
@@ -1286,10 +1325,7 @@ export class TelegramBot extends Bot {
             for (let i = msgs.length - 1; i >= 0; i--) {
               if (msgs[i].role === 'user') { lastUserIdx = i; break; }
             }
-            const parts: string[] = [];
-            if (lastUserIdx >= 0) {
-              parts.push(`<b>You:</b>\n${escapeHtml(msgs[lastUserIdx].text)}`);
-            }
+            const lastUserText = lastUserIdx >= 0 ? msgs[lastUserIdx].text : '';
             // Gather all assistant messages after the last user message
             const startIdx = lastUserIdx >= 0 ? lastUserIdx + 1 : 0;
             const assistantTexts: string[] = [];
@@ -1298,11 +1334,9 @@ export class TelegramBot extends Bot {
                 assistantTexts.push(msgs[i].text);
               }
             }
-            if (assistantTexts.length) {
-              parts.push(`<b>${escapeHtml(cs.agent)}:</b>\n${escapeHtml(assistantTexts.join('\n\n'))}`);
-            }
-            if (parts.length) {
-              await ctx.reply(parts.join('\n\n'), { parseMode: 'HTML' });
+            const previewHtml = renderSessionTurnHtml(lastUserText, assistantTexts.join('\n\n'));
+            if (previewHtml) {
+              await this.channel.send(ctx.chatId, previewHtml, { parseMode: 'HTML' });
             }
           }
         } catch { /* non-critical */ }
@@ -1461,7 +1495,7 @@ export class TelegramBot extends Bot {
       return;
     }
 
-    const text = `<b>Hi, I'm codeclaw</b> v${VERSION}. Send /start for a quick guide.`;
+    const text = this.welcomeIntroLines().join('\n');
 
     for (const cid of targets) {
       try {

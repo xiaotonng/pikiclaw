@@ -16,7 +16,7 @@ import {
 } from './code-agent.js';
 
 export { type Agent, type CodexCumulativeUsage, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type SessionInfo, type UsageResult, type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult, type SkillInfo, type SkillListResult };
-export const VERSION = '0.2.21';
+export const VERSION = '0.2.22';
 const MACOS_USER_ACTIVITY_PULSE_INTERVAL_MS = 20_000;
 const MACOS_USER_ACTIVITY_PULSE_TIMEOUT_S = 30;
 
@@ -144,6 +144,20 @@ interface HostBatteryData {
   state: string;
 }
 
+interface HostCpuUsageData {
+  userPercent: number;
+  sysPercent: number;
+  idlePercent: number;
+  usedPercent: number;
+}
+
+interface HostMemoryUsageData {
+  usedBytes: number;
+  availableBytes: number;
+  percent: number;
+  source: 'os' | 'vm_stat';
+}
+
 function normalizeBatteryState(raw: string | null | undefined): string {
   const state = (raw || '').trim().toLowerCase().replace(/\s+/g, ' ');
   if (!state) return 'unknown';
@@ -245,6 +259,88 @@ function getHostBatteryData(): HostBatteryData | null {
   if (process.platform === 'linux') return getLinuxBatteryData();
   if (process.platform === 'win32') return getWindowsBatteryData();
   return null;
+}
+
+function parsePercent(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const n = Number.parseFloat(value.trim());
+  return Number.isFinite(n) ? n : null;
+}
+
+function getMacCpuUsageData(): HostCpuUsageData | null {
+  try {
+    const output = execSync('top -l 1 -n 0 | sed -n \'1,6p\'', { encoding: 'utf-8', timeout: 3000 });
+    const line = output.split('\n').find(entry => /^CPU usage:/i.test(entry.trim()));
+    if (!line) return null;
+    const match = line.match(/CPU usage:\s*([\d.]+)% user,\s*([\d.]+)% sys,\s*([\d.]+)% idle/i);
+    if (!match) return null;
+    const userPercent = parsePercent(match[1]);
+    const sysPercent = parsePercent(match[2]);
+    const idlePercent = parsePercent(match[3]);
+    if (userPercent == null || sysPercent == null || idlePercent == null) return null;
+    return {
+      userPercent,
+      sysPercent,
+      idlePercent,
+      usedPercent: Math.max(0, userPercent + sysPercent),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function getMacMemoryUsageData(totalMem: number): HostMemoryUsageData | null {
+  try {
+    const output = execSync('vm_stat', { encoding: 'utf-8', timeout: 3000 });
+    const pageSize = Number.parseInt(output.match(/page size of (\d+) bytes/i)?.[1] || '', 10);
+    if (!Number.isFinite(pageSize) || pageSize <= 0) return null;
+
+    const pages = new Map<string, number>();
+    for (const line of output.split('\n')) {
+      const match = line.match(/^Pages ([^:]+):\s+(\d+)\./);
+      if (!match) continue;
+      pages.set(match[1].trim().toLowerCase(), Number.parseInt(match[2], 10));
+    }
+
+    const reclaimablePages =
+      (pages.get('free') || 0) +
+      (pages.get('inactive') || 0) +
+      (pages.get('speculative') || 0) +
+      (pages.get('purgeable') || 0);
+    const availableBytes = Math.max(0, reclaimablePages * pageSize);
+    const usedBytes = Math.max(0, Math.min(totalMem, totalMem - availableBytes));
+    const percent = totalMem > 0 ? (usedBytes / totalMem) * 100 : 0;
+    return { usedBytes, availableBytes, percent, source: 'vm_stat' };
+  } catch {
+    return null;
+  }
+}
+
+function getHostCpuUsageData(): HostCpuUsageData | null {
+  if (process.platform === 'darwin') return getMacCpuUsageData();
+  return null;
+}
+
+function getHostDisplayName(): string {
+  if (process.platform === 'darwin') {
+    try {
+      const name = execSync('scutil --get ComputerName', { encoding: 'utf-8', timeout: 3000 }).trim();
+      if (name) return name;
+    } catch { /* fall through */ }
+  }
+  return os.hostname();
+}
+
+function getHostMemoryUsageData(totalMem: number, freeMem: number): HostMemoryUsageData {
+  if (process.platform === 'darwin') {
+    const macData = getMacMemoryUsageData(totalMem);
+    if (macData) return macData;
+  }
+
+  const usedBytes = Math.max(0, totalMem - freeMem);
+  const availableBytes = Math.max(0, freeMem);
+  const percent = totalMem > 0 ? (usedBytes / totalMem) * 100 : 0;
+  return { usedBytes, availableBytes, percent, source: 'os' };
 }
 
 // ---------------------------------------------------------------------------
@@ -357,6 +453,8 @@ export class Bot {
   getHostData() {
     const cpus = os.cpus();
     const totalMem = os.totalmem(), freeMem = os.freemem();
+    const memory = getHostMemoryUsageData(totalMem, freeMem);
+    const cpuUsage = getHostCpuUsageData();
     let disk: { used: string; total: string; percent: string } | null = null;
     const battery = getHostBatteryData();
     try {
@@ -369,8 +467,11 @@ export class Bot {
     } catch {}
     const mem = process.memoryUsage();
     return {
+      hostName: getHostDisplayName(),
       cpuModel: cpus[0]?.model || 'unknown', cpuCount: cpus.length,
-      totalMem, freeMem, disk, battery, topProcs,
+      cpuUsage,
+      totalMem, freeMem, memoryUsed: memory.usedBytes, memoryAvailable: memory.availableBytes, memoryPercent: memory.percent, memorySource: memory.source,
+      disk, battery, topProcs,
       selfPid: process.pid, selfRss: mem.rss, selfHeap: mem.heapUsed,
     };
   }

@@ -11,7 +11,7 @@ Every time this skill is invoked, execute ALL steps below in order:
 ## 1. Bump patch version
 
 1. Read current version from `package.json`.
-2. Increment the **patch** number (e.g. `0.2.20` → `0.2.21`).
+2. Increment the **patch** number (e.g. `0.2.21` → `0.2.22`).
 3. Update **both** `package.json` `"version"` field and `src/bot.ts` `VERSION` constant to the new version.
 4. Update the version examples in **this file** (SKILL.md) step 1's comments to reflect the new base version.
 

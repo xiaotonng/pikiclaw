@@ -98,6 +98,7 @@ describe('TelegramBot.sendFinalReply', () => {
     expect(edits).toHaveLength(1);
     expect(edits[0].text).toContain('Incomplete Response');
     expect(edits[0].text).toContain('Claude hit usage limit');
+    expect(edits[0].text).toContain('<blockquote>✗ claude · 17s</blockquote>');
     expect(edits[0].opts?.keyboard).toBeUndefined();
   });
 
@@ -182,7 +183,7 @@ describe('TelegramBot.sendFinalReply', () => {
     });
 
     expect(edits).toHaveLength(1);
-    expect(edits[0].text).toContain('codex - 25.7% - 1m25s');
+    expect(edits[0].text).toContain('<blockquote>✓ codex · 25.7% · 1m25s</blockquote>');
     expect(edits[0].text).not.toContain('gpt-5.4');
     expect(edits[0].text).not.toContain('cached:');
     expect(edits[0].text).not.toContain('in:');
@@ -311,10 +312,16 @@ describe('TelegramBot.cmdHost', () => {
     });
 
     vi.spyOn(bot, 'getHostData').mockReturnValue({
+      hostName: 'Xiaoxiao-MacBook-Air',
       cpuModel: 'Apple M4 Pro',
       cpuCount: 14,
+      cpuUsage: { usedPercent: 31.2, userPercent: 12.5, sysPercent: 18.7, idlePercent: 68.8 },
       totalMem: 36 * 1024 * 1024 * 1024,
       freeMem: 12 * 1024 * 1024 * 1024,
+      memoryUsed: 24 * 1024 * 1024 * 1024,
+      memoryAvailable: 12 * 1024 * 1024 * 1024,
+      memoryPercent: 66.7,
+      memorySource: 'vm_stat',
       battery: { percent: '87%', state: 'charging' },
       disk: { used: '220G', total: '460G', percent: '48%' },
       topProcs: ['  PID %CPU %MEM COMMAND', '1234 12.5 1.2 node'],
@@ -326,6 +333,10 @@ describe('TelegramBot.cmdHost', () => {
     await bot.handleCommand('host', '', ctx);
 
     expect(replies).toHaveLength(1);
+    expect(replies[0].text).toContain('<b>Name:</b> Xiaoxiao-MacBook-Air');
+    expect(replies[0].text).toContain('<b>CPU Usage:</b> 31.2% (12.5% user, 18.7% sys, 68.8% idle)');
+    expect(replies[0].text).toContain('<b>Memory:</b> 24.0GB / 36.0GB (67%)');
+    expect(replies[0].text).toContain('<b>Available:</b> 12.0GB');
     expect(replies[0].text).toContain('<b>Battery:</b> 87% (charging)');
     expect(replies[0].text).toContain('<b>Disk:</b> 220G used / 460G total (48%)');
     expect(replies[0].opts?.parseMode).toBe('HTML');
@@ -353,6 +364,38 @@ describe('TelegramBot.cmdStatus', () => {
     expect(replies[0].text).toContain('进度怎么样 第二行');
     expect(replies[0].text).not.toContain('[Telegram Artifact Return]');
     expect(replies[0].text).not.toContain('manifest.json');
+  });
+});
+
+describe('TelegramBot.handleCallback session preview', () => {
+  it('renders resumed history as a quoted user prompt plus normal assistant markdown', async () => {
+    const { bot, ctx, sends } = createBot();
+    const sessionId = 'sess-history-preview';
+
+    vi.spyOn(bot, 'fetchSessionTail').mockResolvedValue({
+      ok: true,
+      messages: [
+        { role: 'user', text: '请总结这次修改\n第二行保留原样' },
+        { role: 'assistant', text: '# Summary\nUse **bold** and `code`.\n\n```ts\nconst x = 1;\n```' },
+      ],
+      error: null,
+    });
+
+    await bot.handleCallback(`sess:${sessionId}`, ctx as any);
+
+    expect(ctx.editReply).toHaveBeenCalledWith(
+      ctx.messageId,
+      `Switched to session: <code>${sessionId.slice(0, 16)}</code>`,
+      { parseMode: 'HTML' },
+    );
+    expect(ctx.reply).not.toHaveBeenCalled();
+    expect(sends).toHaveLength(1);
+    expect(sends[0].opts).toEqual({ parseMode: 'HTML' });
+    expect(sends[0].opts?.replyTo).toBeUndefined();
+    expect(sends[0].text).toContain('<blockquote expandable>请总结这次修改\n第二行保留原样</blockquote>');
+    expect(sends[0].text).toContain('<b>Summary</b>');
+    expect(sends[0].text).toContain('Use <b>bold</b> and <code>code</code>.');
+    expect(sends[0].text).toContain('<pre><code class="language-ts">const x = 1;</code></pre>');
   });
 });
 
@@ -387,8 +430,8 @@ describe('TelegramBot.handleMessage streaming', () => {
 
       const previews = edits.filter(e => !e.opts?.parseMode).map(e => e.text);
       expect(previews.some(text => text.includes('Waiting for model output...'))).toBe(false);
-      expect(previews.some(text => text.includes('claude - 5s'))).toBe(true);
-      expect(previews.some(text => text.includes('claude - 10s'))).toBe(true);
+      expect(previews.some(text => text.includes('● claude · 5s'))).toBe(true);
+      expect(previews.some(text => text.includes('● claude · 10s'))).toBe(true);
       expect(channel.sendTyping).toHaveBeenCalled();
       expect(vi.mocked(channel.sendTyping).mock.calls.length).toBeGreaterThanOrEqual(3);
       expect(edits[edits.length - 1].text).toContain('Finally done.');
@@ -428,7 +471,7 @@ describe('TelegramBot.handleMessage streaming', () => {
       const previews = edits.filter(e => !e.opts?.parseMode).map(e => e.text);
       expect(previews.some(text => text.includes('No new output for'))).toBe(false);
       expect(previews.some(text => text.includes('idle'))).toBe(false);
-      expect(previews.some(text => text.includes('claude - 15s')) || previews.some(text => text.includes('claude - 20s'))).toBe(true);
+      expect(previews.some(text => text.includes('● claude · 15s')) || previews.some(text => text.includes('● claude · 20s'))).toBe(true);
     } finally {
       vi.useRealTimers();
     }
@@ -583,7 +626,7 @@ describe('TelegramBot.handleMessage streaming', () => {
     await (bot as any).handleMessage({ text: 'Inspect this repo', files: [] }, ctx);
 
     const preview = edits.find(e => !e.opts?.parseMode)?.text || '';
-    expect(preview).toContain('codex - 4.2% - ');
+    expect(preview).toContain('● codex · 4.2% · ');
     expect(preview).not.toContain('in:120');
     expect(preview).not.toContain('cached:30');
     expect(preview).not.toContain('out:18');
@@ -951,7 +994,7 @@ describe('TelegramBot.cmdModels', () => {
 
 
 describe('TelegramBot.cmdStart', () => {
-  it('shows a simple one-line English guide before the command list', async () => {
+  it('shows the shared welcome intro before the command list', async () => {
     const { bot, ctx } = createBot();
     const replies: Array<{ text: string; opts?: any }> = [];
     ctx.reply = vi.fn(async (text: string, opts?: any) => {
@@ -963,7 +1006,8 @@ describe('TelegramBot.cmdStart', () => {
 
     expect(replies).toHaveLength(1);
     expect(replies[0].opts).toEqual({ parseMode: 'HTML' });
-    expect(replies[0].text).toContain(`Hi, I'm codeclaw. Send me a message, and I will tell your remote assistant what to do.`);
+    expect(replies[0].text).toContain(`<b>Hi, I'm codeclaw</b> v`);
+    expect(replies[0].text).toContain(`Send me a message to get started.`);
     expect(replies[0].text).toContain('<b>Commands</b>');
     expect(replies[0].text).toContain('/sessions — Switch sessions');
     expect(replies[0].text).toContain('/restart — Restart bot');
@@ -974,7 +1018,7 @@ describe('TelegramBot.cmdStart', () => {
 });
 
 describe('TelegramBot.sendStartupNotice', () => {
-  it('uses a short single-line English startup hint', async () => {
+  it('uses the shared two-line welcome intro', async () => {
     const { bot, channel, ctx, sends } = createBot();
     (bot as any).allowedChatIds.clear();
     channel.knownChats.add(ctx.chatId);
@@ -983,9 +1027,9 @@ describe('TelegramBot.sendStartupNotice', () => {
 
     expect(channel.send).toHaveBeenCalledTimes(1);
     expect(sends[0].opts).toEqual({ parseMode: 'HTML' });
-    expect(sends[0].text).toContain(`Hi, I'm codeclaw`);
-    expect(sends[0].text).toContain('Send /start for a quick guide');
-    expect(sends[0].text).not.toContain('\n');
+    expect(sends[0].text).toContain(`<b>Hi, I'm codeclaw</b> v`);
+    expect(sends[0].text).toContain('Send me a message to get started.');
+    expect(sends[0].text).toContain('\n');
   });
 });
 
