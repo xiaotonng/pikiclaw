@@ -16,7 +16,7 @@ import {
 } from './code-agent.js';
 
 export { type Agent, type CodexCumulativeUsage, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type SessionInfo, type UsageResult, type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult, type SkillInfo, type SkillListResult };
-export const VERSION = '0.2.20';
+export const VERSION = '0.2.21';
 const MACOS_USER_ACTIVITY_PULSE_INTERVAL_MS = 20_000;
 const MACOS_USER_ACTIVITY_PULSE_TIMEOUT_S = 30;
 
@@ -110,9 +110,141 @@ export function thinkLabel(agent: Agent): string {
   return agent === 'codex' ? 'Reasoning' : 'Thinking';
 }
 
+export function extractThinkingTail(text: string, maxLines = 3): string {
+  const normalized = text.replace(/\r\n?/g, '\n').trim();
+  if (!normalized) return '';
+
+  const blocks = normalized
+    .split(/\n\s*\n+/)
+    .map(block => block.trim())
+    .filter(Boolean);
+  if (blocks.length > 1) return blocks[blocks.length - 1];
+
+  const lines = normalized
+    .split('\n')
+    .map(line => line.trimEnd())
+    .filter(line => line.trim());
+  if (lines.length > 1) return lines.slice(-Math.min(maxLines, lines.length)).join('\n').trim();
+  return normalized;
+}
+
+export function formatThinkingForDisplay(text: string, maxChars = 800): string {
+  let display = extractThinkingTail(text);
+  if (display.length > maxChars) display = '...\n' + display.slice(-maxChars);
+  return display;
+}
+
 export function buildPrompt(text: string, files: string[]): string {
   if (!files.length) return text;
   return `${text || 'Please analyze this.'}\n\n[Files: ${files.map(f => path.basename(f)).join(', ')}]`;
+}
+
+interface HostBatteryData {
+  percent: string;
+  state: string;
+}
+
+function normalizeBatteryState(raw: string | null | undefined): string {
+  const state = (raw || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  if (!state) return 'unknown';
+  if (state === 'finishing charge') return 'charging';
+  if (state === 'ac attached') return 'plugged in';
+  return state;
+}
+
+function getMacBatteryData(): HostBatteryData | null {
+  try {
+    const output = execSync('pmset -g batt', { encoding: 'utf-8', timeout: 3000 }).trim();
+    if (!output || /no batteries/i.test(output)) return null;
+
+    const line = output.split('\n').find(v => /\d+%/.test(v));
+    if (!line) return null;
+
+    const percent = line.match(/(\d+)%/)?.[1];
+    if (!percent) return null;
+
+    const states = line
+      .split(';')
+      .slice(1)
+      .map(segment => segment.replace(/\bpresent:\s*(true|false)\b/ig, '').trim())
+      .filter(Boolean);
+    const state = states.find(segment => /(charging|discharging|charged|not charging|finishing charge|full)/i.test(segment))
+      ?? states.find(segment => !/remaining/i.test(segment))
+      ?? 'unknown';
+
+    return { percent: `${percent}%`, state: normalizeBatteryState(state) };
+  } catch {
+    return null;
+  }
+}
+
+function getLinuxBatteryData(): HostBatteryData | null {
+  try {
+    const powerDir = '/sys/class/power_supply';
+    const batteries = fs.readdirSync(powerDir).filter(name => /^BAT/i.test(name));
+    for (const battery of batteries) {
+      const batteryDir = path.join(powerDir, battery);
+      const capacityPath = path.join(batteryDir, 'capacity');
+      if (!fs.existsSync(capacityPath)) continue;
+
+      const capacity = fs.readFileSync(capacityPath, 'utf-8').trim();
+      if (!capacity) continue;
+
+      const statusPath = path.join(batteryDir, 'status');
+      const state = fs.existsSync(statusPath) ? fs.readFileSync(statusPath, 'utf-8').trim() : 'unknown';
+      return {
+        percent: capacity.endsWith('%') ? capacity : `${capacity}%`,
+        state: normalizeBatteryState(state),
+      };
+    }
+  } catch {}
+
+  try {
+    const output = execSync(
+      'upower -e | grep -m1 battery | xargs -I{} upower -i "{}"',
+      { encoding: 'utf-8', timeout: 3000 },
+    ).trim();
+    if (!output) return null;
+
+    const percent = output.match(/percentage:\s*(\d+%)/i)?.[1];
+    if (!percent) return null;
+    const state = output.match(/state:\s*([^\n]+)/i)?.[1];
+    return { percent, state: normalizeBatteryState(state) };
+  } catch {
+    return null;
+  }
+}
+
+function getWindowsBatteryData(): HostBatteryData | null {
+  try {
+    const output = execSync(
+      'powershell -NoProfile -Command "Get-CimInstance Win32_Battery | Select-Object -First 1 EstimatedChargeRemaining,BatteryStatus | ConvertTo-Json -Compress"',
+      { encoding: 'utf-8', timeout: 3000 },
+    ).trim();
+    if (!output || output === 'null') return null;
+
+    const parsed = JSON.parse(output);
+    const percent = Number(parsed?.EstimatedChargeRemaining);
+    if (!Number.isFinite(percent)) return null;
+
+    const status = Number(parsed?.BatteryStatus);
+    const state = status === 6 ? 'charging'
+      : status === 3 ? 'charged'
+      : status === 2 ? 'plugged in'
+      : status === 1 ? 'discharging'
+      : 'unknown';
+
+    return { percent: `${percent}%`, state };
+  } catch {
+    return null;
+  }
+}
+
+function getHostBatteryData(): HostBatteryData | null {
+  if (process.platform === 'darwin') return getMacBatteryData();
+  if (process.platform === 'linux') return getLinuxBatteryData();
+  if (process.platform === 'win32') return getWindowsBatteryData();
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -226,6 +358,7 @@ export class Bot {
     const cpus = os.cpus();
     const totalMem = os.totalmem(), freeMem = os.freemem();
     let disk: { used: string; total: string; percent: string } | null = null;
+    const battery = getHostBatteryData();
     try {
       const df = execSync(`df -h "${this.workdir}" | tail -1`, { encoding: 'utf-8', timeout: 3000 }).trim().split(/\s+/);
       if (df.length >= 5) disk = { used: df[2], total: df[1], percent: df[4] };
@@ -237,7 +370,7 @@ export class Bot {
     const mem = process.memoryUsage();
     return {
       cpuModel: cpus[0]?.model || 'unknown', cpuCount: cpus.length,
-      totalMem, freeMem, disk, topProcs,
+      totalMem, freeMem, disk, battery, topProcs,
       selfPid: process.pid, selfRss: mem.rss, selfHeap: mem.heapUsed,
     };
   }

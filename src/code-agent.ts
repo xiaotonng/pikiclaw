@@ -547,11 +547,79 @@ function summarizeClaudeToolResult(
   return `${summary} -> ${shortValue(detail, 120)}`;
 }
 
+interface CodexActiveToolCall {
+  kind: string;
+  summary: string;
+}
+
+function isCodexToolCallItem(item: any): boolean {
+  return item?.type === 'dynamicToolCall'
+    || item?.type === 'mcpToolCall'
+    || item?.type === 'collabAgentToolCall';
+}
+
+function codexToolKind(name: unknown): string {
+  const raw = typeof name === 'string' ? name.trim() : '';
+  if (!raw) return 'tool';
+  const parts = raw.split('.');
+  return parts[parts.length - 1] || raw;
+}
+
+function compactPathTarget(value: unknown, max = 80): string {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (!raw) return '';
+  const normalized = raw.replace(/\\/g, '/');
+  const parts = normalized.split('/').filter(Boolean);
+  const compact = parts.length >= 2 ? parts.slice(-2).join('/') : normalized;
+  if (compact.length <= max) return compact;
+  return `...${compact.slice(-(max - 3))}`;
+}
+
+function summarizeCodexToolCall(item: any): CodexActiveToolCall | null {
+  const kind = codexToolKind(item?.tool);
+  switch (kind) {
+    case 'apply_patch':
+      return { kind, summary: 'Edit files' };
+    case 'exec_command':
+      return { kind, summary: 'Run shell command' };
+    case 'update_plan':
+      return { kind, summary: 'Update plan' };
+    case 'request_user_input':
+      return { kind, summary: 'Request user input' };
+    case 'view_image':
+      return { kind, summary: 'Inspect image' };
+    case 'parallel':
+      return { kind, summary: 'Run multiple tools' };
+    default: {
+      const label = shortValue(kind.replace(/_/g, ' '), 80);
+      return label ? { kind, summary: `Use ${label}` } : null;
+    }
+  }
+}
+
+function summarizeCodexFileChange(item: any): string {
+  const changes = Array.isArray(item?.changes) ? item.changes : [];
+  const paths = changes
+    .map((change: any) => compactPathTarget(change?.path, 90))
+    .filter(Boolean);
+  if (paths.length === 1) return `Updated ${paths[0]}`;
+  if (paths.length > 1) return `Updated ${paths.length} files`;
+  return 'Updated files';
+}
+
+function isCodexToolCallFailure(item: any): boolean {
+  if (!item || !isCodexToolCallItem(item)) return false;
+  if (item.success === false) return true;
+  if (item.error) return true;
+  return item.status === 'failed' || item.status === 'error';
+}
+
 function buildCodexActivityPreview(s: {
   recentNarrative: string[];
   recentFailures: string[];
   commentaryByItem: Map<string, string>;
   activeCommands: Map<string, string>;
+  activeToolCalls: Map<string, CodexActiveToolCall>;
   completedCommands: number;
 }): string {
   const lines = [...s.recentNarrative];
@@ -567,6 +635,10 @@ function buildCodexActivityPreview(s: {
   }
   if (s.activeCommands.size > 0) {
     lines.push(s.activeCommands.size === 1 ? 'Running 1 command...' : `Running ${s.activeCommands.size} commands...`);
+  }
+  for (const tool of s.activeToolCalls.values()) {
+    const running = tool.summary.endsWith('...') ? tool.summary : `${tool.summary}...`;
+    if (lines[lines.length - 1] !== running) lines.push(running);
   }
   return lines.join('\n');
 }
@@ -631,6 +703,7 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
     messagePhases: new Map<string, string>(),
     commentaryByItem: new Map<string, string>(),
     activeCommands: new Map<string, string>(),
+    activeToolCalls: new Map<string, CodexActiveToolCall>(),
     recentNarrative: [] as string[],
     recentFailures: [] as string[],
     completedCommands: 0,
@@ -712,6 +785,13 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
           s.activeCommands.set(item.id, item.command);
           emit();
         }
+        if (item.id && isCodexToolCallItem(item)) {
+          const toolCall = summarizeCodexToolCall(item);
+          if (toolCall) {
+            s.activeToolCalls.set(item.id, toolCall);
+            emit();
+          }
+        }
       }
 
       // Streaming text deltas
@@ -767,6 +847,22 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
               s.completedCommands++;
             }
           }
+          emit();
+        }
+        if (item.id && isCodexToolCallItem(item)) {
+          const toolCall = s.activeToolCalls.get(item.id) || summarizeCodexToolCall(item);
+          s.activeToolCalls.delete(item.id);
+          if (toolCall) {
+            if (isCodexToolCallFailure(item)) {
+              pushRecentActivity(s.recentFailures, `${toolCall.summary} failed`, 4);
+            } else if (toolCall.kind !== 'apply_patch') {
+              pushRecentActivity(s.recentNarrative, `${toolCall.summary} done`);
+            }
+          }
+          emit();
+        }
+        if (item.type === 'fileChange') {
+          pushRecentActivity(s.recentNarrative, summarizeCodexFileChange(item));
           emit();
         }
       }

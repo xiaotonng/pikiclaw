@@ -100,7 +100,7 @@ Bot commands (available once running):
   /agents     List or switch AI agents
   /models     List or switch models
   /status     Bot status, uptime, and token usage
-  /host       Host machine info (CPU, memory, disk)
+  /host       Host machine info (CPU, memory, disk, battery)
   /switch     Browse and change working directory
   /restart    Restart with latest version
 

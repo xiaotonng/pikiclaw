@@ -45,6 +45,7 @@ function createBot() {
     deleteMessage: vi.fn(async () => {}),
     sendTyping: vi.fn(async () => {}),
     disconnect: vi.fn(),
+    knownChats: new Set<number>(),
   };
 
   const bot = new TelegramBot();
@@ -155,6 +156,39 @@ describe('TelegramBot.sendFinalReply', () => {
     expect(edits[0].text).toContain('Timed out after 900s waiting for turn completion.');
   });
 
+  it('renders a minimal final footer with agent, context percent, and elapsed time only', async () => {
+    const { bot, ctx, edits } = createBot();
+
+    await (bot as any).sendFinalReply(ctx, 100, 'codex', {
+      ok: true,
+      message: 'Done.',
+      thinking: null,
+      sessionId: 'sess-footer',
+      model: 'gpt-5.4',
+      thinkingEffort: 'high',
+      elapsedS: 85,
+      inputTokens: 120,
+      outputTokens: 18,
+      cachedInputTokens: 30,
+      cacheCreationInputTokens: null,
+      contextWindow: 200000,
+      contextUsedTokens: 150,
+      contextPercent: 25.7,
+      codexCumulative: null,
+      error: null,
+      stopReason: null,
+      incomplete: false,
+      activity: null,
+    });
+
+    expect(edits).toHaveLength(1);
+    expect(edits[0].text).toContain('codex - 25.7% - 1m25s');
+    expect(edits[0].text).not.toContain('gpt-5.4');
+    expect(edits[0].text).not.toContain('cached:');
+    expect(edits[0].text).not.toContain('in:');
+    expect(edits[0].text).not.toContain('out:');
+  });
+
   it('does not attach reply buttons for complete responses', async () => {
     const { bot, ctx, edits } = createBot();
 
@@ -240,6 +274,62 @@ describe('TelegramBot.sendFinalReply', () => {
     expect(edits[0].text).not.toContain('Command failed (1)');
     expect(edits[0].text).not.toContain('npm test');
   });
+
+  it('shows only the last thinking block in the final reply', async () => {
+    const { bot, ctx, edits } = createBot();
+
+    await (bot as any).sendFinalReply(ctx, 104, 'claude', {
+      ok: true,
+      message: '结论已经整理好了。',
+      thinking: '先检查上下文\n再确认调用链\n\n最后定位到 Telegram 展示层把完整 thinking 透传出来了',
+      sessionId: 'sess-6',
+      model: 'claude-opus-4-6',
+      thinkingEffort: 'high',
+      elapsedS: 4.8,
+      inputTokens: 10,
+      outputTokens: 22,
+      cachedInputTokens: null,
+      error: null,
+      stopReason: null,
+      incomplete: false,
+    });
+
+    expect(edits).toHaveLength(1);
+    expect(edits[0].text).toContain('最后定位到 Telegram 展示层把完整 thinking 透传出来了');
+    expect(edits[0].text).not.toContain('先检查上下文');
+    expect(edits[0].text).not.toContain('再确认调用链');
+  });
+});
+
+describe('TelegramBot.cmdHost', () => {
+  it('shows battery percentage and charging state in host info', async () => {
+    const { bot, ctx } = createBot();
+    const replies: Array<{ text: string; opts?: any }> = [];
+    ctx.reply = vi.fn(async (text: string, opts?: any) => {
+      replies.push({ text, opts });
+      return 1;
+    });
+
+    vi.spyOn(bot, 'getHostData').mockReturnValue({
+      cpuModel: 'Apple M4 Pro',
+      cpuCount: 14,
+      totalMem: 36 * 1024 * 1024 * 1024,
+      freeMem: 12 * 1024 * 1024 * 1024,
+      battery: { percent: '87%', state: 'charging' },
+      disk: { used: '220G', total: '460G', percent: '48%' },
+      topProcs: ['  PID %CPU %MEM COMMAND', '1234 12.5 1.2 node'],
+      selfPid: 4321,
+      selfRss: 512 * 1024 * 1024,
+      selfHeap: 128 * 1024 * 1024,
+    });
+
+    await bot.handleCommand('host', '', ctx);
+
+    expect(replies).toHaveLength(1);
+    expect(replies[0].text).toContain('<b>Battery:</b> 87% (charging)');
+    expect(replies[0].text).toContain('<b>Disk:</b> 220G used / 460G total (48%)');
+    expect(replies[0].opts?.parseMode).toBe('HTML');
+  });
 });
 
 describe('TelegramBot.cmdStatus', () => {
@@ -297,8 +387,8 @@ describe('TelegramBot.handleMessage streaming', () => {
 
       const previews = edits.filter(e => !e.opts?.parseMode).map(e => e.text);
       expect(previews.some(text => text.includes('Waiting for model output...'))).toBe(false);
-      expect(previews.some(text => text.includes('claude | 5s'))).toBe(true);
-      expect(previews.some(text => text.includes('claude | 10s'))).toBe(true);
+      expect(previews.some(text => text.includes('claude - 5s'))).toBe(true);
+      expect(previews.some(text => text.includes('claude - 10s'))).toBe(true);
       expect(channel.sendTyping).toHaveBeenCalled();
       expect(vi.mocked(channel.sendTyping).mock.calls.length).toBeGreaterThanOrEqual(3);
       expect(edits[edits.length - 1].text).toContain('Finally done.');
@@ -307,7 +397,7 @@ describe('TelegramBot.handleMessage streaming', () => {
     }
   });
 
-  it('folds stalled-stream feedback into the footer instead of a separate sentence', async () => {
+  it('keeps the streaming footer minimal even when the agent stalls', async () => {
     vi.useFakeTimers();
     const { bot, ctx, edits } = createBot();
 
@@ -337,7 +427,8 @@ describe('TelegramBot.handleMessage streaming', () => {
 
       const previews = edits.filter(e => !e.opts?.parseMode).map(e => e.text);
       expect(previews.some(text => text.includes('No new output for'))).toBe(false);
-      expect(previews.some(text => /claude \| (15|20)s · idle (15|20)s/.test(text))).toBe(true);
+      expect(previews.some(text => text.includes('idle'))).toBe(false);
+      expect(previews.some(text => text.includes('claude - 15s')) || previews.some(text => text.includes('claude - 20s'))).toBe(true);
     } finally {
       vi.useRealTimers();
     }
@@ -411,7 +502,52 @@ describe('TelegramBot.handleMessage streaming', () => {
     expect(edits[edits.length - 1].text).toContain('codeclaw');
   });
 
-  it('shows live usage counters in the streaming footer', async () => {
+  it('shows only the last reasoning block in the streaming preview and final reply', async () => {
+    const { bot, ctx, edits } = createBot();
+    bot.chat(ctx.chatId).agent = 'codex';
+
+    const thinking = '先读代码路径\n再看 streaming 触发条件\n\n最后确认只需要展示 reasoning 的尾段就够了';
+
+    vi.spyOn(bot, 'runStream').mockImplementation(async (_prompt: string, _cs: any, _files: string[], onText: any) => {
+      onText('', thinking, '');
+      return {
+        ok: true,
+        message: 'done',
+        thinking,
+        sessionId: 'sess-stream-thinking',
+        model: 'gpt-5.4',
+        thinkingEffort: 'high',
+        elapsedS: 1.2,
+        inputTokens: 9,
+        outputTokens: 3,
+        cachedInputTokens: null,
+        cacheCreationInputTokens: null,
+        contextWindow: null,
+        contextUsedTokens: null,
+        contextPercent: null,
+        codexCumulative: null,
+        error: null,
+        stopReason: null,
+        incomplete: false,
+        activity: null,
+      };
+    });
+
+    await (bot as any).handleMessage({ text: 'Inspect this repo', files: [] }, ctx);
+
+    const preview = edits.find(e => !e.opts?.parseMode)?.text || '';
+    expect(preview).toContain('Reasoning');
+    expect(preview).toContain('最后确认只需要展示 reasoning 的尾段就够了');
+    expect(preview).not.toContain('先读代码路径');
+    expect(preview).not.toContain('再看 streaming 触发条件');
+
+    const final = edits[edits.length - 1].text;
+    expect(final).toContain('最后确认只需要展示 reasoning 的尾段就够了');
+    expect(final).not.toContain('先读代码路径');
+    expect(final).not.toContain('再看 streaming 触发条件');
+  });
+
+  it('shows only context usage in the streaming footer', async () => {
     const { bot, ctx, edits } = createBot();
     bot.chat(ctx.chatId).agent = 'codex';
 
@@ -447,10 +583,10 @@ describe('TelegramBot.handleMessage streaming', () => {
     await (bot as any).handleMessage({ text: 'Inspect this repo', files: [] }, ctx);
 
     const preview = edits.find(e => !e.opts?.parseMode)?.text || '';
-    expect(preview).toContain('in:120');
-    expect(preview).toContain('cached:30');
-    expect(preview).toContain('out:18');
-    expect(preview).toContain('ctx:4.2%');
+    expect(preview).toContain('codex - 4.2% - ');
+    expect(preview).not.toContain('in:120');
+    expect(preview).not.toContain('cached:30');
+    expect(preview).not.toContain('out:18');
   });
 
   it('renders structured codex plan steps in the streaming preview', async () => {
@@ -810,6 +946,46 @@ describe('TelegramBot.cmdModels', () => {
     expect(replies[0].text).toContain('Source: claude --help, current config');
     expect(replies[0].text).toContain('current (claude-opus-4-6)');
     expect(replies[0].opts?.keyboard?.inline_keyboard).toHaveLength(2);
+  });
+});
+
+
+describe('TelegramBot.cmdStart', () => {
+  it('shows a simple one-line English guide before the command list', async () => {
+    const { bot, ctx } = createBot();
+    const replies: Array<{ text: string; opts?: any }> = [];
+    ctx.reply = vi.fn(async (text: string, opts?: any) => {
+      replies.push({ text, opts });
+      return 1;
+    });
+
+    await (bot as any).cmdStart(ctx);
+
+    expect(replies).toHaveLength(1);
+    expect(replies[0].opts).toEqual({ parseMode: 'HTML' });
+    expect(replies[0].text).toContain(`Hi, I'm codeclaw. Send me a message, and I will tell your remote assistant what to do.`);
+    expect(replies[0].text).toContain('<b>Commands</b>');
+    expect(replies[0].text).toContain('/sessions — Switch sessions');
+    expect(replies[0].text).toContain('/restart — Restart bot');
+    expect(replies[0].text).toContain('<b>Agent:</b>');
+    expect(replies[0].text).toContain('<b>Workdir:</b>');
+    expect(replies[0].text).toContain('\n');
+  });
+});
+
+describe('TelegramBot.sendStartupNotice', () => {
+  it('uses a short single-line English startup hint', async () => {
+    const { bot, channel, ctx, sends } = createBot();
+    (bot as any).allowedChatIds.clear();
+    channel.knownChats.add(ctx.chatId);
+
+    await (bot as any).sendStartupNotice();
+
+    expect(channel.send).toHaveBeenCalledTimes(1);
+    expect(sends[0].opts).toEqual({ parseMode: 'HTML' });
+    expect(sends[0].text).toContain(`Hi, I'm codeclaw`);
+    expect(sends[0].text).toContain('Send /start for a quick guide');
+    expect(sends[0].text).not.toContain('\n');
   });
 });
 

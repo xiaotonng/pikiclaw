@@ -16,7 +16,7 @@
  *  +-- AUTOMATED (no user interaction needed) ----------------------------+
  *  |  1. /start — welcome message with version, agent, workdir           |
  *  |  2. /status — uptime, memory, PID, agent, session, usage stats      |
- *  |  3. /host — hostname, OS, CPU, memory, disk info                    |
+ *  |  3. /host — hostname, OS, CPU, memory, disk, battery info           |
  *  |  4. /agents — list agents with switch buttons                       |
  *  |  5. /sessions — list/switch sessions (or empty state)               |
  *  |  6. /switch — directory browser with inline keyboard                |
@@ -236,7 +236,7 @@ describe.skipIf(SKIP)('/status', () => {
 });
 
 describe.skipIf(SKIP)('/host', () => {
-  it('shows CPU, memory, process info', async () => {
+  it('shows CPU, memory, battery, process info', async () => {
     const ctx = makeRealCtx();
     await bot.handleCommand('host', '', ctx);
 
@@ -245,6 +245,7 @@ describe.skipIf(SKIP)('/host', () => {
     expect(text).toContain('Host');
     expect(text).toContain('CPU:');
     expect(text).toContain('Memory:');
+    expect(text).toContain('Battery:');
     expect(text).toContain('Process:');
   }, TIMEOUT);
 });

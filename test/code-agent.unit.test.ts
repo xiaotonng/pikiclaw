@@ -176,6 +176,91 @@ rl.on('line', (line) => {
       { step: 'Update tests', status: 'pending' },
     ]);
   });
+
+  it('surfaces apply_patch activity and resulting file changes through onText callbacks', async () => {
+    const script = `#!/usr/bin/env node
+const readline = require('node:readline');
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+rl.on('line', (line) => {
+  if (!line.trim()) return;
+  const msg = JSON.parse(line);
+
+  if (msg.method === 'initialize') {
+    process.stdout.write(JSON.stringify({ id: msg.id, result: {} }) + '\\n');
+    return;
+  }
+
+  if (msg.method === 'thread/start') {
+    process.stdout.write(JSON.stringify({
+      id: msg.id,
+      result: { thread: { id: 'thread-edit' }, model: msg.params.model || 'gpt-5.4' },
+    }) + '\\n');
+    return;
+  }
+
+  if (msg.method === 'turn/start') {
+    process.stdout.write(JSON.stringify({ id: msg.id, result: { turn: { id: 'turn-edit' } } }) + '\\n');
+    process.stdout.write(JSON.stringify({
+      method: 'item/started',
+      params: {
+        threadId: 'thread-edit',
+        item: {
+          id: 'tool-1',
+          type: 'dynamicToolCall',
+          tool: 'functions.apply_patch',
+          arguments: '*** Begin Patch',
+          status: 'inProgress',
+        },
+      },
+    }) + '\\n');
+    process.stdout.write(JSON.stringify({
+      method: 'item/completed',
+      params: {
+        threadId: 'thread-edit',
+        item: {
+          id: 'file-1',
+          type: 'fileChange',
+          status: 'completed',
+          changes: [
+            { path: 'src/bot-telegram.ts', kind: 'updated', diff: '@@' },
+          ],
+        },
+      },
+    }) + '\\n');
+    process.stdout.write(JSON.stringify({
+      method: 'item/completed',
+      params: {
+        threadId: 'thread-edit',
+        item: {
+          id: 'tool-1',
+          type: 'dynamicToolCall',
+          tool: 'functions.apply_patch',
+          arguments: '*** Begin Patch',
+          status: 'completed',
+          success: true,
+        },
+      },
+    }) + '\\n');
+    process.stdout.write(JSON.stringify({ method: 'turn/completed', params: { threadId: 'thread-edit', turn: { id: 'turn-edit', status: 'completed' } } }) + '\\n');
+    return;
+  }
+
+  process.stdout.write(JSON.stringify({ id: msg.id, error: { message: 'unexpected method' } }) + '\\n');
+});`;
+    fs.writeFileSync(path.join(fakeBin, 'codex'), script, { mode: 0o755 });
+
+    const activities: string[] = [];
+    const result = await doCodexStream(baseOpts('codex', {
+      onText: (_text, _thinking, activity) => {
+        if (activity?.trim()) activities.push(activity);
+      },
+    }));
+
+    expect(result.ok).toBe(true);
+    expect(activities.some(activity => activity.includes('Edit files...'))).toBe(true);
+    expect(result.activity).toContain('Updated src/bot-telegram.ts');
+    expect(result.activity).not.toContain('Edit files done');
+  });
 });
 
 describe.skip('codex stream (requires app-server — see e2e tests)', () => {

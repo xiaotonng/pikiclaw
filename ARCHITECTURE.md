@@ -94,7 +94,7 @@ bot-xxx.ts constructor.
 | `/sessions` | List / switch sessions (inline keys) |
 | `/agents`   | List / switch AI agents              |
 | `/status`   | Bot status, uptime, provider usage, token usage |
-| `/host`     | Host machine info (CPU, memory, disk) |
+| `/host`     | Host machine info (CPU, memory, disk, battery) |
 | `/switch`   | Browse and change working directory   |
 | `/restart`  | Restart with latest version via non-interactive `npx --yes` |
 

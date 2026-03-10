@@ -8,7 +8,7 @@
  *   npm run command -- codex-models
  */
 
-import { VERSION } from './bot.js';
+import { VERSION, formatThinkingForDisplay } from './bot.js';
 import { listAgents, listModels, listSkills, getUsage, doStream, getSessions, getSessionTail } from './code-agent.js';
 import type { Agent, StreamOpts } from './code-agent.js';
 
@@ -232,7 +232,7 @@ async function main() {
       if (result.error) process.stdout.write(`error:     ${result.error}\n`);
       process.stdout.write(`---\n`);
       if (result.thinking) {
-        process.stdout.write(`\n<thinking>\n${result.thinking}\n</thinking>\n`);
+        process.stdout.write(`\n<thinking>\n${formatThinkingForDisplay(result.thinking, 800)}\n</thinking>\n`);
       }
       process.stdout.write(`\n${result.message}\n`);
       process.exit(result.ok ? 0 : 1);

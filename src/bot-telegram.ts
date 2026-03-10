@@ -12,7 +12,7 @@ import { spawn } from 'node:child_process';
 import {
   Bot, VERSION, type Agent, type StreamPreviewMeta, type StreamPreviewPlan, type StreamResult,
   fmtTokens, fmtUptime, fmtBytes, whichSync, listSubdirs, buildPrompt,
-  thinkLabel, parseAllowedChatIds, shellSplit, type SkillInfo,
+  thinkLabel, formatThinkingForDisplay, parseAllowedChatIds, shellSplit, type SkillInfo,
 } from './bot.js';
 import { getCodexUsageLive, shutdownCodexServer } from './code-agent.js';
 import { TelegramChannel, type TgContext, type TgCallbackContext, type TgMessage } from './channel-telegram.js';
@@ -119,6 +119,10 @@ function ensureNonInteractiveRestartArgs(bin: string, args: string[]): string[] 
   if (!isNpxBinary(bin)) return args;
   if (args.includes('--yes') || args.includes('-y')) return args;
   return ['--yes', ...args];
+}
+
+function formatMenuLines(commands: { command: string; description: string }[]): string[] {
+  return commands.map(cmd => `/${cmd.command} \u2014 ${escapeHtml(cmd.description)}`);
 }
 
 const SKILL_CMD_PREFIX = 'sk_';
@@ -385,29 +389,23 @@ function summarizeActivityForPreview(activity: string): string {
 }
 
 function hasPreviewMeta(meta: StreamPreviewMeta | null | undefined): boolean {
-  return !!meta && (
-    meta.inputTokens != null
-    || meta.cachedInputTokens != null
-    || meta.outputTokens != null
-    || meta.contextPercent != null
-  );
+  return meta?.contextPercent != null;
 }
 
 function samePreviewMeta(a: StreamPreviewMeta | null, b: StreamPreviewMeta | null): boolean {
-  return (a?.inputTokens ?? null) === (b?.inputTokens ?? null)
-    && (a?.cachedInputTokens ?? null) === (b?.cachedInputTokens ?? null)
-    && (a?.outputTokens ?? null) === (b?.outputTokens ?? null)
-    && (a?.contextPercent ?? null) === (b?.contextPercent ?? null);
+  return (a?.contextPercent ?? null) === (b?.contextPercent ?? null);
 }
 
-function formatPreviewMetaParts(meta: StreamPreviewMeta | null): string[] {
-  if (!meta) return [];
-  const parts: string[] = [];
-  if (meta.inputTokens != null) parts.push(`in:${fmtTokens(meta.inputTokens)}`);
-  if (meta.cachedInputTokens != null) parts.push(`cached:${fmtTokens(meta.cachedInputTokens)}`);
-  if (meta.outputTokens != null) parts.push(`out:${fmtTokens(meta.outputTokens)}`);
-  if (meta.contextPercent != null) parts.push(`ctx:${meta.contextPercent}%`);
-  return parts;
+function fmtCompactUptime(ms: number): string {
+  return fmtUptime(ms).replace(/\s+/g, '');
+}
+
+function formatFooterLine(agent: Agent, elapsedMs: number, meta?: StreamPreviewMeta | null, contextPercent?: number | null): string {
+  const parts: string[] = [agent];
+  const ctx = contextPercent ?? meta?.contextPercent ?? null;
+  if (ctx != null) parts.push(`${ctx}%`);
+  parts.push(fmtCompactUptime(Math.max(0, Math.round(elapsedMs))));
+  return parts.join(' - ');
 }
 
 function normalizePlanStep(step: string): string {
@@ -600,24 +598,24 @@ export class TelegramBot extends Bot {
 
   private static buildMenuCommands(agentCount: number, skills: SkillInfo[] = []) {
     const commands = [
-      { command: 'sessions', description: 'List / switch sessions' },
+      { command: 'sessions', description: 'Switch sessions' },
     ];
 
     // Only show agents in normal position if there are multiple agents
     if (agentCount > 1) {
-      commands.push({ command: 'agents', description: 'List / switch agents' });
+      commands.push({ command: 'agents', description: 'Switch agents' });
     }
 
     commands.push(
-      { command: 'switch', description: 'Switch working directory' },
-      { command: 'models', description: 'List / switch models' },
-      { command: 'status', description: 'Bot status' },
-      { command: 'host', description: 'Host machine info' },
+      { command: 'switch', description: 'Change workdir' },
+      { command: 'models', description: 'Switch models' },
+      { command: 'status', description: 'Show status' },
+      { command: 'host', description: 'Host info' },
     );
 
     // If only one agent, put agents at the bottom
     if (agentCount === 1) {
-      commands.push({ command: 'agents', description: 'List / switch agents' });
+      commands.push({ command: 'agents', description: 'Switch agents' });
     }
 
     // Inject project-defined skills as sk_<name> commands
@@ -627,7 +625,7 @@ export class TelegramBot extends Bot {
       commands.push({ command: cmdName, description: `⚡ ${displayName}` });
     }
 
-    commands.push({ command: 'restart', description: 'Restart with latest version' });
+    commands.push({ command: 'restart', description: 'Restart bot' });
 
     return commands;
   }
@@ -657,13 +655,17 @@ export class TelegramBot extends Bot {
   private async cmdStart(ctx: TgContext) {
     const cs = this.chat(ctx.chatId);
     const { commands } = this.getCurrentMenuState();
-
-    const lines = [`<b>codeclaw</b> v${VERSION}\n`];
-    for (const cmd of commands) {
-      lines.push(`/${cmd.command} \u2014 ${escapeHtml(cmd.description)}`);
-    }
-    lines.push(`\n<b>Agent:</b> ${escapeHtml(cs.agent)}  <b>Workdir:</b> <code>${escapeHtml(this.workdir)}</code>`);
-
+    const lines = [
+      `<b>codeclaw</b> v${VERSION}`,
+      '',
+      `Hi, I'm codeclaw. Send me a message, and I will tell your remote assistant what to do.`,
+      '',
+      `<b>Agent:</b> ${escapeHtml(cs.agent)}`,
+      `<b>Workdir:</b> <code>${escapeHtml(this.workdir)}</code>`,
+      '',
+      '<b>Commands</b>',
+      ...formatMenuLines(commands),
+    ];
     await ctx.reply(lines.join('\n'), { parseMode: 'HTML' });
   }
 
@@ -756,6 +758,7 @@ export class TelegramBot extends Bot {
       `<b>Host</b>\n`,
       `<b>CPU:</b> ${escapeHtml(d.cpuModel)} x${d.cpuCount}`,
       `<b>Memory:</b> ${fmtBytes(d.totalMem - d.freeMem)} / ${fmtBytes(d.totalMem)} (${((1 - d.freeMem / d.totalMem) * 100).toFixed(0)}%)`,
+      `<b>Battery:</b> ${d.battery ? `${escapeHtml(d.battery.percent)} (${escapeHtml(d.battery.state)})` : 'unavailable'}`,
     ];
     if (d.disk) lines.push(`<b>Disk:</b> ${escapeHtml(d.disk.used)} used / ${escapeHtml(d.disk.total)} total (${escapeHtml(d.disk.percent)})`);
     lines.push(`\n<b>Process:</b> PID ${d.selfPid} | RSS ${fmtBytes(d.selfRss)} | Heap ${fmtBytes(d.selfHeap)}`);
@@ -917,15 +920,14 @@ export class TelegramBot extends Bot {
       };
 
       const renderPreview = (text: string, thinking: string, activity: string, meta: StreamPreviewMeta | null) => {
+        const maxBody = 2400;
+        const maxActivity = 900;
         const display = text.trim();
-        const thinkDisplay = thinking.trim();
+        const rawThinking = thinking.trim();
+        const thinkDisplay = formatThinkingForDisplay(thinking, maxBody);
         const planDisplay = renderPlanForPreview(latestPlan);
         const activityDisplay = summarizeActivityForPreview(activity);
         const now = Date.now();
-        const elapsed = ((now - start) / 1000).toFixed(0);
-        const idleMs = now - lastProgressAt;
-        const maxBody = 2400;
-        const maxActivity = 900;
         const parts: string[] = [];
         const tLabel = thinkLabel(cs.agent);
 
@@ -939,20 +941,14 @@ export class TelegramBot extends Bot {
         }
 
         if (thinkDisplay && !display) {
-          const preview = thinkDisplay.length > maxBody ? '...\n' + thinkDisplay.slice(-maxBody) : thinkDisplay;
-          parts.push(`${tLabel}\n${preview}`);
+          parts.push(`${tLabel}\n${thinkDisplay}`);
         } else if (display) {
-          if (thinkDisplay) parts.push(`${tLabel} (${thinkDisplay.length} chars)`);
+          if (rawThinking) parts.push(`${tLabel} (${rawThinking.length} chars)`);
           const preview = display.length > maxBody ? '(...truncated)\n' + display.slice(-maxBody) : display;
           parts.push(preview);
         }
 
-        const status = '.'.repeat((editCount % 3) + 1);
-        const footer = [`${cs.agent} | ${elapsed}s`];
-        footer.push(...formatPreviewMetaParts(meta));
-        if (idleMs >= STREAM_STALLED_NOTICE_MS) footer.push(`idle ${fmtUptime(idleMs)}`);
-        else footer.push(status);
-        parts.push(footer.join(' \u00b7 '));
+        parts.push(formatFooterLine(cs.agent, now - start, meta));
         return parts.join('\n\n');
       };
 
@@ -1135,23 +1131,7 @@ export class TelegramBot extends Bot {
   }
 
   private async sendFinalReply(ctx: TgContext, phId: number, agent: Agent, result: StreamResult): Promise<number | null> {
-    const metaParts: string[] = [agent];
-    if (result.model) metaParts.push(result.model);
-    if (result.elapsedS != null) metaParts.push(`${result.elapsedS.toFixed(1)}s`);
-    const meta = `<code>${metaParts.join(' \u00b7 ')}</code>`;
-
-    let tokenBlock = '';
-    if (result.inputTokens != null || result.outputTokens != null) {
-      const tp: string[] = [];
-      if (result.inputTokens != null) tp.push(`in: ${fmtTokens(result.inputTokens)}`);
-      if (result.cachedInputTokens) tp.push(`cached: ${fmtTokens(result.cachedInputTokens)}`);
-      if (result.outputTokens != null) tp.push(`out: ${fmtTokens(result.outputTokens)}`);
-      // Context window usage percentage (input + cached + cacheCreation + output)
-      if (result.contextPercent != null) {
-        tp.push(`ctx: ${result.contextPercent}%`);
-      }
-      tokenBlock = `\n<blockquote expandable>${tp.join('  ')}</blockquote>`;
-    }
+    const footer = escapeHtml(formatFooterLine(agent, result.elapsedS * 1000, null, result.contextPercent ?? null));
 
     let activityHtml = '';
     let activityNoteHtml = '';
@@ -1174,8 +1154,7 @@ export class TelegramBot extends Bot {
     let thinkingHtml = '';
     if (result.thinking) {
       const label = thinkLabel(agent);
-      let display = result.thinking;
-      if (display.length > 800) display = '...\n' + display.slice(-800);
+      const display = formatThinkingForDisplay(result.thinking, 800);
       thinkingHtml = `<blockquote><b>${label}</b>\n${escapeHtml(display)}</blockquote>\n\n`;
     }
 
@@ -1195,7 +1174,7 @@ export class TelegramBot extends Bot {
     }
 
     const bodyHtml = mdToTgHtml(result.message);
-    const fullHtml = `${activityHtml}${activityNoteHtml}${statusHtml}${thinkingHtml}${bodyHtml}\n\n${meta}${tokenBlock}`;
+    const fullHtml = `${activityHtml}${activityNoteHtml}${statusHtml}${thinkingHtml}${bodyHtml}\n\n${footer}`;
     let finalMsgId: number | null = phId;
 
     if (fullHtml.length <= 3900) {
@@ -1208,7 +1187,7 @@ export class TelegramBot extends Bot {
       // Send full content as split plain-text messages instead of a file.
       // First message: edit placeholder with meta + thinking + beginning of body.
       const headerHtml = `${activityHtml}${activityNoteHtml}${statusHtml}${thinkingHtml}`;
-      const footerHtml = `\n\n${meta}${tokenBlock}`;
+      const footerHtml = `\n\n${footer}`;
       const maxFirst = 3900 - headerHtml.length - footerHtml.length;
       let firstBody: string;
       let remaining: string;
@@ -1482,13 +1461,7 @@ export class TelegramBot extends Bot {
       return;
     }
 
-    const agents = ['claude', 'codex'].filter(e => whichSync(e));
-    const text =
-      `<b>codeclaw</b> v${VERSION} online\n\n` +
-      `<b>Agent:</b> ${escapeHtml(this.defaultAgent)}\n` +
-      `<b>Available:</b> ${escapeHtml(agents.join(', ') || 'none')}\n` +
-      `<b>Workdir:</b> <code>${escapeHtml(this.workdir)}</code>\n\n` +
-      `<i>/start for commands</i>`;
+    const text = `<b>Hi, I'm codeclaw</b> v${VERSION}. Send /start for a quick guide.`;
 
     for (const cid of targets) {
       try {
