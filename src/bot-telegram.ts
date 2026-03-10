@@ -30,11 +30,15 @@ function escapeHtml(t: string): string {
   return t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-function claudeModelAlias(modelId: string | null | undefined): string | null {
+function claudeModelSelectionKey(modelId: string | null | undefined): string | null {
   const value = String(modelId || '').trim().toLowerCase();
   if (!value) return null;
-  if (value === 'opus' || value.startsWith('claude-opus-')) return 'opus';
-  if (value === 'sonnet' || value.startsWith('claude-sonnet-')) return 'sonnet';
+  if (value === 'opus' || value === 'opus-1m' || value.startsWith('claude-opus-')) {
+    return value === 'opus-1m' || value.endsWith('[1m]') ? 'opus-1m' : 'opus';
+  }
+  if (value === 'sonnet' || value === 'sonnet-1m' || value.startsWith('claude-sonnet-')) {
+    return value === 'sonnet-1m' || value.endsWith('[1m]') ? 'sonnet-1m' : 'sonnet';
+  }
   if (value === 'haiku' || value.startsWith('claude-haiku-')) return 'haiku';
   return null;
 }
@@ -42,8 +46,8 @@ function claudeModelAlias(modelId: string | null | undefined): string | null {
 function modelMatchesSelection(agent: Agent, selection: string, currentModel: string): boolean {
   if (selection === currentModel) return true;
   if (agent !== 'claude') return false;
-  const a = claudeModelAlias(selection);
-  const b = claudeModelAlias(currentModel);
+  const a = claudeModelSelectionKey(selection);
+  const b = claudeModelSelectionKey(currentModel);
   return !!a && a === b;
 }
 
@@ -1366,7 +1370,7 @@ export class TelegramBot extends Bot {
       const modelId = data.slice(4);
       const cs = this.chat(ctx.chatId);
       const currentModel = this.modelForAgent(cs.agent);
-      if (currentModel === modelId) {
+      if (modelMatchesSelection(cs.agent, modelId, currentModel)) {
         await ctx.answerCallback(`Already using ${modelId}`);
         return;
       }

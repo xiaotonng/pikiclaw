@@ -990,6 +990,55 @@ describe('TelegramBot.cmdModels', () => {
     expect(replies[0].text).toContain('current (claude-opus-4-6)');
     expect(replies[0].opts?.keyboard?.inline_keyboard).toHaveLength(2);
   });
+
+  it('does not mark the Claude 1m variant as current when the base model is selected', async () => {
+    const { bot, ctx } = createBot();
+    const replies: Array<{ text: string; opts?: any }> = [];
+    ctx.reply = vi.fn(async (text: string, opts?: any) => {
+      replies.push({ text, opts });
+      return 1;
+    });
+
+    bot.chat(ctx.chatId).agent = 'claude';
+    (bot as any).claudeModel = 'claude-opus-4-6';
+    vi.spyOn(bot, 'fetchModels').mockReturnValue({
+      agent: 'claude',
+      models: [
+        { id: 'claude-opus-4-6', alias: 'opus' },
+        { id: 'claude-opus-4-6[1m]', alias: 'opus-1m' },
+      ],
+      sources: [],
+      note: null,
+    });
+
+    await (bot as any).cmdModels(ctx);
+
+    expect(replies).toHaveLength(1);
+    expect(replies[0].text).toContain('● <code>opus (claude-opus-4-6)</code> ← current');
+    expect(replies[0].text).toContain('○ <code>opus-1m (claude-opus-4-6[1m])</code>');
+    expect(replies[0].text).not.toContain('opus-1m (claude-opus-4-6[1m])</code> ← current');
+    expect(replies[0].opts?.keyboard?.inline_keyboard).toEqual([
+      [{ text: '● opus', callback_data: 'mod:claude-opus-4-6' }],
+      [{ text: 'opus-1m', callback_data: 'mod:claude-opus-4-6[1m]' }],
+    ]);
+  });
+});
+
+describe('TelegramBot.handleCallback model selection', () => {
+  it('does not reset the session when a Claude alias resolves to the current model', async () => {
+    const { bot, ctx } = createBot();
+    const cs = bot.chat(ctx.chatId);
+    cs.agent = 'claude';
+    cs.sessionId = 'sess-keep';
+    (bot as any).claudeModel = 'opus';
+
+    await bot.handleCallback('mod:claude-opus-4-6', ctx as any);
+
+    expect(ctx.answerCallback).toHaveBeenCalledWith('Already using claude-opus-4-6');
+    expect(ctx.editReply).not.toHaveBeenCalled();
+    expect(cs.sessionId).toBe('sess-keep');
+    expect((bot as any).claudeModel).toBe('opus');
+  });
 });
 
 
