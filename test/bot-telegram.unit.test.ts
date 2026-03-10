@@ -9,63 +9,43 @@ vi.mock('node:child_process', async importOriginal => {
 
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { TelegramBot, buildArtifactPrompt } from '../src/bot-telegram.ts';
-import type { TgContext } from '../src/channel-telegram.ts';
+import { TelegramChannel } from '../src/channel-telegram.ts';
+import type { Agent, StreamResult } from '../src/code-agent.ts';
+import { makeTmpDir } from './support/env.ts';
+import { makeStreamResult } from './support/stream-result.ts';
+import { createTelegramBotHarness } from './support/telegram-bot-harness.ts';
 
 function createBot() {
-  const edits: Array<{ text: string; opts?: any }> = [];
-  const sends: Array<{ text: string; opts?: any }> = [];
-  const docs: Array<{ content: string | Buffer; filename: string; opts?: any }> = [];
-  const files: Array<{ filePath: string; opts?: any }> = [];
-  const reactions: Array<{ chatId: number; messageId: number; reactions: string[] }> = [];
-  const channel = {
-    editMessage: vi.fn(async (_chatId: number, _msgId: number, text: string, opts?: any) => {
-      edits.push({ text, opts });
-    }),
-    send: vi.fn(async (_chatId: number, text: string, opts?: any) => {
-      sends.push({ text, opts });
-      return 777;
-    }),
-    sendDocument: vi.fn(async (_chatId: number, content: string | Buffer, filename: string, opts?: any) => {
-      docs.push({ content, filename, opts });
-      return 778;
-    }),
-    sendFile: vi.fn(async (_chatId: number, filePath: string, opts?: any) => {
-      files.push({ filePath, opts });
-      return 779;
-    }),
-    setMessageReaction: vi.fn(async (chatId: number, messageId: number, reactionList: string[]) => {
-      reactions.push({ chatId, messageId, reactions: reactionList });
-    }),
-    setMenu: vi.fn(async () => {}),
-    deleteMessage: vi.fn(async () => {}),
-    sendTyping: vi.fn(async () => {}),
-    disconnect: vi.fn(),
-    knownChats: new Set<number>(),
-  };
+  return createTelegramBotHarness();
+}
 
-  const bot = new TelegramBot();
-  (bot as any).channel = channel;
+const claudeResult = (overrides: Partial<StreamResult> = {}) => makeStreamResult('claude', overrides);
+const codexResult = (overrides: Partial<StreamResult> = {}) => makeStreamResult('codex', overrides);
 
-  const ctx: TgContext = {
-    chatId: 100,
-    messageId: 200,
-    from: { id: 300 },
-    reply: vi.fn(async () => 1),
-    editReply: vi.fn(async () => {}),
-    answerCallback: vi.fn(async () => {}),
-    channel: channel as any,
-    raw: {},
-  };
+async function renderFinalReply(
+  agent: Agent,
+  overrides: Partial<StreamResult>,
+  messageId = 100,
+) {
+  const harness = createBot();
+  await (harness.bot as any).sendFinalReply(harness.ctx, messageId, agent, makeStreamResult(agent, overrides));
+  expect(harness.edits).toHaveLength(1);
+  return { ...harness, finalEdit: harness.edits[0] };
+}
 
-  return { bot, channel, ctx, edits, sends, docs, files, reactions };
+function previewTexts(edits: Array<{ text: string; opts?: any }>): string[] {
+  return edits.slice(0, -1).map(entry => entry.text);
+}
+
+function previewText(edits: Array<{ text: string; opts?: any }>): string {
+  return previewTexts(edits).join('\n\n');
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-tg-unit-'));
+  const tmpDir = makeTmpDir('bot-tg-unit-');
   process.env.TELEGRAM_BOT_TOKEN = 'test-token';
   process.env.CODECLAW_WORKDIR = tmpDir;
   process.env.DEFAULT_AGENT = 'claude';
@@ -75,259 +55,232 @@ beforeEach(() => {
 
 describe('TelegramBot.sendFinalReply', () => {
   it('shows incomplete status without attaching reply buttons on agent error', async () => {
-    const { bot, ctx, edits } = createBot();
-
-    await (bot as any).sendFinalReply(ctx, 99, 'claude', {
+    const { finalEdit } = await renderFinalReply('claude', {
       ok: false,
       message: 'Should I continue?',
-      thinking: null,
-      sessionId: 'sess-1',
-      model: 'claude-opus-4-6',
-      thinkingEffort: 'high',
       elapsedS: 17.2,
       inputTokens: 3,
       outputTokens: 178,
-      cachedInputTokens: null,
       error: 'Claude hit usage limit',
-      stopReason: null,
       incomplete: true,
-    });
+    }, 99);
 
-    expect(edits).toHaveLength(1);
-    expect(edits[0].text).toContain('Incomplete Response');
-    expect(edits[0].text).toContain('Claude hit usage limit');
-    expect(edits[0].text).toContain('<blockquote>✗ claude · 17s</blockquote>');
-    expect(edits[0].opts?.keyboard).toBeUndefined();
+    expect(finalEdit.text).toContain('Incomplete Response');
+    expect(finalEdit.text).toContain('Claude hit usage limit');
+    expect(finalEdit.text).toContain('✗ claude · 17s');
+    expect(finalEdit.opts?.keyboard).toBeUndefined();
   });
 
   it('shows truncation warning for stop_reason=max_tokens', async () => {
-    const { bot, ctx, edits } = createBot();
-
-    await (bot as any).sendFinalReply(ctx, 100, 'claude', {
-      ok: true,
+    const { finalEdit } = await renderFinalReply('claude', {
       message: 'Answer stopped mid-way',
-      thinking: null,
-      sessionId: 'sess-2',
-      model: 'claude-opus-4-6',
-      thinkingEffort: 'high',
       elapsedS: 9.4,
       inputTokens: 12,
       outputTokens: 999,
-      cachedInputTokens: null,
-      error: null,
       stopReason: 'max_tokens',
       incomplete: true,
     });
 
-    expect(edits).toHaveLength(1);
-    expect(edits[0].text).toContain('Incomplete Response');
-    expect(edits[0].text).toContain('Output limit reached. Response may be truncated.');
+    expect(finalEdit.text).toContain('Incomplete Response');
+    expect(finalEdit.text).toContain('Output limit reached. Response may be truncated.');
   });
 
   it('shows an explicit timeout warning when the agent does not complete in time', async () => {
-    const { bot, ctx, edits } = createBot();
-
-    await (bot as any).sendFinalReply(ctx, 100, 'codex', {
+    const { finalEdit } = await renderFinalReply('codex', {
       ok: false,
       message: 'Timed out after 900s waiting for turn completion.',
-      thinking: null,
       sessionId: 'sess-timeout',
-      model: 'gpt-5.4',
-      thinkingEffort: 'high',
       elapsedS: 905,
       inputTokens: 12,
       outputTokens: 34,
       cachedInputTokens: 56,
-      cacheCreationInputTokens: null,
-      contextWindow: null,
-      contextUsedTokens: null,
-      contextPercent: null,
-      codexCumulative: null,
       error: 'Timed out after 900s waiting for turn completion.',
       stopReason: 'timeout',
       incomplete: true,
-      activity: null,
     });
 
-    expect(edits).toHaveLength(1);
-    expect(edits[0].text).toContain('Incomplete Response');
-    expect(edits[0].text).toContain('Timed out after 15m 5s before the agent reported completion.');
-    expect(edits[0].text).toContain('Timed out after 900s waiting for turn completion.');
+    expect(finalEdit.text).toContain('Incomplete Response');
+    expect(finalEdit.text).toContain('Timed out after 15m 5s before the agent reported completion.');
+    expect(finalEdit.text).toContain('Timed out after 900s waiting for turn completion.');
   });
 
   it('renders a minimal final footer with agent, context percent, and elapsed time only', async () => {
-    const { bot, ctx, edits } = createBot();
-
-    await (bot as any).sendFinalReply(ctx, 100, 'codex', {
-      ok: true,
+    const { finalEdit } = await renderFinalReply('codex', {
       message: 'Done.',
-      thinking: null,
       sessionId: 'sess-footer',
-      model: 'gpt-5.4',
-      thinkingEffort: 'high',
       elapsedS: 85,
       inputTokens: 120,
       outputTokens: 18,
       cachedInputTokens: 30,
-      cacheCreationInputTokens: null,
       contextWindow: 200000,
       contextUsedTokens: 150,
       contextPercent: 25.7,
-      codexCumulative: null,
-      error: null,
-      stopReason: null,
-      incomplete: false,
-      activity: null,
     });
 
-    expect(edits).toHaveLength(1);
-    expect(edits[0].text).toContain('<blockquote>✓ codex · 25.7% · 1m25s</blockquote>');
-    expect(edits[0].text).not.toContain('gpt-5.4');
-    expect(edits[0].text).not.toContain('cached:');
-    expect(edits[0].text).not.toContain('in:');
-    expect(edits[0].text).not.toContain('out:');
+    expect(finalEdit.text).toContain('✓ codex · 25.7% · 1m25s');
+    expect(finalEdit.text).not.toContain('gpt-5.4');
+    expect(finalEdit.text).not.toContain('cached:');
+    expect(finalEdit.text).not.toContain('in:');
+    expect(finalEdit.text).not.toContain('out:');
   });
 
   it('does not attach reply buttons for complete responses', async () => {
-    const { bot, ctx, edits } = createBot();
-
-    await (bot as any).sendFinalReply(ctx, 101, 'claude', {
-      ok: true,
+    const { finalEdit } = await renderFinalReply('claude', {
       message: 'Should I continue?',
-      thinking: null,
-      sessionId: 'sess-3',
-      model: 'claude-opus-4-6',
-      thinkingEffort: 'high',
       elapsedS: 5.1,
       inputTokens: 2,
       outputTokens: 12,
-      cachedInputTokens: null,
-      error: null,
-      stopReason: null,
-      incomplete: false,
-    });
+    }, 101);
 
-    expect(edits).toHaveLength(1);
-    expect(edits[0].opts?.keyboard).toBeUndefined();
+    expect(finalEdit.opts?.keyboard).toBeUndefined();
   });
 
   it('renders command-only activity as a low-key note in the final reply', async () => {
-    const { bot, ctx, edits } = createBot();
-
-    await (bot as any).sendFinalReply(ctx, 102, 'codex', {
-      ok: true,
+    const { finalEdit } = await renderFinalReply('codex', {
       message: 'Build finished.',
-      thinking: null,
-      sessionId: 'sess-4',
-      model: 'gpt-5.4',
-      thinkingEffort: 'high',
       elapsedS: 3.2,
       inputTokens: 7,
       outputTokens: 21,
-      cachedInputTokens: null,
-      cacheCreationInputTokens: null,
-      contextWindow: null,
-      contextUsedTokens: null,
-      contextPercent: null,
-      codexCumulative: null,
-      error: null,
-      stopReason: null,
-      incomplete: false,
       activity: 'Ran: /bin/zsh -lc npm run build\nRan: /bin/zsh -lc npm test',
-    });
+    }, 102);
 
-    expect(edits).toHaveLength(1);
-    expect(edits[0].text).toContain('<i>commands: 2 done</i>');
-    expect(edits[0].text).not.toContain('<b>Activity</b>');
-    expect(edits[0].text).not.toContain('npm run build');
-    expect(edits[0].text).not.toContain('npm test');
+    expect(finalEdit.text).toContain('<i>commands: 2 done</i>');
+    expect(finalEdit.text).not.toContain('<b>Activity</b>');
+    expect(finalEdit.text).not.toContain('npm run build');
+    expect(finalEdit.text).not.toContain('npm test');
   });
 
   it('renders failed commands as part of the low-key command note', async () => {
-    const { bot, ctx, edits } = createBot();
-
-    await (bot as any).sendFinalReply(ctx, 103, 'codex', {
-      ok: true,
+    const { finalEdit } = await renderFinalReply('codex', {
       message: 'Build failed.',
-      thinking: null,
-      sessionId: 'sess-5',
-      model: 'gpt-5.4',
-      thinkingEffort: 'high',
       elapsedS: 2.4,
       inputTokens: 6,
       outputTokens: 9,
-      cachedInputTokens: null,
-      cacheCreationInputTokens: null,
-      contextWindow: null,
-      contextUsedTokens: null,
-      contextPercent: null,
-      codexCumulative: null,
-      error: null,
-      stopReason: null,
-      incomplete: false,
       activity: 'Command failed (1): /bin/zsh -lc npm test\nRan: /bin/zsh -lc npm run build',
-    });
+    }, 103);
 
-    expect(edits).toHaveLength(1);
-    expect(edits[0].text).toContain('<i>commands: 1 failed, 1 done</i>');
-    expect(edits[0].text).not.toContain('Command failed (1)');
-    expect(edits[0].text).not.toContain('npm test');
+    expect(finalEdit.text).toContain('<i>commands: 1 failed, 1 done</i>');
+    expect(finalEdit.text).not.toContain('Command failed (1)');
+    expect(finalEdit.text).not.toContain('npm test');
   });
 
   it('renders Claude shell activity as a low-key command note in the final reply', async () => {
-    const { bot, ctx, edits } = createBot();
-
-    await (bot as any).sendFinalReply(ctx, 104, 'claude', {
-      ok: true,
+    const { finalEdit } = await renderFinalReply('claude', {
       message: '当前账号是 xiaotonng。',
-      thinking: null,
-      sessionId: 'sess-claude-shell',
-      model: 'claude-opus-4-6',
-      thinkingEffort: 'high',
       elapsedS: 3.1,
       inputTokens: 5,
       outputTokens: 11,
-      cachedInputTokens: null,
-      error: null,
-      stopReason: null,
-      incomplete: false,
       activity: [
         'Run shell: Check current GitHub CLI authentication status',
         'Run shell: Check current GitHub CLI authentication status -> github.com',
       ].join('\n'),
-    });
+    }, 104);
 
-    expect(edits).toHaveLength(1);
-    expect(edits[0].text).toContain('<i>commands: 1 done</i>');
-    expect(edits[0].text).not.toContain('<b>Activity</b>');
-    expect(edits[0].text).not.toContain('Run shell:');
-    expect(edits[0].text).not.toContain('Check current GitHub CLI authentication status');
-    expect(edits[0].text).not.toContain('github.com');
+    expect(finalEdit.text).toContain('<i>commands: 1 done</i>');
+    expect(finalEdit.text).not.toContain('<b>Activity</b>');
+    expect(finalEdit.text).not.toContain('Run shell:');
+    expect(finalEdit.text).not.toContain('Check current GitHub CLI authentication status');
+    expect(finalEdit.text).not.toContain('github.com');
   });
 
   it('shows only the last thinking block in the final reply', async () => {
-    const { bot, ctx, edits } = createBot();
-
-    await (bot as any).sendFinalReply(ctx, 105, 'claude', {
-      ok: true,
+    const { finalEdit } = await renderFinalReply('claude', {
       message: '结论已经整理好了。',
       thinking: '先检查上下文\n再确认调用链\n\n最后定位到 Telegram 展示层把完整 thinking 透传出来了',
-      sessionId: 'sess-6',
-      model: 'claude-opus-4-6',
-      thinkingEffort: 'high',
       elapsedS: 4.8,
       inputTokens: 10,
       outputTokens: 22,
-      cachedInputTokens: null,
-      error: null,
-      stopReason: null,
-      incomplete: false,
+    }, 105);
+
+    expect(finalEdit.text).toContain('最后定位到 Telegram 展示层把完整 thinking 透传出来了');
+    expect(finalEdit.text).not.toContain('先检查上下文');
+    expect(finalEdit.text).not.toContain('再确认调用链');
+  });
+});
+
+describe('TelegramBot.run shutdown handling', () => {
+  it('exits after SIGINT and treats shutdown as idempotent', async () => {
+    const bot = new TelegramBot();
+    const logLines: string[] = [];
+    const onceHandlers = new Map<string, () => void>();
+    const onHandlers = new Map<string, () => void>();
+    let releaseListen: (() => void) | null = null;
+
+    const connectSpy = vi.spyOn(TelegramChannel.prototype, 'connect').mockResolvedValue({
+      id: 1,
+      username: 'codeclaw_test_bot',
+      displayName: 'Codeclaw Test Bot',
+    });
+    const drainSpy = vi.spyOn(TelegramChannel.prototype, 'drain').mockResolvedValue(0);
+    const listenSpy = vi.spyOn(TelegramChannel.prototype, 'listen').mockImplementation(async () => {
+      await new Promise<void>(resolve => {
+        releaseListen = resolve;
+      });
+    });
+    const disconnectSpy = vi.spyOn(TelegramChannel.prototype, 'disconnect').mockImplementation(() => {
+      releaseListen?.();
+    });
+    const onceSpy = vi.spyOn(process, 'once').mockImplementation(((event: string, handler: () => void) => {
+      onceHandlers.set(event, handler);
+      return process;
+    }) as any);
+    const onSpy = vi.spyOn(process, 'on').mockImplementation(((event: string, handler: () => void) => {
+      onHandlers.set(event, handler);
+      return process;
+    }) as any);
+    const offSpy = vi.spyOn(process, 'off').mockImplementation(((event: string, _handler: () => void) => process) as any);
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as any);
+    const setupMenuSpy = vi.spyOn(bot as any, 'setupMenu').mockResolvedValue(undefined);
+    const startupSpy = vi.spyOn(bot as any, 'sendStartupNotice').mockResolvedValue(undefined);
+    const startKeepAliveSpy = vi.spyOn(bot as any, 'startKeepAlive').mockImplementation(() => {});
+    const stopKeepAliveSpy = vi.spyOn(bot as any, 'stopKeepAlive').mockImplementation(() => {});
+    const logSpy = vi.spyOn(bot, 'log').mockImplementation((msg: string) => {
+      logLines.push(msg);
     });
 
-    expect(edits).toHaveLength(1);
-    expect(edits[0].text).toContain('最后定位到 Telegram 展示层把完整 thinking 透传出来了');
-    expect(edits[0].text).not.toContain('先检查上下文');
-    expect(edits[0].text).not.toContain('再确认调用链');
+    try {
+      const runPromise = bot.run();
+      await new Promise(resolve => setImmediate(resolve));
+
+      expect(connectSpy).toHaveBeenCalledTimes(1);
+      expect(drainSpy).toHaveBeenCalledTimes(1);
+      expect(listenSpy).toHaveBeenCalledTimes(1);
+      expect(setupMenuSpy).toHaveBeenCalledTimes(1);
+      expect(startupSpy).toHaveBeenCalledTimes(1);
+      expect(startKeepAliveSpy).toHaveBeenCalledTimes(1);
+      expect(onceSpy).toHaveBeenCalledWith('SIGINT', expect.any(Function));
+      expect(onceSpy).toHaveBeenCalledWith('SIGTERM', expect.any(Function));
+      expect(onSpy).toHaveBeenCalledWith('SIGUSR2', expect.any(Function));
+      expect(onceHandlers.has('SIGINT')).toBe(true);
+      expect(onHandlers.has('SIGUSR2')).toBe(true);
+
+      onceHandlers.get('SIGINT')?.();
+      onceHandlers.get('SIGINT')?.();
+
+      await runPromise;
+
+      expect(disconnectSpy).toHaveBeenCalledTimes(1);
+      expect(stopKeepAliveSpy).toHaveBeenCalled();
+      expect(exitSpy).toHaveBeenCalledWith(130);
+      expect(logLines.filter(line => line === 'SIGINT, shutting down...')).toHaveLength(1);
+      expect(offSpy).toHaveBeenCalledWith('SIGINT', expect.any(Function));
+      expect(offSpy).toHaveBeenCalledWith('SIGTERM', expect.any(Function));
+      expect(offSpy).toHaveBeenCalledWith('SIGUSR2', expect.any(Function));
+    } finally {
+      logSpy.mockRestore();
+      stopKeepAliveSpy.mockRestore();
+      startKeepAliveSpy.mockRestore();
+      startupSpy.mockRestore();
+      setupMenuSpy.mockRestore();
+      exitSpy.mockRestore();
+      offSpy.mockRestore();
+      onSpy.mockRestore();
+      onceSpy.mockRestore();
+      disconnectSpy.mockRestore();
+      listenSpy.mockRestore();
+      drainSpy.mockRestore();
+      connectSpy.mockRestore();
+    }
   });
 });
 
@@ -449,27 +402,49 @@ describe('TelegramBot.handleCallback session preview', () => {
 });
 
 describe('TelegramBot.handleMessage streaming', () => {
+  it('uses editMessage previews for private chats and finalizes in the same message', async () => {
+    const { bot, ctx, channel, sends, edits } = createBot();
+    ctx.raw = { chat: { type: 'private' }, message_thread_id: 42 };
+
+    vi.spyOn(bot, 'runStream').mockImplementation(async (_prompt: string, _cs: any, _files: string[], onText: any) => {
+      onText('**Partial** `answer`', '', 'Reading files\nRan: /bin/zsh -lc ls\n$ /bin/zsh -lc pwd');
+      return claudeResult({
+        message: 'Final answer.',
+        sessionId: 'sess-draft',
+        elapsedS: 0.6,
+        inputTokens: 4,
+        outputTokens: 7,
+      });
+    });
+
+    await (bot as any).handleMessage({ text: 'Say final answer', files: [] }, ctx);
+
+    expect((channel as any).sendMessageDraft).toBeUndefined();
+    expect(vi.mocked(ctx.reply)).toHaveBeenCalledWith(
+      expect.stringContaining('● claude · 0s'),
+      expect.objectContaining({ messageThreadId: 42, parseMode: 'HTML' }),
+    );
+    expect(edits.some(entry => entry.text.includes('<b>Activity</b>\nReading files'))).toBe(true);
+    expect(edits.every(entry => !entry.text.includes('Ran:'))).toBe(true);
+    expect(edits.every(entry => !entry.text.includes('$ /bin/zsh'))).toBe(true);
+    expect(sends).toHaveLength(0);
+    expect(edits[edits.length - 1]?.text).toContain('Final answer.');
+    expect(edits[edits.length - 1]?.opts?.parseMode).toBe('HTML');
+  });
+
   it('refreshes elapsed time and typing state while waiting for the first model output', async () => {
     vi.useFakeTimers();
     const { bot, ctx, edits, channel } = createBot();
 
     vi.spyOn(bot, 'runStream').mockImplementation(async () => {
       await new Promise(resolve => setTimeout(resolve, 12_000));
-      return {
-        ok: true,
+      return claudeResult({
         message: 'Finally done.',
-        thinking: null,
         sessionId: 'sess-waiting',
-        model: 'claude-opus-4-6',
-        thinkingEffort: 'high',
         elapsedS: 12,
         inputTokens: 4,
         outputTokens: 8,
-        cachedInputTokens: null,
-        error: null,
-        stopReason: null,
-        incomplete: false,
-      };
+      });
     });
 
     try {
@@ -477,7 +452,7 @@ describe('TelegramBot.handleMessage streaming', () => {
       await vi.advanceTimersByTimeAsync(12_000);
       await pending;
 
-      const previews = edits.filter(e => !e.opts?.parseMode).map(e => e.text);
+      const previews = previewTexts(edits);
       expect(previews.some(text => text.includes('Waiting for model output...'))).toBe(false);
       expect(previews.some(text => text.includes('● claude · 5s'))).toBe(true);
       expect(previews.some(text => text.includes('● claude · 10s'))).toBe(true);
@@ -495,21 +470,13 @@ describe('TelegramBot.handleMessage streaming', () => {
 
     vi.spyOn(bot, 'runStream').mockImplementation(async () => {
       await new Promise(resolve => setTimeout(resolve, 20_000));
-      return {
-        ok: true,
+      return claudeResult({
         message: 'Finally done.',
-        thinking: null,
         sessionId: 'sess-idle',
-        model: 'claude-opus-4-6',
-        thinkingEffort: 'high',
         elapsedS: 20,
         inputTokens: 4,
         outputTokens: 8,
-        cachedInputTokens: null,
-        error: null,
-        stopReason: null,
-        incomplete: false,
-      };
+      });
     });
 
     try {
@@ -517,7 +484,7 @@ describe('TelegramBot.handleMessage streaming', () => {
       await vi.advanceTimersByTimeAsync(20_000);
       await pending;
 
-      const previews = edits.filter(e => !e.opts?.parseMode).map(e => e.text);
+      const previews = previewTexts(edits);
       expect(previews.some(text => text.includes('No new output for'))).toBe(false);
       expect(previews.some(text => text.includes('idle'))).toBe(false);
       expect(previews.some(text => text.includes('● claude · 15s')) || previews.some(text => text.includes('● claude · 20s'))).toBe(true);
@@ -537,21 +504,13 @@ describe('TelegramBot.handleMessage streaming', () => {
       expect(prompt).not.toContain('[Telegram Artifact Return]');
       expect(prompt).not.toContain('[Session Workspace]');
       expect(systemPrompt).toBeUndefined();
-      return {
-        ok: true,
+      return codexResult({
         message: 'done',
-        thinking: null,
         sessionId: 'sess-existing',
-        model: 'gpt-5.4',
-        thinkingEffort: 'high',
         elapsedS: 1.2,
         inputTokens: 9,
         outputTokens: 3,
-        cachedInputTokens: null,
-        error: null,
-        stopReason: null,
-        incomplete: false,
-      };
+      });
     });
 
     await (bot as any).handleMessage({ text: 'Inspect this repo', files: [] }, ctx);
@@ -559,9 +518,9 @@ describe('TelegramBot.handleMessage streaming', () => {
     expect(runStream).toHaveBeenCalledOnce();
   });
 
-  it('stages bare uploads and includes them on the next text turn', async () => {
+  it('stages bare uploads and replies ok only after the files are persisted', async () => {
     const { bot, ctx, reactions } = createBot();
-    const uploadDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-tg-upload-'));
+    const uploadDir = makeTmpDir('bot-tg-upload-');
     const uploadPath = path.join(uploadDir, 'report.pdf');
     fs.writeFileSync(uploadPath, 'pdf');
     let stagedLocalSessionId: string | null = null;
@@ -572,21 +531,13 @@ describe('TelegramBot.handleMessage streaming', () => {
       expect(state.localSessionId).toBe(stagedLocalSessionId);
       expect(state.workspacePath).toBe(stagedWorkspacePath);
       expect(stagedWorkspacePath && fs.existsSync(path.join(stagedWorkspacePath, 'report.pdf'))).toBe(true);
-      return {
-        ok: true,
+      return claudeResult({
         message: 'done',
-        thinking: null,
         sessionId: 'sess-pending-file',
-        model: 'claude-opus-4-6',
-        thinkingEffort: 'high',
         elapsedS: 1,
         inputTokens: 3,
         outputTokens: 2,
-        cachedInputTokens: null,
-        error: null,
-        stopReason: null,
-        incomplete: false,
-      };
+      });
     });
 
     await (bot as any).handleMessage({ text: '', files: [uploadPath] }, ctx);
@@ -594,8 +545,9 @@ describe('TelegramBot.handleMessage streaming', () => {
     stagedWorkspacePath = bot.chat(ctx.chatId).workspacePath ?? null;
 
     expect(runStream).not.toHaveBeenCalled();
-    expect(vi.mocked(ctx.reply)).not.toHaveBeenCalled();
-    expect(reactions).toEqual([{ chatId: 100, messageId: 200, reactions: ['👍'] }]);
+    expect(vi.mocked(ctx.reply)).toHaveBeenCalledOnce();
+    expect(vi.mocked(ctx.reply)).toHaveBeenCalledWith('ok');
+    expect(reactions).toEqual([]);
     expect(stagedLocalSessionId).toBeTruthy();
     expect(stagedWorkspacePath).toBeTruthy();
     expect(fs.existsSync(path.join(stagedWorkspacePath!, 'report.pdf'))).toBe(true);
@@ -614,26 +566,18 @@ describe('TelegramBot.handleMessage streaming', () => {
 
     vi.spyOn(bot, 'runStream').mockImplementation(async (_prompt: string, _cs: any, _files: string[], onText: any) => {
       onText('', '', '改动已经落下去了，现在跑相关单测确认结果\nRan: /bin/zsh -lc npm run build\nRan: /bin/zsh -lc npm test -- test/bot-telegram.unit.test.ts\n单测和 tsc 都过了，现在我再看一眼 diff');
-      return {
-        ok: true,
+      return codexResult({
         message: 'codeclaw',
-        thinking: null,
         sessionId: 'sess-stream-1',
-        model: 'gpt-5.4',
-        thinkingEffort: 'high',
         elapsedS: 1.2,
         inputTokens: 9,
         outputTokens: 3,
-        cachedInputTokens: null,
-        error: null,
-        stopReason: null,
-        incomplete: false,
-      };
+      });
     });
 
     await (bot as any).handleMessage({ text: 'Inspect this repo', files: [] }, ctx);
 
-    const preview = edits.find(e => !e.opts?.parseMode)?.text || '';
+    const preview = previewText(edits);
     expect(preview).toContain('Activity');
     expect(preview).toContain('改动已经落下去了，现在跑相关单测确认结果');
     expect(preview).toContain('单测和 tsc 都过了，现在我再看一眼 diff');
@@ -651,32 +595,19 @@ describe('TelegramBot.handleMessage streaming', () => {
 
     vi.spyOn(bot, 'runStream').mockImplementation(async (_prompt: string, _cs: any, _files: string[], onText: any) => {
       onText('', thinking, '');
-      return {
-        ok: true,
+      return codexResult({
         message: 'done',
         thinking,
         sessionId: 'sess-stream-thinking',
-        model: 'gpt-5.4',
-        thinkingEffort: 'high',
         elapsedS: 1.2,
         inputTokens: 9,
         outputTokens: 3,
-        cachedInputTokens: null,
-        cacheCreationInputTokens: null,
-        contextWindow: null,
-        contextUsedTokens: null,
-        contextPercent: null,
-        codexCumulative: null,
-        error: null,
-        stopReason: null,
-        incomplete: false,
-        activity: null,
-      };
+      });
     });
 
     await (bot as any).handleMessage({ text: 'Inspect this repo', files: [] }, ctx);
 
-    const preview = edits.find(e => !e.opts?.parseMode)?.text || '';
+    const preview = previewText(edits);
     expect(preview).toContain('Reasoning');
     expect(preview).toContain('最后确认只需要展示 reasoning 的尾段就够了');
     expect(preview).not.toContain('先读代码路径');
@@ -699,31 +630,22 @@ describe('TelegramBot.handleMessage streaming', () => {
         outputTokens: 18,
         contextPercent: 4.2,
       });
-      return {
-        ok: true,
+      return codexResult({
         message: 'done',
-        thinking: null,
         sessionId: 'sess-stream-meta',
-        model: 'gpt-5.4',
-        thinkingEffort: 'high',
         elapsedS: 1.2,
         inputTokens: 120,
         outputTokens: 18,
         cachedInputTokens: 30,
-        cacheCreationInputTokens: null,
         contextWindow: 200000,
         contextUsedTokens: 150,
         contextPercent: 4.2,
-        codexCumulative: null,
-        error: null,
-        stopReason: null,
-        incomplete: false,
-      };
+      });
     });
 
     await (bot as any).handleMessage({ text: 'Inspect this repo', files: [] }, ctx);
 
-    const preview = edits.find(e => !e.opts?.parseMode)?.text || '';
+    const preview = previewText(edits);
     expect(preview).toContain('● codex · 4.2% · ');
     expect(preview).not.toContain('in:120');
     expect(preview).not.toContain('cached:30');
@@ -743,34 +665,21 @@ describe('TelegramBot.handleMessage streaming', () => {
           { step: 'Update tests', status: 'pending' },
         ],
       });
-      return {
-        ok: true,
+      return codexResult({
         message: 'done',
-        thinking: null,
         sessionId: 'sess-stream-plan',
-        model: 'gpt-5.4',
-        thinkingEffort: 'high',
         elapsedS: 1.2,
         inputTokens: 9,
         outputTokens: 3,
-        cachedInputTokens: null,
-        cacheCreationInputTokens: null,
-        contextWindow: null,
-        contextUsedTokens: null,
-        contextPercent: null,
-        codexCumulative: null,
-        error: null,
-        stopReason: null,
-        incomplete: false,
-      };
+      });
     });
 
     await (bot as any).handleMessage({ text: 'Inspect this repo', files: [] }, ctx);
 
-    const preview = edits.find(e => !e.opts?.parseMode)?.text || '';
+    const preview = previewText(edits);
     expect(preview).toContain('Plan 1/3');
     expect(preview).toContain('[x] Inspect streaming paths');
-    expect(preview).toContain('[>] Thread live usage into preview');
+    expect(preview).toContain('[&gt;] Thread live usage into preview');
     expect(preview).toContain('[ ] Update tests');
   });
 
@@ -780,26 +689,18 @@ describe('TelegramBot.handleMessage streaming', () => {
 
     vi.spyOn(bot, 'runStream').mockImplementation(async (_prompt: string, _cs: any, _files: string[], onText: any) => {
       onText('', '', 'Ran: /bin/zsh -lc npm run build\nRan: /bin/zsh -lc npm test');
-      return {
-        ok: true,
+      return codexResult({
         message: 'done',
-        thinking: null,
         sessionId: 'sess-stream-1b',
-        model: 'gpt-5.4',
-        thinkingEffort: 'high',
         elapsedS: 1.2,
         inputTokens: 9,
         outputTokens: 3,
-        cachedInputTokens: null,
-        error: null,
-        stopReason: null,
-        incomplete: false,
-      };
+      });
     });
 
     await (bot as any).handleMessage({ text: 'Inspect this repo', files: [] }, ctx);
 
-    const preview = edits.find(e => !e.opts?.parseMode)?.text || '';
+    const preview = previewText(edits);
     expect(preview).toContain('Activity');
     expect(preview).toContain('commands: 2 done');
     expect(preview).not.toContain('Ran:');
@@ -815,26 +716,18 @@ describe('TelegramBot.handleMessage streaming', () => {
         'Run shell: Check current GitHub CLI authentication status',
         'Run shell: Check current GitHub CLI authentication status -> github.com',
       ].join('\n'));
-      return {
-        ok: true,
+      return claudeResult({
         message: '当前账号是 xiaotonng。',
-        thinking: null,
         sessionId: 'sess-stream-claude-shell',
-        model: 'claude-opus-4-6',
-        thinkingEffort: 'high',
         elapsedS: 1.2,
         inputTokens: 9,
         outputTokens: 3,
-        cachedInputTokens: null,
-        error: null,
-        stopReason: null,
-        incomplete: false,
-      };
+      });
     });
 
     await (bot as any).handleMessage({ text: '你看下我当前 gh 用的是哪个账号', files: [] }, ctx);
 
-    const preview = edits.find(e => !e.opts?.parseMode)?.text || '';
+    const preview = previewText(edits);
     expect(preview).toContain('Activity');
     expect(preview).toContain('commands: 1 done');
     expect(preview).not.toContain('Run shell:');
@@ -855,26 +748,18 @@ describe('TelegramBot.handleMessage streaming', () => {
         'Ran: /bin/zsh -lc npm test',
         '$ /bin/zsh -lc git diff --stat',
       ].join('\n'));
-      return {
-        ok: true,
+      return codexResult({
         message: 'done',
-        thinking: null,
         sessionId: 'sess-stream-1c',
-        model: 'gpt-5.4',
-        thinkingEffort: 'high',
         elapsedS: 1.2,
         inputTokens: 9,
         outputTokens: 3,
-        cachedInputTokens: null,
-        error: null,
-        stopReason: null,
-        incomplete: false,
-      };
+      });
     });
 
     await (bot as any).handleMessage({ text: 'Inspect this repo', files: [] }, ctx);
 
-    const preview = edits.find(e => !e.opts?.parseMode)?.text || '';
+    const preview = previewText(edits);
     expect(preview).toContain('阶段1:');
     expect(preview).toContain('阶段2:');
     expect(preview).toContain('commands: 2 done, 1 running');
@@ -893,26 +778,18 @@ describe('TelegramBot.handleMessage streaming', () => {
         'Command failed (1): /bin/zsh -lc npm test',
         '$ /bin/zsh -lc npm run build',
       ].join('\n'));
-      return {
-        ok: true,
+      return codexResult({
         message: 'done',
-        thinking: null,
         sessionId: 'sess-stream-fail',
-        model: 'gpt-5.4',
-        thinkingEffort: 'high',
         elapsedS: 1.2,
         inputTokens: 9,
         outputTokens: 3,
-        cachedInputTokens: null,
-        error: null,
-        stopReason: null,
-        incomplete: false,
-      };
+      });
     });
 
     await (bot as any).handleMessage({ text: 'Inspect this repo', files: [] }, ctx);
 
-    const preview = edits.find(e => !e.opts?.parseMode)?.text || '';
+    const preview = previewText(edits);
     expect(preview).toContain('我先跑测试看失败点');
     expect(preview).toContain('commands: 1 failed, 1 running');
     expect(preview).not.toContain('Command failed (1)');
@@ -923,36 +800,26 @@ describe('TelegramBot.handleMessage streaming', () => {
     const { bot, ctx, channel, edits } = createBot();
     let previewCalls = 0;
     channel.editMessage = vi.fn(async (_chatId: number, _msgId: number, text: string, opts?: any) => {
-      if (!opts?.parseMode) {
-        previewCalls++;
-        await new Promise(resolve => setTimeout(resolve, 25));
-      }
+      previewCalls++;
+      await new Promise(resolve => setTimeout(resolve, 25));
       edits.push({ text, opts });
     });
 
     vi.spyOn(bot, 'runStream').mockImplementation(async (_prompt: string, _cs: any, _files: string[], onText: any) => {
       onText('Partial answer', '', 'Running...');
-      return {
-        ok: true,
+      return claudeResult({
         message: 'Final answer.',
-        thinking: null,
         sessionId: 'sess-stream-2',
-        model: 'claude-opus-4-6',
-        thinkingEffort: 'high',
         elapsedS: 0.6,
         inputTokens: 4,
         outputTokens: 7,
-        cachedInputTokens: null,
-        error: null,
-        stopReason: null,
-        incomplete: false,
-      };
+      });
     });
 
     await (bot as any).handleMessage({ text: 'Say final answer', files: [] }, ctx);
     await new Promise(resolve => setTimeout(resolve, 50));
 
-    expect(previewCalls).toBeGreaterThan(0);
+    expect(previewCalls).toBeGreaterThan(1);
     expect(edits[edits.length - 1].text).toContain('Final answer.');
     expect(edits[edits.length - 1].opts?.parseMode).toBe('HTML');
   });
@@ -961,34 +828,26 @@ describe('TelegramBot.handleMessage streaming', () => {
 describe('TelegramBot.handleMessage artifacts', () => {
   it('uploads returned artifacts from the stream result', async () => {
     const { bot, ctx, channel, files, edits } = createBot();
-    const artifactDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-tg-artifacts-'));
+    const artifactDir = makeTmpDir('bot-tg-artifacts-');
     const shotPath = path.join(artifactDir, 'shot.png');
     const notesPath = path.join(artifactDir, 'notes.txt');
     fs.writeFileSync(shotPath, Buffer.from('png-bytes'));
     fs.writeFileSync(notesPath, 'hello');
 
     vi.spyOn(bot, 'runStream').mockImplementation(async () => {
-      return {
-        ok: true,
+      return claudeResult({
         message: 'Artifacts ready.',
-        thinking: null,
         localSessionId: 'sess-artifacts-local',
         sessionId: 'sess-artifacts',
         workspacePath: artifactDir,
-        model: 'claude-opus-4-6',
-        thinkingEffort: 'high',
         elapsedS: 1.5,
         inputTokens: 10,
         outputTokens: 20,
-        cachedInputTokens: null,
-        error: null,
-        stopReason: null,
-        incomplete: false,
         artifacts: [
           { filePath: shotPath, filename: 'shot.png', kind: 'photo', caption: 'Screenshot' },
           { filePath: notesPath, filename: 'notes.txt', kind: 'document', caption: 'Notes' },
         ],
-      };
+      });
     });
 
     await (bot as any).handleMessage({ text: 'Take a screenshot', files: [] }, ctx);
@@ -1010,31 +869,23 @@ describe('TelegramBot.handleMessage artifacts', () => {
 
   it('reports artifact upload failures without deleting the workspace files', async () => {
     const { bot, ctx, channel, sends } = createBot();
-    const artifactDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-tg-artifacts-fail-'));
+    const artifactDir = makeTmpDir('bot-tg-artifacts-fail-');
     const shotPath = path.join(artifactDir, 'shot.png');
     fs.writeFileSync(shotPath, Buffer.from('png-bytes'));
 
     vi.spyOn(bot, 'runStream').mockImplementation(async () => {
-      return {
-        ok: true,
+      return claudeResult({
         message: 'Artifacts ready.',
-        thinking: null,
         localSessionId: 'sess-artifacts-fail-local',
         sessionId: 'sess-artifacts-fail',
         workspacePath: artifactDir,
-        model: 'claude-opus-4-6',
-        thinkingEffort: 'high',
         elapsedS: 1.5,
         inputTokens: 10,
         outputTokens: 20,
-        cachedInputTokens: null,
-        error: null,
-        stopReason: null,
-        incomplete: false,
         artifacts: [
           { filePath: shotPath, filename: 'shot.png', kind: 'photo', caption: 'Screenshot' },
         ],
-      };
+      });
     });
 
     vi.mocked(channel.sendFile).mockRejectedValueOnce(new Error('telegram send failed'));
@@ -1181,7 +1032,7 @@ describe('TelegramBot skills', () => {
       expect.objectContaining({ command: 'sk_old_skill' }),
     ]));
 
-    const nextWorkdir = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-tg-skill-next-'));
+    const nextWorkdir = makeTmpDir('bot-tg-skill-next-');
     fs.mkdirSync(path.join(nextWorkdir, '.claude', 'skills', 'new-skill'), { recursive: true });
     fs.writeFileSync(path.join(nextWorkdir, '.claude', 'skills', 'new-skill', 'SKILL.md'), '# New Skill\n');
 
@@ -1284,7 +1135,7 @@ describe('Bot.startKeepAlive', () => {
     const spawnMock = vi.mocked(spawn);
     const mainProc = { pid: 4321, unref: vi.fn(), kill: vi.fn() };
     const pulseProc = { pid: 4322, unref: vi.fn() };
-    const fakeBin = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-keepalive-bin-'));
+    const fakeBin = makeTmpDir('bot-keepalive-bin-');
     const oldPath = process.env.PATH;
     const platformDesc = Object.getOwnPropertyDescriptor(process, 'platform');
 

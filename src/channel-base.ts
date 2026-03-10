@@ -13,6 +13,7 @@ export interface SendOpts {
   parseMode?: string;
   keyboard?: any;
   disablePreview?: boolean;
+  messageThreadId?: number;
 }
 
 export abstract class Channel {
@@ -29,7 +30,7 @@ export abstract class Channel {
   abstract send(chatId: number | string, text: string, opts?: SendOpts): Promise<number | string | null>;
   abstract editMessage(chatId: number | string, msgId: number | string, text: string, opts?: SendOpts): Promise<void>;
   abstract deleteMessage(chatId: number | string, msgId: number | string): Promise<void>;
-  abstract sendTyping(chatId: number | string): Promise<void>;
+  abstract sendTyping(chatId: number | string, opts?: SendOpts): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------

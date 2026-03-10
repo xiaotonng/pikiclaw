@@ -5,6 +5,10 @@
 
 import { VERSION, envBool } from './bot.js';
 import { TelegramBot } from './bot-telegram.js';
+import { listAgents } from './code-agent.js';
+import { buildSetupGuide, collectSetupState, hasReadyAgent, isSetupReady } from './onboarding.js';
+import { runSetupWizard } from './setup-wizard.js';
+import { applyUserConfig, loadUserConfig } from './user-config.js';
 
 type Channel = 'telegram' | 'feishu' | 'whatsapp';
 const VALID_CHANNELS = new Set<Channel>(['telegram', 'feishu', 'whatsapp']);
@@ -13,7 +17,7 @@ function parseArgs(argv: string[]) {
   const args: Record<string, any> = {
     channel: null, token: null, agent: null, model: null, workdir: null,
     fullAccess: null, safeMode: false, allowedIds: null,
-    timeout: null, version: false, help: false,
+    timeout: null, version: false, help: false, doctor: false, setup: false,
   };
   const it = argv[Symbol.iterator]();
   for (const arg of it) {
@@ -27,6 +31,8 @@ function parseArgs(argv: string[]) {
       case '--safe-mode': args.safeMode = true; break;
       case '--allowed-ids': args.allowedIds = it.next().value; break;
       case '--timeout': args.timeout = parseInt(it.next().value ?? '', 10); break;
+      case '--doctor': args.doctor = true; break;
+      case '--setup': args.setup = true; break;
       case '-v': case '--version': args.version = true; break;
       case '-h': case '--help': args.help = true; break;
       default:
@@ -38,16 +44,23 @@ function parseArgs(argv: string[]) {
 
 export async function main() {
   const args = parseArgs(process.argv.slice(2));
+  const userConfig = loadUserConfig();
 
   if (args.version) { process.stdout.write(`codeclaw ${VERSION}\n`); process.exit(0); }
 
-  const channel = (args.channel || process.env.CODECLAW_CHANNEL || 'telegram').trim().toLowerCase() as Channel;
-  const noToken = channel === 'telegram'
-    ? !args.token && !process.env.CODECLAW_TOKEN && !process.env.TELEGRAM_BOT_TOKEN
+  const channel = (args.channel || process.env.CODECLAW_CHANNEL || userConfig.channel || 'telegram').trim().toLowerCase() as Channel;
+  if (!VALID_CHANNELS.has(channel)) {
+    process.stderr.write(`Unknown channel: ${channel}. Available: ${[...VALID_CHANNELS].join(', ')}\n`);
+    process.exit(1);
+  }
+
+  applyUserConfig(userConfig, channel);
+  const tokenProvided = channel === 'telegram'
+    ? !!(args.token || process.env.CODECLAW_TOKEN || process.env.TELEGRAM_BOT_TOKEN || userConfig.telegramBotToken)
     : channel === 'feishu'
-      ? !args.token && !process.env.FEISHU_APP_ID
-      : !args.token && !process.env.CODECLAW_TOKEN && !process.env.WHATSAPP_TOKEN;
-  if (args.help || noToken) {
+      ? !!(args.token || process.env.FEISHU_APP_ID)
+      : !!(args.token || process.env.CODECLAW_TOKEN || process.env.WHATSAPP_TOKEN);
+  if (args.help) {
     process.stdout.write(
 `codeclaw v${VERSION} — Run local coding agents through Telegram.
 
@@ -64,13 +77,15 @@ Usage:
 Options:
   -c, --channel <channel>   IM channel: telegram  [default: telegram]
   -t, --token <token>       Channel auth token (env: CODECLAW_TOKEN)
-  -a, --agent <agent>       AI agent: claude | codex  [default: claude]
+  -a, --agent <agent>       AI agent: claude | codex  [default: codex]
   -m, --model <model>       Default model, switchable in chat via /models
   -w, --workdir <dir>       Working directory for the agent  [default: cwd]
   --full-access             Codex full-access + Claude bypassPermissions  [default]
   --safe-mode               Use safer agent permission modes
   --allowed-ids <id,id>     Comma-separated chat/user ID whitelist
   --timeout <seconds>       Max seconds per agent request  [default: 1800]
+  --doctor                  Run setup checks and exit
+  --setup                   Run the interactive setup wizard
   -v, --version             Print version
   -h, --help                Print this help
 
@@ -115,9 +130,55 @@ Docs: https://github.com/xiaotonng/codeclaw
     process.exit(0);
   }
 
-  // resolve channel
-  if (!VALID_CHANNELS.has(channel)) {
-    process.stderr.write(`Unknown channel: ${channel}. Available: ${[...VALID_CHANNELS].join(', ')}\n`);
+  const setupState = collectSetupState({
+    agents: listAgents().agents,
+    channel,
+    tokenProvided,
+  });
+  const canPromptInteractively = !!(process.stdin.isTTY && process.stdout.isTTY);
+  if (args.setup && !canPromptInteractively) {
+    process.stderr.write('--setup requires an interactive terminal.\n');
+    process.exit(1);
+  }
+  const needsAgentAttention = setupState.agents.filter(agent => agent.installed).every(agent => agent.authStatus !== 'ready');
+  if (args.setup || (canPromptInteractively && !args.doctor && channel === 'telegram' && (!tokenProvided || !hasReadyAgent(setupState) || needsAgentAttention))) {
+    const wizard = await runSetupWizard({
+      version: VERSION,
+      channel,
+      argsAgent: args.agent || process.env.DEFAULT_AGENT || userConfig.defaultAgent || null,
+      currentToken: args.token || process.env.TELEGRAM_BOT_TOKEN || process.env.CODECLAW_TOKEN || userConfig.telegramBotToken || null,
+      initialState: setupState,
+      listAgents: () => listAgents().agents,
+    });
+    if (!wizard.completed) process.exit(1);
+    if (!args.token && wizard.token) process.env.TELEGRAM_BOT_TOKEN = wizard.token;
+    if (!args.agent && wizard.agent) process.env.DEFAULT_AGENT = wizard.agent;
+  }
+
+  const refreshedTokenProvided = channel === 'telegram'
+    ? !!(args.token || process.env.CODECLAW_TOKEN || process.env.TELEGRAM_BOT_TOKEN)
+    : channel === 'feishu'
+      ? !!(args.token || process.env.FEISHU_APP_ID)
+      : !!(args.token || process.env.CODECLAW_TOKEN || process.env.WHATSAPP_TOKEN);
+  const refreshedSetupState = collectSetupState({
+    agents: listAgents().agents,
+    channel,
+    tokenProvided: refreshedTokenProvided,
+  });
+  if (args.doctor || !refreshedTokenProvided) {
+    const guide = buildSetupGuide(refreshedSetupState, VERSION, { doctor: args.doctor });
+    const ready = isSetupReady(refreshedSetupState);
+    if (args.doctor) {
+      if (ready) process.stdout.write(`${guide}\nSetup looks ready.\n`);
+      else process.stderr.write(guide);
+      process.exit(ready ? 0 : 1);
+    }
+    process.stdout.write(guide);
+    process.exit(0);
+  }
+
+  if (!hasReadyAgent(refreshedSetupState)) {
+    process.stderr.write(buildSetupGuide(refreshedSetupState, VERSION, { doctor: true }));
     process.exit(1);
   }
 
@@ -140,7 +201,7 @@ Docs: https://github.com/xiaotonng/codeclaw
   if (args.agent) process.env.DEFAULT_AGENT = args.agent;
   if (args.workdir) process.env.CODECLAW_WORKDIR = args.workdir;
   if (args.model) {
-    const ag = args.agent || process.env.DEFAULT_AGENT || 'claude';
+    const ag = args.agent || process.env.DEFAULT_AGENT || 'codex';
     if (ag === 'codex') process.env.CODEX_MODEL = args.model;
     else if (ag === 'gemini') process.env.GEMINI_MODEL = args.model;
     else process.env.CLAUDE_MODEL = args.model;

@@ -198,6 +198,12 @@ function writeJsonFile(filePath: string, value: unknown) {
   fs.renameSync(tmpPath, filePath);
 }
 
+function removeFileIfExists(filePath: string) {
+  try {
+    fs.rmSync(filePath, { force: true });
+  } catch {}
+}
+
 function sessionIndexPath(workdir: string): string {
   return path.join(workdir, CODECLAW_SESSION_INDEX);
 }
@@ -1663,6 +1669,7 @@ function prepareStreamOpts(opts: StreamOpts): { prepared: StreamOpts; session: S
   session.record.stagedFiles = [];
   if (!session.record.title) session.record.title = summarizePromptTitle(opts.prompt) || importedFiles[0] || null;
   saveSessionRecord(opts.workdir, session.record);
+  removeFileIfExists(session.manifestPath);
 
   const attachmentPaths = attachmentRelPaths.map(relPath => path.join(session.workspacePath, relPath));
   const artifactSystemPrompt = buildArtifactSystemPrompt(session.workspacePath, session.manifestPath);

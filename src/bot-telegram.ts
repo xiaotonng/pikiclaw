@@ -138,6 +138,15 @@ function ensureNonInteractiveRestartArgs(bin: string, args: string[]): string[] 
   return ['--yes', ...args];
 }
 
+type ShutdownSignal = 'SIGINT' | 'SIGTERM';
+type ProcessSignal = ShutdownSignal | 'SIGUSR2';
+
+const SHUTDOWN_EXIT_CODE: Record<ShutdownSignal, number> = {
+  SIGINT: 130,
+  SIGTERM: 143,
+};
+const SHUTDOWN_FORCE_EXIT_MS = 3_000;
+
 function formatMenuLines(commands: { command: string; description: string }[]): string[] {
   return commands.map(cmd => `/${cmd.command} \u2014 ${escapeHtml(cmd.description)}`);
 }
@@ -480,9 +489,13 @@ function formatPreviewFooterLine(agent: Agent, elapsedMs: number, meta?: StreamP
   return `${footerStatusSymbol('running')} ${formatFooterSummary(agent, elapsedMs, meta)}`;
 }
 
+function formatPreviewFooterHtml(agent: Agent, elapsedMs: number, meta?: StreamPreviewMeta | null): string {
+  return escapeHtml(formatPreviewFooterLine(agent, elapsedMs, meta));
+}
+
 function formatFinalFooterHtml(status: FooterStatus, agent: Agent, elapsedMs: number, contextPercent?: number | null): string {
   const line = `${footerStatusSymbol(status)} ${formatFooterSummary(agent, elapsedMs, null, contextPercent ?? null)}`;
-  return `<blockquote>${escapeHtml(line)}</blockquote>`;
+  return escapeHtml(line);
 }
 
 function normalizePlanStep(step: string): string {
@@ -659,6 +672,10 @@ function buildDirKeyboard(browsePath: string, page: number) {
 export class TelegramBot extends Bot {
   private token: string;
   private channel!: TelegramChannel;
+  private shutdownInFlight = false;
+  private shutdownExitCode: number | null = null;
+  private shutdownForceExitTimer: ReturnType<typeof setTimeout> | null = null;
+  private signalHandlers: Partial<Record<ProcessSignal, () => void>> = {};
 
   constructor() {
     super();
@@ -717,6 +734,61 @@ export class TelegramBot extends Bot {
   protected override afterSwitchWorkdir(_oldPath: string, _newPath: string) {
     if (!(this as any).channel) return;
     void this.setupMenu().catch(err => this.log(`menu refresh failed after workdir switch: ${err}`));
+  }
+
+  private clearShutdownForceExitTimer() {
+    if (!this.shutdownForceExitTimer) return;
+    clearTimeout(this.shutdownForceExitTimer);
+    this.shutdownForceExitTimer = null;
+  }
+
+  private removeSignalHandlers() {
+    for (const sig of Object.keys(this.signalHandlers) as ProcessSignal[]) {
+      const handler = this.signalHandlers[sig];
+      if (handler) process.off(sig, handler);
+    }
+    this.signalHandlers = {};
+  }
+
+  private installSignalHandlers() {
+    this.removeSignalHandlers();
+
+    const onSigint = () => this.beginShutdown('SIGINT');
+    const onSigterm = () => this.beginShutdown('SIGTERM');
+    const onSigusr2 = () => {
+      if (this.shutdownInFlight) return;
+      this.log('SIGUSR2 received, restarting...');
+      this.performRestart();
+    };
+
+    this.signalHandlers = {
+      SIGINT: onSigint,
+      SIGTERM: onSigterm,
+      SIGUSR2: onSigusr2,
+    };
+
+    process.once('SIGINT', onSigint);
+    process.once('SIGTERM', onSigterm);
+    process.on('SIGUSR2', onSigusr2);
+  }
+
+  private beginShutdown(sig: ShutdownSignal) {
+    if (this.shutdownInFlight) return;
+
+    this.shutdownInFlight = true;
+    this.shutdownExitCode = SHUTDOWN_EXIT_CODE[sig];
+    this.log(`${sig}, shutting down...`);
+
+    try { this.channel.disconnect(); } catch {}
+    this.stopKeepAlive();
+    shutdownCodexServer();
+
+    this.clearShutdownForceExitTimer();
+    this.shutdownForceExitTimer = setTimeout(() => {
+      this.log(`shutdown still pending after ${Math.floor(SHUTDOWN_FORCE_EXIT_MS / 1000)}s, forcing exit`);
+      process.exit(this.shutdownExitCode ?? 1);
+    }, SHUTDOWN_FORCE_EXIT_MS);
+    this.shutdownForceExitTimer.unref?.();
   }
 
   private getCurrentMenuState() {
@@ -973,8 +1045,9 @@ export class TelegramBot extends Bot {
         });
         cs.localSessionId = staged.localSessionId;
         cs.workspacePath = staged.workspacePath;
+        if (!staged.importedFiles.length) throw new Error('no files persisted');
         this.log(`[handleMessage] staged workspace files chat=${ctx.chatId} local_session=${staged.localSessionId} files=${staged.importedFiles.length}`);
-        await this.safeSetMessageReaction(ctx.chatId, ctx.messageId, ['👍']);
+        await ctx.reply('ok');
       } catch (e: any) {
         this.log(`[handleMessage] stage files failed: ${e?.message || e}`);
         await this.safeSetMessageReaction(ctx.chatId, ctx.messageId, ['⚠️']);
@@ -985,11 +1058,11 @@ export class TelegramBot extends Bot {
     const files = msg.files;
     const prompt = buildPrompt(text, files);
     const start = Date.now();
-    const initialPreview = formatPreviewFooterLine(cs.agent, 0);
+    const initialEditPreview = formatPreviewFooterHtml(cs.agent, 0);
+    const messageThreadId = typeof ctx.raw?.message_thread_id === 'number' ? ctx.raw.message_thread_id : undefined;
     this.log(`[handleMessage] chat=${ctx.chatId} agent=${cs.agent} session=${cs.sessionId || '(new)'} local_session=${cs.localSessionId || '(new)'} prompt="${prompt.slice(0, 100)}" files=${files.length}`);
-
-    const phId = await ctx.reply(initialPreview);
-    if (!phId) { this.log(`[handleMessage] placeholder null for chat=${ctx.chatId}`); return; }
+    const phId = await ctx.reply(initialEditPreview, { parseMode: 'HTML', messageThreadId });
+    if (!phId) { this.log(`[handleMessage] placeholder unavailable for chat=${ctx.chatId}; continuing without live preview`); return; }
     this.log(`[handleMessage] placeholder sent msg_id=${phId}, starting agent stream...`);
 
     this.activeTasks.set(ctx.chatId, { prompt, startedAt: start });
@@ -1002,11 +1075,15 @@ export class TelegramBot extends Bot {
       let latestText = '', latestThinking = '', latestActivity = '';
       let latestMeta: StreamPreviewMeta | null = null;
       let latestPlan: StreamPreviewPlan | null = null;
-      let lastPreview = initialPreview;
+      let lastPreview = initialEditPreview;
       let lastProgressAt = start;
       let flushTimer: ReturnType<typeof setTimeout> | null = null;
       let previewVersion = 0;
       let editChain: Promise<void> = Promise.resolve();
+
+      const pushPreview = async (preview: string) => {
+        await this.channel.editMessage(ctx.chatId, phId, preview, { parseMode: 'HTML' });
+      };
 
       const stopWaitFeedback = () => {
         if (heartbeatTimer) {
@@ -1019,10 +1096,10 @@ export class TelegramBot extends Bot {
         }
       };
 
-      const renderPreview = (text: string, thinking: string, activity: string, meta: StreamPreviewMeta | null) => {
+      const renderPreview = (bodyText: string, thinking: string, activity: string, meta: StreamPreviewMeta | null) => {
         const maxBody = 2400;
         const maxActivity = 900;
-        const display = text.trim();
+        const display = bodyText.trim();
         const rawThinking = thinking.trim();
         const thinkDisplay = formatThinkingForDisplay(thinking, maxBody);
         const planDisplay = renderPlanForPreview(latestPlan);
@@ -1032,23 +1109,23 @@ export class TelegramBot extends Bot {
         const tLabel = thinkLabel(cs.agent);
 
         if (planDisplay) {
-          parts.push(planDisplay);
+          parts.push(`<blockquote><b>Plan</b>\n${escapeHtml(planDisplay)}</blockquote>`);
         }
 
         if (activityDisplay) {
           const preview = trimActivityForPreview(activityDisplay, maxActivity);
-          parts.push(`Activity\n${preview}`);
+          parts.push(`<blockquote><b>Activity</b>\n${escapeHtml(preview)}</blockquote>`);
         }
 
         if (thinkDisplay && !display) {
-          parts.push(`${tLabel}\n${thinkDisplay}`);
+          parts.push(`<blockquote><b>${escapeHtml(tLabel)}</b>\n${escapeHtml(thinkDisplay)}</blockquote>`);
         } else if (display) {
-          if (rawThinking) parts.push(`${tLabel} (${rawThinking.length} chars)`);
+          if (rawThinking) parts.push(`<i>${escapeHtml(`${tLabel} (${rawThinking.length} chars)`)}</i>`);
           const preview = display.length > maxBody ? '(...truncated)\n' + display.slice(-maxBody) : display;
-          parts.push(preview);
+          parts.push(mdToTgHtml(preview));
         }
 
-        parts.push(formatPreviewFooterLine(cs.agent, now - start, meta));
+        parts.push(formatPreviewFooterHtml(cs.agent, now - start, meta));
         return parts.join('\n\n');
       };
 
@@ -1065,7 +1142,7 @@ export class TelegramBot extends Bot {
           .then(async () => {
             if (version !== previewVersion) return;
             try {
-              await this.channel.editMessage(ctx.chatId, phId, preview);
+              await pushPreview(preview);
             } catch (e: any) {
               this.log(`stream edit err: ${e?.message || e}`);
             }
@@ -1101,7 +1178,7 @@ export class TelegramBot extends Bot {
       };
 
       const sendTypingPulse = () => {
-        void this.channel.sendTyping(ctx.chatId).catch(() => {});
+        void this.channel.sendTyping(ctx.chatId, { messageThreadId }).catch(() => {});
       };
 
       heartbeatTimer = setInterval(() => {
@@ -1157,8 +1234,8 @@ export class TelegramBot extends Bot {
         this.log(`[handleMessage] suppressed incomplete flag: artifacts present`);
       }
 
-      const finalMsgId = await this.sendFinalReply(ctx, phId, cs.agent, result);
-      await this.sendArtifacts(ctx, finalMsgId ?? phId, artifacts);
+      const finalMsgId = await this.sendFinalReply(ctx, phId, cs.agent, result, { messageThreadId });
+      await this.sendArtifacts(ctx, finalMsgId ?? phId ?? ctx.messageId, artifacts, messageThreadId);
       this.log(`[handleMessage] final reply sent to chat=${ctx.chatId}`);
     } finally {
       if (heartbeatTimer) clearInterval(heartbeatTimer);
@@ -1167,7 +1244,7 @@ export class TelegramBot extends Bot {
     }
   }
 
-  private async sendArtifacts(ctx: TgContext, replyTo: number, artifacts: BotArtifact[]) {
+  private async sendArtifacts(ctx: TgContext, replyTo: number, artifacts: BotArtifact[], messageThreadId?: number) {
     const failed: BotArtifact[] = [];
     for (const artifact of artifacts) {
       const caption = artifact.caption;
@@ -1175,6 +1252,7 @@ export class TelegramBot extends Bot {
         await this.channel.sendFile(ctx.chatId, artifact.filePath, {
           caption,
           replyTo,
+          messageThreadId,
           asPhoto: artifact.kind === 'photo',
         });
       } catch (e) {
@@ -1183,7 +1261,7 @@ export class TelegramBot extends Bot {
         await this.channel.send(
           ctx.chatId,
           `Artifact upload failed: <code>${escapeHtml(artifact.filename)}</code>`,
-          { parseMode: 'HTML', replyTo },
+          { parseMode: 'HTML', replyTo, messageThreadId },
         ).catch(() => {});
       }
     }
@@ -1198,9 +1276,29 @@ export class TelegramBot extends Bot {
     } catch {}
   }
 
-  private async sendFinalReply(ctx: TgContext, phId: number, agent: Agent, result: StreamResult): Promise<number | null> {
+  private async sendFinalReply(
+    ctx: TgContext,
+    phId: number | null,
+    agent: Agent,
+    result: StreamResult,
+    opts: { messageThreadId?: number } = {},
+  ): Promise<number | null> {
     const footerStatus: FooterStatus = result.incomplete || !result.ok ? 'failed' : 'done';
     const footer = formatFinalFooterHtml(footerStatus, agent, result.elapsedS * 1000, result.contextPercent ?? null);
+    const sendFinalText = (text: string, replyTo?: number | null) => this.channel.send(ctx.chatId, text, {
+      parseMode: 'HTML',
+      replyTo: replyTo ?? ctx.messageId,
+      messageThreadId: opts.messageThreadId,
+    });
+    const replacePreview = async (text: string) => {
+      if (phId != null) {
+        try {
+          await this.channel.editMessage(ctx.chatId, phId, text, { parseMode: 'HTML' });
+          return phId;
+        } catch {}
+      }
+      return await sendFinalText(text);
+    };
 
     let activityHtml = '';
     let activityNoteHtml = '';
@@ -1247,11 +1345,7 @@ export class TelegramBot extends Bot {
     let finalMsgId: number | null = phId;
 
     if (fullHtml.length <= 3900) {
-      try {
-        await this.channel.editMessage(ctx.chatId, phId, fullHtml, { parseMode: 'HTML' });
-      } catch {
-        finalMsgId = await this.channel.send(ctx.chatId, fullHtml, { parseMode: 'HTML', replyTo: ctx.messageId });
-      }
+      finalMsgId = await replacePreview(fullHtml);
     } else {
       // Send full content as split plain-text messages instead of a file.
       // First message: edit placeholder with meta + thinking + beginning of body.
@@ -1271,17 +1365,13 @@ export class TelegramBot extends Bot {
         remaining = bodyHtml;
       }
       const firstHtml = `${headerHtml}${firstBody}${footerHtml}`;
-      try {
-        await this.channel.editMessage(ctx.chatId, phId, firstHtml, { parseMode: 'HTML' });
-      } catch {
-        finalMsgId = await this.channel.send(ctx.chatId, firstHtml, { parseMode: 'HTML', replyTo: ctx.messageId });
-      }
+      finalMsgId = await replacePreview(firstHtml);
 
       // Send remaining body as continuation messages (split at ~3800 chars)
       if (remaining.trim()) {
         const chunks = splitText(remaining, 3800);
         for (const chunk of chunks) {
-          await this.channel.send(ctx.chatId, chunk, { parseMode: 'HTML', replyTo: finalMsgId ?? phId });
+          await sendFinalText(chunk, finalMsgId ?? phId ?? ctx.messageId);
         }
       }
     }
@@ -1505,45 +1595,43 @@ export class TelegramBot extends Bot {
       workdir: tmpDir,
       allowedChatIds: this.allowedChatIds.size ? this.allowedChatIds : undefined,
     });
+    this.installSignalHandlers();
 
-    const shutdown = (sig: string) => {
-      this.log(`${sig}, shutting down...`);
-      this.channel.disconnect();
+    try {
+      const bot = await this.channel.connect();
+      this.log(`bot: @${bot.username} (id=${bot.id})`);
+
+      const drained = await this.channel.drain();
+      if (drained) this.log(`drained ${drained} pending update(s)`);
+
+      // Seed knownChats so setupMenu applies per-chat commands
+      for (const cid of this.allowedChatIds) this.channel.knownChats.add(cid);
+
+      await this.setupMenu();
+
+      for (const ag of ['claude', 'codex'] as const) {
+        this.log(`agent ${ag}: ${whichSync(ag) || 'NOT FOUND'}`);
+      }
+      this.log(`config: agent=${this.defaultAgent} workdir=${this.workdir} timeout=${this.runTimeout}s`);
+
+      this.channel.onCommand((cmd, args, ctx) => this.handleCommand(cmd, args, ctx));
+      this.channel.onMessage((msg, ctx) => this.handleMessage(msg, ctx));
+      this.channel.onCallback((data, ctx) => this.handleCallback(data, ctx));
+      this.channel.onError(err => this.log(`error: ${err}`));
+
+      await this.sendStartupNotice();
+
+      this.startKeepAlive();
+      this.log('polling started');
+      await this.channel.listen();
       this.stopKeepAlive();
-      shutdownCodexServer();
-    };
-    process.on('SIGINT', () => shutdown('SIGINT'));
-    process.on('SIGTERM', () => shutdown('SIGTERM'));
-    process.on('SIGUSR2', () => { this.log('SIGUSR2 received, restarting...'); this.performRestart(); });
-
-    const bot = await this.channel.connect();
-    this.log(`bot: @${bot.username} (id=${bot.id})`);
-
-    const drained = await this.channel.drain();
-    if (drained) this.log(`drained ${drained} pending update(s)`);
-
-    // Seed knownChats so setupMenu applies per-chat commands
-    for (const cid of this.allowedChatIds) this.channel.knownChats.add(cid);
-
-    await this.setupMenu();
-
-    for (const ag of ['claude', 'codex'] as const) {
-      this.log(`agent ${ag}: ${whichSync(ag) || 'NOT FOUND'}`);
+      this.log('stopped');
+    } finally {
+      this.stopKeepAlive();
+      this.clearShutdownForceExitTimer();
+      this.removeSignalHandlers();
+      if (this.shutdownInFlight) process.exit(this.shutdownExitCode ?? 1);
     }
-    this.log(`config: agent=${this.defaultAgent} workdir=${this.workdir} timeout=${this.runTimeout}s`);
-
-    this.channel.onCommand((cmd, args, ctx) => this.handleCommand(cmd, args, ctx));
-    this.channel.onMessage((msg, ctx) => this.handleMessage(msg, ctx));
-    this.channel.onCallback((data, ctx) => this.handleCallback(data, ctx));
-    this.channel.onError(err => this.log(`error: ${err}`));
-
-    await this.sendStartupNotice();
-
-    this.startKeepAlive();
-    this.log('polling started');
-    await this.channel.listen();
-    this.stopKeepAlive();
-    this.log('stopped');
   }
 
   private async sendStartupNotice() {

@@ -16,7 +16,7 @@ import {
 } from './code-agent.js';
 
 export { type Agent, type CodexCumulativeUsage, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type SessionInfo, type UsageResult, type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult, type SkillInfo, type SkillListResult };
-export const VERSION = '0.2.22';
+export const VERSION = '0.2.23';
 const MACOS_USER_ACTIVITY_PULSE_INTERVAL_MS = 20_000;
 const MACOS_USER_ACTIVITY_PULSE_TIMEOUT_S = 30;
 
@@ -384,7 +384,7 @@ export class Bot {
 
   constructor() {
     this.workdir = path.resolve((process.env.CODECLAW_WORKDIR || process.cwd()).replace(/^~/, process.env.HOME || ''));
-    this.defaultAgent = normalizeAgent(process.env.DEFAULT_AGENT || 'claude');
+    this.defaultAgent = normalizeAgent(process.env.DEFAULT_AGENT || 'codex');
     this.runTimeout = envInt('CODECLAW_TIMEOUT', 1800);
     this.allowedChatIds = parseAllowedChatIds(process.env.CODECLAW_ALLOWED_IDS || '');
 

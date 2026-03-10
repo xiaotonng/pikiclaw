@@ -9,6 +9,7 @@ import { doStream, doCodexStream, doClaudeStream, getUsage, listModels, buildCod
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { makeTmpDir, withTempHome } from './support/env.ts';
 
 // --- helpers ---
 
@@ -60,7 +61,7 @@ describe('buildCodexTurnInput', () => {
 
 describe('stageSessionFiles', () => {
   it('stores uploaded files under the managed session workspace', () => {
-    const uploadDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codeclaw-upload-'));
+    const uploadDir = makeTmpDir('codeclaw-upload-');
     const uploadPath = path.join(uploadDir, 'report.txt');
     fs.writeFileSync(uploadPath, 'hello');
 
@@ -573,6 +574,33 @@ describe('doStream', () => {
     expect(result.ok).toBe(true);
     expect(result.message).toBe('via claude');
   });
+
+  it('clears a stale return manifest before starting a new turn', async () => {
+    writeFakeScript('claude', [
+      { type: 'system', session_id: 's-clean-manifest' },
+      { type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'fresh turn' } } },
+      { type: 'result', session_id: 's-clean-manifest' },
+    ]);
+
+    const staged = stageSessionFiles({
+      agent: 'claude',
+      workdir: tmpDir,
+      files: [],
+    });
+    const manifestPath = path.join(tmpDir, '.codeclaw', 'sessions', 'claude', staged.localSessionId, 'return.json');
+    fs.writeFileSync(manifestPath, JSON.stringify({
+      files: [{ path: 'README.md', kind: 'document', caption: 'stale artifact' }],
+    }, null, 2));
+
+    const result = await doStream(baseOpts('claude', {
+      localSessionId: staged.localSessionId,
+      prompt: 'new turn without artifacts',
+    }));
+
+    expect(result.ok).toBe(true);
+    expect(result.artifacts).toEqual([]);
+    expect(fs.existsSync(manifestPath)).toBe(false);
+  });
 });
 
 // --- attachments ---
@@ -697,11 +725,7 @@ exit 1`;
 
 describe('listModels', () => {
   it('returns the built-in Claude model list', async () => {
-    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codeclaw-home-'));
-    const oldHome = process.env.HOME;
-
-    try {
-      process.env.HOME = homeDir;
+    await withTempHome(async homeDir => {
       fs.writeFileSync(path.join(homeDir, '.claude.json'), JSON.stringify({
         projects: {
           [tmpDir]: {
@@ -754,10 +778,7 @@ exit 0`;
       ]);
       expect(result.sources).toEqual([]);
       expect(result.note).toBeNull();
-    } finally {
-      if (oldHome == null) delete process.env.HOME;
-      else process.env.HOME = oldHome;
-    }
+    });
   });
 
   it('listModels codex returns correct structure (via app-server)', async () => {
@@ -780,11 +801,7 @@ exit 0`;
 
 describe('getUsage', () => {
   it('reads codex usage from session history fallback', () => {
-    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codeclaw-home-'));
-    const oldHome = process.env.HOME;
-
-    try {
-      process.env.HOME = homeDir;
+    return withTempHome(homeDir => {
       const sessionsDir = path.join(homeDir, '.codex', 'sessions', '2026', '03', '08');
       fs.mkdirSync(sessionsDir, { recursive: true });
       fs.writeFileSync(path.join(sessionsDir, 'usage.jsonl'), [
@@ -822,18 +839,11 @@ describe('getUsage', () => {
       expect(result.windows[0].resetAfterSeconds).toBe(7200);
       expect(result.windows[1].usedPercent).toBe(61);
       expect(result.windows[1].remainingPercent).toBe(39);
-    } finally {
-      if (oldHome == null) delete process.env.HOME;
-      else process.env.HOME = oldHome;
-    }
+    });
   });
 
   it('reads claude usage from telemetry and prefers the current model family', () => {
-    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codeclaw-home-'));
-    const oldHome = process.env.HOME;
-
-    try {
-      process.env.HOME = homeDir;
+    return withTempHome(homeDir => {
       const telemetryDir = path.join(homeDir, '.claude', 'telemetry');
       fs.mkdirSync(telemetryDir, { recursive: true });
       fs.writeFileSync(path.join(telemetryDir, 'events.json'), [
@@ -868,9 +878,6 @@ describe('getUsage', () => {
       expect(result.windows[0].remainingPercent).toBe(null);
       expect(result.windows[0].resetAfterSeconds).toBe(39 * 3600);
       expect(result.windows[0].status).toBe('allowed_warning');
-    } finally {
-      if (oldHome == null) delete process.env.HOME;
-      else process.env.HOME = oldHome;
-    }
+    });
   });
 });

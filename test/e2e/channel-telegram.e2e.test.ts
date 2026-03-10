@@ -30,11 +30,10 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { TelegramChannel } from '../../src/channel-telegram.ts';
-import type { TgMessage, TgContext, TgCallbackContext } from '../../src/channel-telegram.ts';
 import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 import zlib from 'node:zlib';
+import { makeTmpDir } from '../support/env.ts';
+import { cleanupMessages, createTelegramWaiters, promptChat, resolveChatId, wait } from '../support/telegram-e2e.ts';
 
 // ---------------------------------------------------------------------------
 // PNG generator
@@ -83,8 +82,6 @@ if (SKIP) {
   );
 }
 
-const wait = (ms: number) => new Promise(r => setTimeout(r, ms));
-
 // ---------------------------------------------------------------------------
 // Shared polling channel for all receive tests
 // ---------------------------------------------------------------------------
@@ -96,61 +93,18 @@ let rx: TelegramChannel;
 let rxListenDone: Promise<void>;
 let tmpDir: string;
 
-// Current handler slots — swapped between tests
-let _onMsg: ((msg: TgMessage, ctx: TgContext) => void) | null = null;
-let _onCmd: ((cmd: string, args: string, ctx: TgContext) => void) | null = null;
-let _onCb: ((data: string, ctx: TgCallbackContext) => void) | null = null;
-
 /** Track all sent message IDs for auto-cleanup. */
 const sentMsgIds: number[] = [];
+const waiters = createTelegramWaiters({
+  waitTimeout: WAIT_TIMEOUT,
+  sentMsgIds,
+  callbackAckText: '收到!',
+  includeFromId: true,
+});
+const { waitMessages, waitCallback, waitCommand } = waiters;
 
-interface ReceivedMsg { text: string; files: string[]; chatId: number; fromId: number }
-interface ReceivedCmd { cmd: string; args: string; chatId: number }
-interface ReceivedCb  { data: string; chatId: number; callbackId: string }
-
-/** Send a prompt to the user, then wait so they can read it. */
 async function prompt(text: string, opts?: any) {
-  const msgId = await ch.send(CHAT_ID, text, opts);
-  if (msgId) sentMsgIds.push(msgId);
-  await wait(PROMPT_DELAY);
-}
-
-/** Wait for N messages from the shared polling channel. Also tracks user message IDs for cleanup. */
-function waitMessages(n: number): Promise<ReceivedMsg[]> {
-  const results: ReceivedMsg[] = [];
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`Timed out — expected ${n} message(s), got ${results.length}`)), WAIT_TIMEOUT);
-    _onMsg = (msg, ctx) => {
-      sentMsgIds.push(ctx.messageId);
-      results.push({ text: msg.text, files: msg.files, chatId: ctx.chatId, fromId: ctx.from.id });
-      if (results.length >= n) { clearTimeout(timer); _onMsg = null; resolve(results); }
-    };
-  });
-}
-
-/** Wait for a single callback query. */
-function waitCallback(): Promise<ReceivedCb> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('Timed out waiting for button click')), WAIT_TIMEOUT);
-    _onCb = (data, ctx) => {
-      clearTimeout(timer); _onCb = null;
-      sentMsgIds.push(ctx.messageId);
-      ctx.answerCallback('收到!');
-      resolve({ data, chatId: ctx.chatId, callbackId: ctx.callbackId });
-    };
-  });
-}
-
-/** Wait for a single /command. */
-function waitCommand(): Promise<ReceivedCmd> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('Timed out waiting for command')), WAIT_TIMEOUT);
-    _onCmd = (cmd, args, ctx) => {
-      clearTimeout(timer); _onCmd = null;
-      sentMsgIds.push(ctx.messageId);
-      resolve({ cmd, args, chatId: ctx.chatId });
-    };
-  });
+  await promptChat(ch, CHAT_ID, sentMsgIds, text, opts, PROMPT_DELAY);
 }
 
 // ---------------------------------------------------------------------------
@@ -159,7 +113,7 @@ function waitCommand(): Promise<ReceivedCmd> {
 
 beforeAll(async () => {
   if (SKIP) return;
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tg-e2e-'));
+  tmpDir = makeTmpDir('tg-e2e-');
 
   // Outbound channel
   ch = new TelegramChannel({ token: TOKEN, workdir: tmpDir, pollTimeout: 5, apiTimeout: 30 });
@@ -171,30 +125,21 @@ beforeAll(async () => {
   await rx.drain();
 
   // Wire handlers to dispatch to current test's slot
-  rx.onMessage((msg, ctx) => { _onMsg?.(msg, ctx); });
-  rx.onCommand((cmd, args, ctx) => {
-    if (_onCmd) { _onCmd(cmd, args, ctx); }
-    else { _onMsg?.({ text: `/${cmd} ${args}`.trim(), files: [] }, ctx); }
+  rx.onMessage((msg, ctx) => {
+    waiters.dispatchMessage(msg, ctx);
   });
-  rx.onCallback((data, ctx) => { _onCb?.(data, ctx); });
+  rx.onCommand((cmd, args, ctx) => {
+    waiters.dispatchCommand(cmd, args, ctx, true);
+  });
+  rx.onCallback((data, ctx) => {
+    waiters.dispatchCallback(data, ctx);
+  });
 
   // Start polling in background
   rxListenDone = rx.listen();
 
   // Resolve chat ID: env var → getUpdates → poll for first message
-  if (!CHAT_ID || isNaN(CHAT_ID)) {
-    const detected = await ch.getRecentChatId();
-    if (detected) {
-      CHAT_ID = detected;
-      console.log(`Auto-detected CHAT_ID=${CHAT_ID} from recent updates`);
-    }
-  }
-  if (!CHAT_ID || isNaN(CHAT_ID)) {
-    console.log('No recent messages — send any message to the bot to start...');
-    const first = await waitMessages(1);
-    CHAT_ID = first[0].chatId;
-    console.log(`Auto-detected CHAT_ID=${CHAT_ID} from polling`);
-  }
+  CHAT_ID = await resolveChatId(CHAT_ID, () => ch.getRecentChatId(), waitMessages);
 
   // Register the resolved chat so setMenu can target it
   ch.knownChats.add(CHAT_ID);
@@ -211,9 +156,7 @@ afterAll(async () => {
   if (!SKIP) {
     if (rx) { rx.disconnect(); await rxListenDone; }
     // Delete all messages sent during tests
-    for (const id of sentMsgIds) {
-      await ch?.deleteMessage(CHAT_ID, id).catch(() => {});
-    }
+    await cleanupMessages(ch, CHAT_ID, sentMsgIds);
     await ch?.clearMenu().catch(() => {});
     await ch?.send(CHAT_ID, '✅ E2E 测试全部完成!').catch(() => {});
     ch?.disconnect();

@@ -37,6 +37,26 @@ cd your-workspace/
 npx codeclaw -t YOUR_BOT_TOKEN
 ```
 
+首次运行如果还没准备好环境，也可以直接执行：
+
+```bash
+npx codeclaw@latest
+```
+
+如果你在终端里直接运行，CLI 会进入英文交互式 setup wizard，依次帮你完成：
+
+- Node.js 是否满足 18+
+- 选择并检查本机 `claude` 或 `codex`
+- 引导你完成登录，必要时可直接运行安装命令
+- 粘贴并校验 Telegram Bot Token
+- 可选保存到本机用户配置，下次启动自动复用
+
+你也可以随时手动重新打开向导：
+
+```bash
+npx codeclaw@latest --setup
+```
+
 <!-- TODO: 替换为实际截图 -->
 `📸 截图占位：终端显示 "Bot is ready"，Telegram 收到欢迎消息`
 
@@ -226,7 +246,7 @@ npx codeclaw -t $BOT_TOKEN -m claude-sonnet-4-6
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `-t, --token` | — | Bot Token（必填） |
-| `-a, --agent` | `claude` | 默认 Agent：`claude` 或 `codex` |
+| `-a, --agent` | `codex` | 默认 Agent：`claude` 或 `codex` |
 | `-m, --model` | Agent 默认 | 覆盖模型 |
 | `-w, --workdir` | 当前目录 | 工作目录 |
 | `-c, --channel` | `telegram` | IM 渠道 |

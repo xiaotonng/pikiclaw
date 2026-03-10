@@ -125,6 +125,10 @@ export interface TelegramOpts {
   requireMentionInGroup?: boolean;
 }
 
+interface ThreadedOpts {
+  messageThreadId?: number;
+}
+
 const TG_MAX = 4096;
 const PHOTO_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp']);
 
@@ -157,6 +161,46 @@ function describeError(err: unknown): string {
   }
 
   return parts.join(' | ');
+}
+
+function isRetryableRequestError(err: unknown): boolean {
+  const text = describeError(err).toLowerCase();
+  return [
+    'fetch failed',
+    'econnreset',
+    'etimedout',
+    'enotfound',
+    'eai_again',
+    'econnrefused',
+    'socket hang up',
+    'http 502',
+    'http 503',
+    'http 504',
+    'bad gateway',
+    'service unavailable',
+    'gateway timeout',
+  ].some(token => text.includes(token));
+}
+
+function isParseModeError(err: unknown): boolean {
+  const text = describeError(err).toLowerCase();
+  return text.includes("can't parse")
+    || text.includes('parse entities')
+    || text.includes('unsupported start tag')
+    || text.includes('unsupported tag');
+}
+
+function wrapSendError(err: unknown): Error {
+  return new Error(`sendMessage failed: ${describeError(err)}`, {
+    cause: err instanceof Error ? err : undefined,
+  });
+}
+
+function isAbortError(err: unknown): boolean {
+  if (err instanceof Error && err.name === 'AbortError') return true;
+  const cause = (err as any)?.cause;
+  if (cause && cause !== err) return isAbortError(cause);
+  return false;
 }
 
 async function parseJsonResponse(resp: Response, label: string): Promise<any> {
@@ -260,6 +304,7 @@ class TelegramChannel extends Channel {
         this.bot = { id: me.id, username: me.username || '', displayName: me.first_name || '' };
         return this.bot;
       } catch (e: any) {
+        if (this.ac.signal.aborted || isAbortError(e)) throw e;
         if (attempt >= 10) throw e;
         this._log(`[connect] attempt ${attempt} failed: ${e.message ?? e} — retrying in ${delay / 1000}s`);
         await sleep(delay);
@@ -283,7 +328,7 @@ class TelegramChannel extends Channel {
           this._dispatch(update).catch(e => this._hError?.(e));
         }
       } catch (e: any) {
-        if (!this.running || e.name === 'AbortError') break;
+        if (!this.running || this.ac.signal.aborted || isAbortError(e)) break;
         if (isPollingConflictError(e)) {
           const err = e instanceof Error ? e : new Error(String(e));
           this.running = false;
@@ -309,14 +354,16 @@ class TelegramChannel extends Channel {
     process.stdout.write(`[telegram ${ts}] [send] ${action} ${meta}\n${text}\n`);
   }
 
+  private _logOutgoingPreview(action: string, meta: string, text: string) {
+    this._log(`[send] ${action} ${meta} chars=${text.length} preview="${previewText(text, 160)}"`);
+  }
+
   private _logOutgoingFile(action: string, meta: string) {
     this._log(`[send] ${action} ${meta}`);
   }
 
   private _requestSignal(timeoutMs: number): AbortSignal {
-    return this.running
-      ? AbortSignal.any([AbortSignal.timeout(timeoutMs), this.ac.signal])
-      : AbortSignal.timeout(timeoutMs);
+    return AbortSignal.any([AbortSignal.timeout(timeoutMs), this.ac.signal]);
   }
 
   private async _fetchResponse(label: string, url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
@@ -333,6 +380,10 @@ class TelegramChannel extends Channel {
   // Outgoing primitives (Channel interface)
   // ========================================================================
 
+  private _applyThreadId(payload: Record<string, any>, opts?: ThreadedOpts) {
+    if (opts?.messageThreadId != null) payload.message_thread_id = opts.messageThreadId;
+  }
+
   async send(chatId: number | string, text: string, opts: SendOpts = {}): Promise<number | null> {
     let msgId: number | null = null;
     const chunks = splitText(text.trim() || '(empty)', TG_MAX - 200);
@@ -342,11 +393,34 @@ class TelegramChannel extends Channel {
       if (opts.parseMode) p.parse_mode = opts.parseMode;
       if (opts.replyTo != null) p.reply_to_message_id = opts.replyTo;
       if (opts.keyboard != null) p.reply_markup = opts.keyboard;
+      this._applyThreadId(p, opts);
       this._logOutgoingText('sendMessage', `chat=${chatId} chunk=${index + 1}/${chunks.length}${opts.replyTo != null ? ` reply_to=${opts.replyTo}` : ''}${opts.parseMode ? ` parse=${opts.parseMode}` : ''}`, chunk);
       let res: any;
-      try { res = await this.api('sendMessage', p); } catch {
-        if (opts.parseMode) { delete p.parse_mode; res = await this.api('sendMessage', p); }
-        else throw new Error('sendMessage failed');
+      let lastErr: unknown = null;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          res = await this.api('sendMessage', p);
+          lastErr = null;
+          break;
+        } catch (err) {
+          lastErr = err;
+          if (attempt >= 3 || !isRetryableRequestError(err)) break;
+          const delayMs = attempt * 250;
+          this._log(`[send] sendMessage transient error attempt=${attempt} chat=${chatId}: ${describeError(err)} — retrying in ${delayMs}ms`);
+          await sleep(delayMs);
+        }
+      }
+      if (lastErr) {
+        if (opts.parseMode && isParseModeError(lastErr)) {
+          delete p.parse_mode;
+          try {
+            res = await this.api('sendMessage', p);
+          } catch (err) {
+            throw wrapSendError(err);
+          }
+        } else {
+          throw wrapSendError(lastErr);
+        }
       }
       msgId ??= res?.result?.message_id ?? null;
     }
@@ -359,7 +433,7 @@ class TelegramChannel extends Channel {
     const p: any = { chat_id: chatId, message_id: msgId, text: t, disable_web_page_preview: true };
     if (opts.parseMode) p.parse_mode = opts.parseMode;
     if (opts.keyboard != null) p.reply_markup = opts.keyboard;
-    this._logOutgoingText('editMessageText', `chat=${chatId} msg_id=${msgId}${opts.parseMode ? ` parse=${opts.parseMode}` : ''}`, t);
+    this._logOutgoingPreview('editMessageText', `chat=${chatId} msg_id=${msgId}${opts.parseMode ? ` parse=${opts.parseMode}` : ''}`, t);
     try { await this.api('editMessageText', p); } catch (exc: any) {
       const s = String(exc).toLowerCase();
       if (s.includes('not modified') || s.includes("can't be edited")) return;
@@ -369,12 +443,28 @@ class TelegramChannel extends Channel {
     }
   }
 
+  async sendMessageDraft(chatId: number | string, draftId: number, text: string, opts: SendOpts = {}) {
+    if (!text.trim()) return;
+    const t = text.length > TG_MAX ? text.slice(0, TG_MAX) : text;
+    const p: any = { chat_id: chatId, draft_id: draftId, text: t };
+    if (opts.parseMode) p.parse_mode = opts.parseMode;
+    this._applyThreadId(p, opts);
+    this._logOutgoingPreview(
+      'sendMessageDraft',
+      `chat=${chatId} draft_id=${draftId}${opts.messageThreadId != null ? ` thread=${opts.messageThreadId}` : ''}${opts.parseMode ? ` parse=${opts.parseMode}` : ''}`,
+      t,
+    );
+    await this.api('sendMessageDraft', p);
+  }
+
   async deleteMessage(chatId: number | string, msgId: number | string) {
     try { await this.api('deleteMessage', { chat_id: chatId, message_id: msgId }); } catch { /* ignore */ }
   }
 
-  async sendTyping(chatId: number | string) {
-    await this.api('sendChatAction', { chat_id: chatId, action: 'typing' }).catch(() => {});
+  async sendTyping(chatId: number | string, opts: SendOpts = {}) {
+    const payload: any = { chat_id: chatId, action: 'typing' };
+    this._applyThreadId(payload, opts);
+    await this.api('sendChatAction', payload).catch(() => {});
   }
 
   // ========================================================================
@@ -399,7 +489,7 @@ class TelegramChannel extends Channel {
   async sendPhoto(
     chatId: number | string,
     photo: Buffer,
-    opts: { caption?: string; replyTo?: number | string; filename?: string; mimeType?: string } = {},
+    opts: { caption?: string; replyTo?: number | string; filename?: string; mimeType?: string; messageThreadId?: number } = {},
   ): Promise<number | null> {
     const hash = crypto.createHash('md5').update(photo).digest('hex').slice(0, 16);
     const boundary = `----codeclaw${hash}`;
@@ -409,6 +499,7 @@ class TelegramChannel extends Channel {
     const mimeType = opts.mimeType || mimeTypeForFilename(filename);
     add(`--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${chatId}\r\n`);
     if (opts.replyTo != null) add(`--${boundary}\r\nContent-Disposition: form-data; name="reply_to_message_id"\r\n\r\n${opts.replyTo}\r\n`);
+    if (opts.messageThreadId != null) add(`--${boundary}\r\nContent-Disposition: form-data; name="message_thread_id"\r\n\r\n${opts.messageThreadId}\r\n`);
     if (opts.caption) add(`--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${opts.caption.slice(0, 1024)}\r\n`);
     add(`--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="${filename}"\r\nContent-Type: ${mimeType}\r\n\r\n`);
     parts.push(photo);
@@ -430,7 +521,12 @@ class TelegramChannel extends Channel {
     return data?.result?.message_id ?? null;
   }
 
-  async sendDocument(chatId: number | string, content: string | Buffer, filename: string, opts: { caption?: string; replyTo?: number | string } = {}): Promise<number | null> {
+  async sendDocument(
+    chatId: number | string,
+    content: string | Buffer,
+    filename: string,
+    opts: { caption?: string; replyTo?: number | string; messageThreadId?: number } = {},
+  ): Promise<number | null> {
     const buf = typeof content === 'string' ? Buffer.from(content, 'utf-8') : content;
     const hash = crypto.createHash('md5').update(buf).digest('hex').slice(0, 16);
     const boundary = `----codeclaw${hash}`;
@@ -438,6 +534,7 @@ class TelegramChannel extends Channel {
     const add = (s: string) => parts.push(Buffer.from(s, 'utf-8'));
     add(`--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${chatId}\r\n`);
     if (opts.replyTo) add(`--${boundary}\r\nContent-Disposition: form-data; name="reply_to_message_id"\r\n\r\n${opts.replyTo}\r\n`);
+    if (opts.messageThreadId != null) add(`--${boundary}\r\nContent-Disposition: form-data; name="message_thread_id"\r\n\r\n${opts.messageThreadId}\r\n`);
     if (opts.caption) add(`--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${opts.caption.slice(0, 1024)}\r\n`);
     add(`--${boundary}\r\nContent-Disposition: form-data; name="document"; filename="${filename}"\r\nContent-Type: application/octet-stream\r\n\r\n`);
     parts.push(buf);
@@ -463,7 +560,7 @@ class TelegramChannel extends Channel {
   async sendFile(
     chatId: number | string,
     filePath: string,
-    opts: { caption?: string; replyTo?: number | string; asPhoto?: boolean } = {},
+    opts: { caption?: string; replyTo?: number | string; asPhoto?: boolean; messageThreadId?: number } = {},
   ): Promise<number | null> {
     const content = fs.readFileSync(filePath);
     const filename = path.basename(filePath);
@@ -472,11 +569,16 @@ class TelegramChannel extends Channel {
       return this.sendPhoto(chatId, content, {
         caption: opts.caption,
         replyTo: opts.replyTo,
+        messageThreadId: opts.messageThreadId,
         filename,
         mimeType: mimeTypeForFilename(filename),
       });
     }
-    return this.sendDocument(chatId, content, filename, { caption: opts.caption, replyTo: opts.replyTo });
+    return this.sendDocument(chatId, content, filename, {
+      caption: opts.caption,
+      replyTo: opts.replyTo,
+      messageThreadId: opts.messageThreadId,
+    });
   }
 
   /** Set bottom menu commands and ensure the menu button is visible.
@@ -701,10 +803,11 @@ class TelegramChannel extends Channel {
   // ========================================================================
 
   private _makeCtx(chatId: number, messageId: number, from: any, raw: any): TgContext {
+    const messageThreadId = typeof raw?.message_thread_id === 'number' ? raw.message_thread_id : undefined;
     return {
       chatId, messageId,
       from: { id: from?.id, username: from?.username, firstName: from?.first_name },
-      reply: (text: string, opts?: SendOpts) => this.send(chatId, text, { ...opts, replyTo: messageId }),
+      reply: (text: string, opts?: SendOpts) => this.send(chatId, text, { ...opts, replyTo: messageId, messageThreadId: opts?.messageThreadId ?? messageThreadId }),
       editReply: (msgId: number, text: string, opts?: SendOpts) => this.editMessage(chatId, msgId, text, opts),
       answerCallback: () => Promise.resolve(),
       channel: this,

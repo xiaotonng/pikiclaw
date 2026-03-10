@@ -1,7 +1,4 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 
 vi.mock('../src/code-agent.ts', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/code-agent.ts')>();
@@ -13,45 +10,31 @@ vi.mock('../src/code-agent.ts', async importOriginal => {
 
 import { doStream } from '../src/code-agent.ts';
 import { Bot } from '../src/bot.ts';
-
-function makeResult(overrides: Partial<Awaited<ReturnType<typeof doStream>>> = {}) {
-  return {
-    ok: true,
-    message: 'ok',
-    thinking: null,
-    sessionId: 'sess-1',
-    model: 'gpt-5.4',
-    thinkingEffort: 'high',
-    elapsedS: 0.1,
-    inputTokens: 0,
-    outputTokens: 0,
-    cachedInputTokens: 0,
-    cacheCreationInputTokens: null,
-    contextWindow: null,
-    contextUsedTokens: null,
-    contextPercent: null,
-    codexCumulative: null,
-    error: null,
-    stopReason: null,
-    incomplete: false,
-    activity: null,
-    ...overrides,
-  };
-}
+import { makeTmpDir } from './support/env.ts';
+import { makeStreamResult } from './support/stream-result.ts';
 
 beforeEach(() => {
   vi.clearAllMocks();
-  process.env.CODECLAW_WORKDIR = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-unit-workdir-'));
+  process.env.CODECLAW_WORKDIR = makeTmpDir('bot-unit-workdir-');
   process.env.DEFAULT_AGENT = 'codex';
 });
 
 describe('Bot.runStream', () => {
+  it('defaults to codex when DEFAULT_AGENT is unset', () => {
+    delete process.env.DEFAULT_AGENT;
+
+    const bot = new Bot();
+
+    expect(bot.defaultAgent).toBe('codex');
+    expect(bot.chat(1).agent).toBe('codex');
+  });
+
   it('passes prior Codex cumulative totals into resumed turns and stores updated totals', async () => {
     const doStreamMock = vi.mocked(doStream);
     doStreamMock
       .mockImplementationOnce(async opts => {
         expect(opts.codexPrevCumulative).toBeUndefined();
-        return makeResult({
+        return makeStreamResult('codex', {
           sessionId: 'sess-resume',
           inputTokens: 5000,
           cachedInputTokens: 4000,
@@ -61,7 +44,7 @@ describe('Bot.runStream', () => {
       })
       .mockImplementationOnce(async opts => {
         expect(opts.codexPrevCumulative).toEqual({ input: 5000, output: 300, cached: 4000 });
-        return makeResult({
+        return makeStreamResult('codex', {
           sessionId: 'sess-resume',
           message: 'Resumed turn',
           inputTokens: 3300,
@@ -92,7 +75,7 @@ describe('Bot.runStream', () => {
     cs.sessionId = 'sess-existing';
     cs.codexCumulative = { input: 8300, output: 360, cached: 6500 };
 
-    const nextWorkdir = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-unit-next-'));
+    const nextWorkdir = makeTmpDir('bot-unit-next-');
     bot.switchWorkdir(nextWorkdir);
 
     expect(cs.sessionId).toBeNull();

@@ -40,8 +40,8 @@ import { TelegramChannel } from '../../src/channel-telegram.ts';
 import type { TgMessage, TgContext, TgCallbackContext } from '../../src/channel-telegram.ts';
 import { execSync } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
+import { makeTmpDir } from '../support/env.ts';
+import { cleanupMessages, createTelegramWaiters, promptChat, resolveChatId, wait } from '../support/telegram-e2e.ts';
 
 // ---------------------------------------------------------------------------
 // Config
@@ -68,8 +68,6 @@ if (SKIP) {
   );
 }
 
-const wait = (ms: number) => new Promise(r => setTimeout(r, ms));
-
 // ---------------------------------------------------------------------------
 // Shared state
 // ---------------------------------------------------------------------------
@@ -78,55 +76,16 @@ let bot: TelegramBot;
 let ch: TelegramChannel;
 let tmpDir: string;
 
-let _onMsg: ((msg: TgMessage, ctx: TgContext) => void) | null = null;
-let _onCmd: ((cmd: string, args: string, ctx: TgContext) => void) | null = null;
-let _onCb: ((data: string, ctx: TgCallbackContext) => void) | null = null;
-
 const sentMsgIds: number[] = [];
-
-interface ReceivedMsg { text: string; files: string[]; chatId: number }
-interface ReceivedCmd { cmd: string; args: string; chatId: number }
-interface ReceivedCb  { data: string; chatId: number; callbackId: string }
+const waiters = createTelegramWaiters({
+  waitTimeout: WAIT_TIMEOUT,
+  sentMsgIds,
+  callbackAckText: 'ok',
+});
+const { waitMessages, waitCallback, waitCommand } = waiters;
 
 async function prompt(text: string, opts?: any) {
-  const msgId = await ch.send(CHAT_ID, text, opts);
-  if (msgId) sentMsgIds.push(msgId);
-  await wait(PROMPT_DELAY);
-}
-
-function waitMessages(n: number): Promise<ReceivedMsg[]> {
-  const results: ReceivedMsg[] = [];
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`Timed out — expected ${n} message(s), got ${results.length}`)), WAIT_TIMEOUT);
-    _onMsg = (msg, ctx) => {
-      sentMsgIds.push(ctx.messageId);
-      results.push({ text: msg.text, files: msg.files, chatId: ctx.chatId });
-      if (results.length >= n) { clearTimeout(timer); _onMsg = null; resolve(results); }
-    };
-  });
-}
-
-function waitCallback(): Promise<ReceivedCb> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('Timed out waiting for button click')), WAIT_TIMEOUT);
-    _onCb = (data, ctx) => {
-      clearTimeout(timer); _onCb = null;
-      sentMsgIds.push(ctx.messageId);
-      ctx.answerCallback('ok');
-      resolve({ data, chatId: ctx.chatId, callbackId: ctx.callbackId });
-    };
-  });
-}
-
-function waitCommand(): Promise<ReceivedCmd> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('Timed out waiting for command')), WAIT_TIMEOUT);
-    _onCmd = (cmd, args, ctx) => {
-      clearTimeout(timer); _onCmd = null;
-      sentMsgIds.push(ctx.messageId);
-      resolve({ cmd, args, chatId: ctx.chatId });
-    };
-  });
+  await promptChat(ch, CHAT_ID, sentMsgIds, text, opts, PROMPT_DELAY);
 }
 
 // ---------------------------------------------------------------------------
@@ -135,7 +94,7 @@ function waitCommand(): Promise<ReceivedCmd> {
 
 beforeAll(async () => {
   if (SKIP) return;
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-tg-e2e-'));
+  tmpDir = makeTmpDir('bot-tg-e2e-');
 
   process.env.CODECLAW_TOKEN = TOKEN;
   process.env.CODECLAW_WORKDIR = process.cwd();
@@ -152,16 +111,13 @@ beforeAll(async () => {
 
   // Wire handlers: bot handles commands & callbacks; test can intercept via _onMsg/_onCmd/_onCb
   ch.onCommand((cmd, args, ctx) => {
-    if (_onCmd) { _onCmd(cmd, args, ctx); }
-    else { bot.handleCommand(cmd, args, ctx); }
+    if (!waiters.dispatchCommand(cmd, args, ctx)) bot.handleCommand(cmd, args, ctx);
   });
   ch.onMessage((msg, ctx) => {
-    if (_onMsg) { _onMsg(msg, ctx); }
-    else { (bot as any).handleMessage(msg, ctx); }
+    if (!waiters.dispatchMessage(msg, ctx)) (bot as any).handleMessage(msg, ctx);
   });
   ch.onCallback((data, ctx) => {
-    if (_onCb) { _onCb(data, ctx); }
-    else { bot.handleCallback(data, ctx); }
+    if (!waiters.dispatchCallback(data, ctx)) bot.handleCallback(data, ctx);
   });
   ch.onError(err => console.error(`[bot-tg-e2e] error: ${err}`));
 
@@ -169,19 +125,7 @@ beforeAll(async () => {
   ch.listen();
 
   // Resolve chat ID: env var -> getUpdates recent -> poll for first message
-  if (!CHAT_ID || isNaN(CHAT_ID)) {
-    const detected = await ch.getRecentChatId();
-    if (detected) {
-      CHAT_ID = detected;
-      console.log(`Auto-detected CHAT_ID=${CHAT_ID} from recent updates`);
-    }
-  }
-  if (!CHAT_ID || isNaN(CHAT_ID)) {
-    console.log('No recent messages — send any message to the bot to start...');
-    const first = await waitMessages(1);
-    CHAT_ID = first[0].chatId;
-    console.log(`Auto-detected CHAT_ID=${CHAT_ID} from polling`);
-  }
+  CHAT_ID = await resolveChatId(CHAT_ID, () => ch.getRecentChatId(), waitMessages);
 
   ch.knownChats.add(CHAT_ID);
 
@@ -195,9 +139,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (!SKIP) {
     ch?.disconnect();
-    for (const id of sentMsgIds) {
-      await ch?.deleteMessage(CHAT_ID, id).catch(() => {});
-    }
+    await cleanupMessages(ch, CHAT_ID, sentMsgIds);
     await ch?.send(CHAT_ID, 'bot-telegram E2E tests complete!').catch(() => {});
   }
   if (tmpDir && fs.existsSync(tmpDir)) fs.rmSync(tmpDir, { recursive: true, force: true });

@@ -8,15 +8,15 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { TelegramChannel } from '../src/channel-telegram.ts';
 import type { TgMessage, TgContext, TgCallbackContext } from '../src/channel-telegram.ts';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
+import { makeTmpDir } from './support/env.ts';
 
 // ---------------------------------------------------------------------------
 // Helper: create a channel with mocked api()
 // ---------------------------------------------------------------------------
 
 function createTestChannel(overrides: Record<string, any> = {}) {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tg-test-'));
+  const tmpDir = makeTmpDir('tg-test-');
   const ch = new TelegramChannel({ token: 'test-token', workdir: tmpDir, ...overrides });
 
   // Collect api calls for assertions
@@ -31,6 +31,9 @@ function createTestChannel(overrides: Record<string, any> = {}) {
     }
     if (method === 'sendMessage') {
       return { ok: true, result: { message_id: msgIdCounter++ } };
+    }
+    if (method === 'sendMessageDraft') {
+      return { ok: true, result: true };
     }
     if (method === 'editMessageText') {
       return { ok: true, result: {} };
@@ -105,7 +108,7 @@ describe('TelegramChannel.listen', () => {
   });
 
   it('reports nested fetch cause details for polling failures', async () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tg-test-'));
+    const tmpDir = makeTmpDir('tg-test-');
     const ch = new TelegramChannel({ token: 'test-token', workdir: tmpDir });
     const cause = Object.assign(new Error('getaddrinfo ENOTFOUND api.telegram.org'), {
       code: 'ENOTFOUND',
@@ -131,7 +134,7 @@ describe('TelegramChannel.listen', () => {
   });
 
   it('reports HTTP status and body when Telegram returns invalid JSON', async () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tg-test-'));
+    const tmpDir = makeTmpDir('tg-test-');
     const ch = new TelegramChannel({ token: 'test-token', workdir: tmpDir });
     const origFetch = globalThis.fetch;
     globalThis.fetch = vi.fn(async () => ({
@@ -172,6 +175,12 @@ describe('TelegramChannel.send', () => {
     expect(apiCalls[0].payload.reply_to_message_id).toBe(50);
   });
 
+  it('passes messageThreadId when sending into a topic', async () => {
+    const { ch, apiCalls } = createTestChannel();
+    await ch.send(123, 'Hello topic', { messageThreadId: 9 });
+    expect(apiCalls[0].payload.message_thread_id).toBe(9);
+  });
+
   it('logs outgoing text verbatim before sending', async () => {
     const { ch } = createTestChannel();
     const writeSpy = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
@@ -184,6 +193,80 @@ describe('TelegramChannel.send', () => {
     } finally {
       writeSpy.mockRestore();
     }
+  });
+
+  it('retries transient send failures before succeeding', async () => {
+    const { ch, apiCalls } = createTestChannel();
+    let attempts = 0;
+    (ch as any).api = vi.fn(async (method: string, payload?: any) => {
+      apiCalls.push({ method, payload });
+      if (method === 'sendMessage') {
+        attempts++;
+        if (attempts === 1) {
+          const cause = Object.assign(new Error('read ECONNRESET'), {
+            code: 'ECONNRESET',
+            errno: -54,
+            syscall: 'read',
+          });
+          const err = new TypeError('fetch failed');
+          (err as any).cause = cause;
+          throw err;
+        }
+        return { ok: true, result: { message_id: 100 } };
+      }
+      return { ok: true, result: {} };
+    });
+
+    const msgId = await ch.send(123, 'Hello world');
+
+    expect(msgId).toBe(100);
+    expect(attempts).toBe(2);
+    expect(apiCalls.filter(call => call.method === 'sendMessage')).toHaveLength(2);
+    expect(apiCalls[1]?.payload.parse_mode).toBeUndefined();
+  });
+
+  it('falls back to plain text only for parse-mode errors', async () => {
+    const { ch } = createTestChannel();
+    const sendPayloads: any[] = [];
+    let attempts = 0;
+    (ch as any).api = vi.fn(async (method: string, payload?: any) => {
+      if (method === 'sendMessage') sendPayloads.push({ ...payload });
+      if (method === 'sendMessage') {
+        attempts++;
+        if (attempts === 1) {
+          throw new Error('Telegram API sendMessage: {"ok":false,"error_code":400,"description":"Bad Request: can\'t parse entities"}');
+        }
+        return { ok: true, result: { message_id: 101 } };
+      }
+      return { ok: true, result: {} };
+    });
+
+    const msgId = await ch.send(123, '<b>oops', { parseMode: 'HTML' });
+
+    expect(msgId).toBe(101);
+    expect(sendPayloads[0]?.parse_mode).toBe('HTML');
+    expect(sendPayloads[1]?.parse_mode).toBeUndefined();
+  });
+
+  it('preserves transport error details when send fails', async () => {
+    const { ch } = createTestChannel();
+    (ch as any).api = vi.fn(async (method: string) => {
+      if (method === 'sendMessage') {
+        const cause = Object.assign(new Error('read ECONNRESET'), {
+          code: 'ECONNRESET',
+          errno: -54,
+          syscall: 'read',
+        });
+        const err = new TypeError('fetch failed');
+        (err as any).cause = cause;
+        throw err;
+      }
+      return { ok: true, result: {} };
+    });
+
+    const pending = ch.send(123, 'Hello world');
+    await expect(pending).rejects.toThrow(/sendMessage failed: TypeError: fetch failed/);
+    await expect(pending).rejects.toThrow(/code=ECONNRESET/);
   });
 });
 
@@ -293,6 +376,23 @@ describe('TelegramChannel.editMessage', () => {
     const { ch, apiCalls } = createTestChannel();
     await ch.editMessage(123, 99, '   ');
     expect(apiCalls.length).toBe(0);
+  });
+});
+
+describe('TelegramChannel.sendMessageDraft', () => {
+  it('sends draft updates for private-chat streaming', async () => {
+    const { ch, apiCalls } = createTestChannel();
+    await ch.sendMessageDraft(123, 5, 'Partial answer');
+    expect(apiCalls[0]).toEqual({
+      method: 'sendMessageDraft',
+      payload: { chat_id: 123, draft_id: 5, text: 'Partial answer' },
+    });
+  });
+
+  it('passes messageThreadId to draft updates', async () => {
+    const { ch, apiCalls } = createTestChannel();
+    await ch.sendMessageDraft(123, 5, 'Partial answer', { messageThreadId: 99 });
+    expect(apiCalls[0].payload.message_thread_id).toBe(99);
   });
 });
 
