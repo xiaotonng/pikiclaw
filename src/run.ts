@@ -61,7 +61,7 @@ Commands:
 Options:
   -p, --prompt <text>   Prompt text (or pass after command as positional args)
   -m, --model <model>   Model to use / highlight
-  -w, --workdir <dir>   Working directory  [default: saved workdir or cwd]
+  -w, --workdir <dir>   Working directory  [default: current process cwd]
   -s, --session <id>    Session ID (for tail; omit to use latest session)
   -n <count>            Number of messages to show  [default: 4]
   --timeout <seconds>   Max seconds per request  [default: 1800]

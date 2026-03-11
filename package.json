@@ -1,6 +1,6 @@
 {
   "name": "codeclaw",
-  "version": "0.2.27",
+  "version": "0.2.28",
   "description": "The best IM-driven remote coding experience. Bridge AI coding agents to any IM.",
   "type": "module",
   "bin": {
@@ -27,9 +27,10 @@
     "url": "git+https://github.com/xiaotonng/codeclaw.git"
   },
   "scripts": {
-    "dev": "set -ae && . ./.env && set +a && tsx src/cli.ts",
+    "dev": "tsx src/cli.ts",
     "command": "set -ae && . ./.env && set +a && tsx src/run.ts",
-    "build": "tsc",
+    "build:dashboard": "tsx scripts/build-dashboard.ts",
+    "build": "npm run build:dashboard && tsc",
     "prepublishOnly": "npm run build",
     "test": "vitest run",
     "test:e2e": "set -ae && . ./.env && set +a && vitest run --config vitest.e2e.config.ts test/e2e/",
@@ -39,12 +40,21 @@
     "node": ">=18.0.0"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.2.1",
     "@types/node": "^25.3.5",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.4",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "tailwindcss": "^4.2.1",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
+    "vite-plugin-singlefile": "^2.3.0",
     "vitest": "^4.0.18"
   },
   "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.59.0",
     "undici": "^7.22.0"
   }
 }

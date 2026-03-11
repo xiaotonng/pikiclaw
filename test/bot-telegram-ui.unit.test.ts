@@ -3,40 +3,18 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { buildSwitchWorkdirView, resolveRegisteredPath } from '../src/bot-telegram-directory.ts';
 import {
-  buildFinalReplyRender,
   buildStreamPreviewHtml,
   formatMenuLines,
   formatProviderUsageLines,
-  renderSessionTurnHtml,
 } from '../src/bot-telegram-render.ts';
 import { makeTmpDir } from './support/env.ts';
-import { makeStreamResult } from './support/stream-result.ts';
 
 describe('bot-telegram render helpers', () => {
-  it('renders resumed session turns with quoted user content and assistant markdown', () => {
-    const html = renderSessionTurnHtml(
-      '请总结这次修改\n第二行保留原样',
-      '# Summary\nUse **bold** and `code`.\n\n```ts\nconst x = 1;\n```',
-    );
+  // NOTE: renderSessionTurnHtml and buildFinalReplyRender are covered by
+  // bot-telegram.unit.test.ts ("renders resumed history" and "compresses warnings").
+  // Tests here focus on helpers not exercised through the bot integration tests.
 
-    expect(html).toContain('<blockquote expandable>请总结这次修改\n第二行保留原样</blockquote>');
-    expect(html).toContain('<b>Summary</b>');
-    expect(html).toContain('<b>bold</b>');
-    expect(html).toContain('<pre><code class="language-ts">const x = 1;</code></pre>');
-  });
-
-  it('builds final reply layouts and provider/menu summaries as pure render output', () => {
-    const rendered = buildFinalReplyRender('codex', makeStreamResult('codex', {
-      message: 'Build finished.',
-      elapsedS: 85,
-      contextPercent: 25.7,
-      activity: 'Ran: /bin/zsh -lc npm run build\nRan: /bin/zsh -lc npm test',
-    }));
-
-    expect(rendered.headerHtml).toContain('<i>commands: 2 done</i>');
-    expect(rendered.fullHtml).toContain('Build finished.');
-    expect(rendered.fullHtml).toContain('✓ codex · 25.7% · 1m25s');
-
+  it('formats provider usage windows and menu command lines', () => {
     const usageLines = formatProviderUsageLines({
       ok: true,
       capturedAt: new Date(Date.now() - 5_000).toISOString(),

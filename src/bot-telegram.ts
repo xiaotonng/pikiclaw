@@ -12,26 +12,35 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import {
   Bot, VERSION, type Agent, type SessionRuntime, type StreamResult,
-  fmtTokens, fmtUptime, fmtBytes, whichSync, buildPrompt,
+  fmtTokens, fmtUptime, fmtBytes, buildPrompt,
   parseAllowedChatIds, shellSplit,
 } from './bot.js';
 import {
   type BotArtifact,
-  getCodexUsageLive,
-  shutdownCodexServer,
   stageSessionFiles,
 } from './code-agent.js';
+import { shutdownAllDrivers } from './agent-driver.js';
 import {
   buildDefaultMenuCommands,
   buildWelcomeIntro,
-  indexSkillsByCommand,
   SKILL_CMD_PREFIX,
 } from './bot-menu.js';
-import { summarizePromptForStatus } from './bot-streaming.js';
+import {
+  getStartData,
+  getSessionsPageData,
+  getAgentsListData,
+  getModelsListData,
+  getStatusDataAsync,
+  getHostDataSync,
+  modelMatchesSelection,
+  resolveSkillPrompt,
+  summarizePromptForStatus,
+} from './bot-commands.js';
 import { buildSwitchWorkdirView, resolveRegisteredPath } from './bot-telegram-directory.js';
-import { TelegramLivePreview } from './bot-telegram-live-preview.js';
+import { LivePreview, type LivePreviewRenderer } from './bot-telegram-live-preview.js';
 import {
   buildInitialPreviewHtml,
+  buildStreamPreviewHtml,
   buildFinalReplyRender,
   escapeHtml,
   formatMenuLines,
@@ -40,29 +49,15 @@ import {
 } from './bot-telegram-render.js';
 import { TelegramChannel, type TgContext, type TgCallbackContext, type TgMessage } from './channel-telegram.js';
 import { splitText, supportsChannelCapability } from './channel-base.js';
+import { getActiveUserConfig } from './user-config.js';
 
 export { buildArtifactPrompt, buildArtifactSystemPrompt, collectArtifacts } from './code-agent.js';
 
-function claudeModelSelectionKey(modelId: string | null | undefined): string | null {
-  const value = String(modelId || '').trim().toLowerCase();
-  if (!value) return null;
-  if (value === 'opus' || value === 'opus-1m' || value.startsWith('claude-opus-')) {
-    return value === 'opus-1m' || value.endsWith('[1m]') ? 'opus-1m' : 'opus';
-  }
-  if (value === 'sonnet' || value === 'sonnet-1m' || value.startsWith('claude-sonnet-')) {
-    return value === 'sonnet-1m' || value.endsWith('[1m]') ? 'sonnet-1m' : 'sonnet';
-  }
-  if (value === 'haiku' || value.startsWith('claude-haiku-')) return 'haiku';
-  return null;
-}
-
-function modelMatchesSelection(agent: Agent, selection: string, currentModel: string): boolean {
-  if (selection === currentModel) return true;
-  if (agent !== 'claude') return false;
-  const a = claudeModelSelectionKey(selection);
-  const b = claudeModelSelectionKey(currentModel);
-  return !!a && a === b;
-}
+/** Telegram HTML renderer for LivePreview. */
+const telegramPreviewRenderer: LivePreviewRenderer = {
+  renderInitial: buildInitialPreviewHtml,
+  renderStream: buildStreamPreviewHtml,
+};
 
 function isNpxBinary(bin: string): boolean {
   return path.basename(bin, path.extname(bin)).toLowerCase() === 'npx';
@@ -99,12 +94,25 @@ export class TelegramBot extends Bot {
 
   constructor() {
     super();
+    const config = getActiveUserConfig();
     // merge Telegram-specific allowed IDs into base
-    if (process.env.TELEGRAM_ALLOWED_CHAT_IDS) {
-      for (const id of parseAllowedChatIds(process.env.TELEGRAM_ALLOWED_CHAT_IDS)) this.allowedChatIds.add(id);
+    if (config.telegramAllowedChatIds) {
+      for (const id of parseAllowedChatIds(config.telegramAllowedChatIds)) this.allowedChatIds.add(id);
     }
-    this.token = (process.env.TELEGRAM_BOT_TOKEN || process.env.CODECLAW_TOKEN || '').trim();
-    if (!this.token) throw new Error('Missing token. Set CODECLAW_TOKEN or TELEGRAM_BOT_TOKEN');
+    this.token = String(config.telegramBotToken || '').trim();
+    if (!this.token) throw new Error('Missing Telegram token. Configure via dashboard or set TELEGRAM_BOT_TOKEN');
+  }
+
+  protected override onManagedConfigChange(config: Record<string, any>, opts: { initial?: boolean } = {}) {
+    const nextToken = String(config.telegramBotToken || '').trim();
+    if (nextToken && nextToken !== this.token) {
+      this.token = nextToken;
+      if (!opts.initial) this.log('telegram token reloaded from setting.json');
+    }
+
+    const mergedAllowed = parseAllowedChatIds(process.env.CODECLAW_ALLOWED_IDS || '');
+    for (const id of parseAllowedChatIds(String(config.telegramAllowedChatIds || ''))) mergedAllowed.add(id);
+    this.allowedChatIds = mergedAllowed;
   }
 
   /** Skill command prefix used in Telegram bot commands. */
@@ -169,7 +177,7 @@ export class TelegramBot extends Bot {
 
     try { this.channel.disconnect(); } catch {}
     this.stopKeepAlive();
-    shutdownCodexServer();
+    shutdownAllDrivers();
 
     this.clearShutdownForceExitTimer();
     this.shutdownForceExitTimer = setTimeout(() => {
@@ -268,16 +276,16 @@ export class TelegramBot extends Bot {
   // ---- commands -------------------------------------------------------------
 
   private async cmdStart(ctx: TgContext) {
-    const cs = this.chat(ctx.chatId);
-    const { commands } = this.getCurrentMenuState();
+    const d = getStartData(this, ctx.chatId);
     const lines = [
-      ...this.welcomeIntroLines(),
+      `<b>${escapeHtml(d.title)}</b> v${escapeHtml(d.version)}`,
+      escapeHtml(d.subtitle),
       '',
-      `<b>Agent:</b> ${escapeHtml(cs.agent)}`,
-      `<b>Workdir:</b> <code>${escapeHtml(this.workdir)}</code>`,
+      `<b>Agent:</b> ${escapeHtml(d.agent)}`,
+      `<b>Workdir:</b> <code>${escapeHtml(d.workdir)}</code>`,
       '',
       '<b>Commands</b>',
-      ...formatMenuLines(commands),
+      ...formatMenuLines(d.commands),
     ];
     await ctx.reply(lines.join('\n'), { parseMode: 'HTML' });
   }
@@ -285,41 +293,21 @@ export class TelegramBot extends Bot {
   private sessionsPageSize = 5;
 
   private async buildSessionsPage(chatId: number, page: number): Promise<{ text: string; keyboard: { inline_keyboard: { text: string; callback_data: string }[][] } }> {
-    const cs = this.chat(chatId);
-    const res = await this.fetchSessions(cs.agent);
-    const sessions = res.ok ? res.sessions : [];
-    const total = sessions.length;
-    const totalPages = Math.max(1, Math.ceil(total / this.sessionsPageSize));
-    const pg = Math.max(0, Math.min(page, totalPages - 1));
-    const slice = sessions.slice(pg * this.sessionsPageSize, (pg + 1) * this.sessionsPageSize);
-
-    const text = `<b>${escapeHtml(cs.agent)} sessions</b> (${total})  p${pg + 1}/${totalPages}`;
+    const d = await getSessionsPageData(this, chatId, page, this.sessionsPageSize);
+    const text = `<b>${escapeHtml(d.agent)} sessions</b> (${d.total})  p${d.page + 1}/${d.totalPages}`;
     const rows: { text: string; callback_data: string }[][] = [];
 
-    for (const s of slice) {
-      const sessionKey = s.localSessionId || s.sessionId || '';
-      if (!sessionKey) continue;
-      const runtimeKey = s.localSessionId ? this.sessionKey(s.agent, s.localSessionId) : null;
-      const runtime = this.getSessionRuntimeByKey(runtimeKey);
-      const isCurrent = runtime ? cs.activeSessionKey === runtime.key : (
-        s.localSessionId
-          ? s.localSessionId === (cs.localSessionId ?? null)
-          : s.sessionId === (cs.sessionId ?? null)
-      );
-      const isRunning = !!runtime?.runningTaskIds.size || s.running;
-      const icon = isRunning ? '🟢' : isCurrent ? '● ' : '';
-      const prefix = s.title ? s.title.replace(/\n/g, ' ').slice(0, 10) : sessionKey.slice(0, 10);
-      const time = s.createdAt ? new Date(s.createdAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '?';
-
-      let cbData = `sess:${sessionKey}`;
+    for (const s of d.sessions) {
+      const icon = s.isRunning ? '🟢' : s.isCurrent ? '● ' : '';
+      let cbData = `sess:${s.key}`;
       if (cbData.length > 64) cbData = cbData.slice(0, 64);
-      rows.push([{ text: `${icon}${prefix}  ${time}`, callback_data: cbData }]);
+      rows.push([{ text: `${icon}${s.title}  ${s.time}`, callback_data: cbData }]);
     }
 
     const navRow: { text: string; callback_data: string }[] = [];
-    if (pg > 0) navRow.push({ text: `◀ ${pg}/${totalPages}`, callback_data: `sp:${pg - 1}` });
+    if (d.page > 0) navRow.push({ text: `◀ ${d.page}/${d.totalPages}`, callback_data: `sp:${d.page - 1}` });
     navRow.push({ text: '+ New', callback_data: 'sess:new' });
-    if (pg < totalPages - 1) navRow.push({ text: `${pg + 2}/${totalPages} ▶`, callback_data: `sp:${pg + 1}` });
+    if (d.page < d.totalPages - 1) navRow.push({ text: `${d.page + 2}/${d.totalPages} ▶`, callback_data: `sp:${d.page + 1}` });
     rows.push(navRow);
 
     return { text, keyboard: { inline_keyboard: rows } };
@@ -336,13 +324,7 @@ export class TelegramBot extends Bot {
   }
 
   private async cmdStatus(ctx: TgContext) {
-    const d = this.getStatusData(ctx.chatId);
-
-    // For codex, fetch real-time usage via WebSocket instead of stale DB data.
-    const usage = d.agent === 'codex'
-      ? await getCodexUsageLive().catch(() => d.usage)
-      : d.usage;
-
+    const d = await getStatusDataAsync(this, ctx.chatId);
     const lines = [
       `<b>codeclaw</b> v${d.version}\n`,
       `<b>Uptime:</b> ${fmtUptime(d.uptime)}`,
@@ -358,7 +340,7 @@ export class TelegramBot extends Bot {
     if (d.running) {
       lines.push(`<b>Running:</b> ${fmtUptime(Date.now() - d.running.startedAt)} - ${escapeHtml(summarizePromptForStatus(d.running.prompt))}`);
     }
-    lines.push(...formatProviderUsageLines(usage), '', '<b>Bot Usage</b>', `  Turns: ${d.stats.totalTurns}`);
+    lines.push(...formatProviderUsageLines(d.usage), '', '<b>Bot Usage</b>', `  Turns: ${d.stats.totalTurns}`);
     if (d.stats.totalInputTokens || d.stats.totalOutputTokens) {
       lines.push(`  In: ${fmtTokens(d.stats.totalInputTokens)}  Out: ${fmtTokens(d.stats.totalOutputTokens)}`);
       if (d.stats.totalCachedTokens) lines.push(`  Cached: ${fmtTokens(d.stats.totalCachedTokens)}`);
@@ -376,7 +358,7 @@ export class TelegramBot extends Bot {
   }
 
   private async cmdHost(ctx: TgContext) {
-    const d = this.getHostData();
+    const d = getHostDataSync(this);
     const lines = [
       `<b>Host</b>\n`,
       `<b>Name:</b> ${escapeHtml(d.hostName)}`,
@@ -398,18 +380,16 @@ export class TelegramBot extends Bot {
   }
 
   private async cmdAgents(ctx: TgContext) {
-    const cs = this.chat(ctx.chatId);
-    const res = this.fetchAgents();
+    const d = getAgentsListData(this, ctx.chatId);
     const lines = [`<b>Available Agents</b>\n`];
     const rows: { text: string; callback_data: string }[][] = [];
-    for (const a of res.agents) {
-      const isCurrent = a.agent === cs.agent;
-      const status = !a.installed ? '\u274C' : isCurrent ? '\u25CF' : '\u25CB';
-      lines.push(`${status} <b>${escapeHtml(a.agent)}</b>${isCurrent ? ' (current)' : ''}`);
+    for (const a of d.agents) {
+      const status = !a.installed ? '\u274C' : a.isCurrent ? '\u25CF' : '\u25CB';
+      lines.push(`${status} <b>${escapeHtml(a.agent)}</b>${a.isCurrent ? ' (current)' : ''}`);
       if (a.installed) {
         if (a.version) lines.push(`   Version: <code>${escapeHtml(a.version)}</code>`);
         if (a.path) lines.push(`   Path: <code>${escapeHtml(a.path)}</code>`);
-        const label = isCurrent ? `\u25CF ${a.agent} (current)` : a.agent;
+        const label = a.isCurrent ? `\u25CF ${a.agent} (current)` : a.agent;
         rows.push([{ text: label, callback_data: `ag:${a.agent}` }]);
       } else {
         lines.push(`   Not installed`);
@@ -419,27 +399,34 @@ export class TelegramBot extends Bot {
   }
 
   private async cmdModels(ctx: TgContext) {
-    const cs = this.chat(ctx.chatId);
-    const res = await this.fetchModels(cs.agent);
-    const currentModel = this.modelForAgent(cs.agent);
-    const lines = [`<b>Models for ${escapeHtml(cs.agent)}</b>`];
-    if (res.sources.length) lines.push(`<i>Source: ${escapeHtml(res.sources.join(', '))}</i>`);
-    if (res.note) lines.push(`<i>${escapeHtml(res.note)}</i>`);
+    const d = await getModelsListData(this, ctx.chatId);
+    const lines = [`<b>Models for ${escapeHtml(d.agent)}</b>`];
+    if (d.sources.length) lines.push(`<i>Source: ${escapeHtml(d.sources.join(', '))}</i>`);
+    if (d.note) lines.push(`<i>${escapeHtml(d.note)}</i>`);
     lines.push('');
     const rows: { text: string; callback_data: string }[][] = [];
-    if (!res.models.length) {
+    if (!d.models.length) {
       lines.push('<i>No discoverable models found.</i>');
     }
-    for (const m of res.models) {
-      const isCurrent = modelMatchesSelection(cs.agent, m.id, currentModel);
-      const status = isCurrent ? '\u25CF' : '\u25CB';
+    for (const m of d.models) {
+      const status = m.isCurrent ? '\u25CF' : '\u25CB';
       const display = m.alias ? `${m.alias} (${m.id})` : m.id;
-      const currentSuffix = isCurrent
-        ? (m.id === currentModel ? ' \u2190 current' : ` \u2190 current (${escapeHtml(currentModel)})`)
+      const currentSuffix = m.isCurrent
+        ? (m.id === d.currentModel ? ' \u2190 current' : ` \u2190 current (${escapeHtml(d.currentModel)})`)
         : '';
       lines.push(`${status} <code>${escapeHtml(display)}</code>${currentSuffix}`);
-      const label = isCurrent ? `\u25CF ${m.alias || m.id}` : (m.alias || m.id);
+      const label = m.isCurrent ? `\u25CF ${m.alias || m.id}` : (m.alias || m.id);
       rows.push([{ text: label, callback_data: `mod:${m.id}` }]);
+    }
+    if (d.effort) {
+      lines.push('');
+      lines.push(`<b>Thinking Effort</b>: <code>${escapeHtml(d.effort.current)}</code>`);
+      const effortRow: { text: string; callback_data: string }[] = [];
+      for (const l of d.effort.levels) {
+        const prefix = l.isCurrent ? '\u25CF ' : '';
+        effortRow.push({ text: `${prefix}${l.label}`, callback_data: `eff:${l.id}` });
+      }
+      rows.push(effortRow);
     }
     await ctx.reply(lines.join('\n'), { parseMode: 'HTML', keyboard: { inline_keyboard: rows } });
   }
@@ -559,20 +546,21 @@ export class TelegramBot extends Bot {
     });
 
     void this.queueSessionTask(session, async () => {
-      let livePreview: TelegramLivePreview | null = null;
+      let livePreview: LivePreview | null = null;
       try {
         if (phId != null) {
-          livePreview = new TelegramLivePreview({
+          livePreview = new LivePreview({
             agent: session.agent,
             chatId: ctx.chatId,
             placeholderMessageId: phId,
             channel: this.channel,
+            renderer: telegramPreviewRenderer,
             streamEditIntervalMs: session.agent === 'codex' ? 400 : 800,
             startTimeMs: start,
             canEditMessages: supportsChannelCapability((this as any).channel, 'editMessages'),
             canSendTyping: supportsChannelCapability((this as any).channel, 'typingIndicators'),
             messageThreadId,
-            log: message => this.log(message),
+            log: (message: string) => this.log(message),
           });
           livePreview.start();
         }
@@ -888,6 +876,28 @@ export class TelegramBot extends Bot {
     return true;
   }
 
+  private async handleEffortCallback(data: string, ctx: TgCallbackContext): Promise<boolean> {
+    if (!data.startsWith('eff:')) return false;
+
+    const effortId = data.slice(4);
+    const cs = this.chat(ctx.chatId);
+    const currentEffort = this.effortForAgent(cs.agent);
+    if (effortId === currentEffort) {
+      await ctx.answerCallback(`Already using ${effortId} effort`);
+      return true;
+    }
+
+    this.setEffortForAgent(cs.agent, effortId);
+    this.log(`effort switched to ${effortId} for ${cs.agent} chat=${ctx.chatId}`);
+    await ctx.answerCallback(`Effort set to ${effortId}`);
+    await ctx.editReply(
+      ctx.messageId,
+      `<b>Thinking effort set to <code>${escapeHtml(effortId)}</code></b>\n\nAgent: ${escapeHtml(cs.agent)}\nTakes effect on next message.`,
+      { parseMode: 'HTML' },
+    );
+    return true;
+  }
+
   async handleCallback(data: string, ctx: TgCallbackContext) {
     if (await this.handleSwitchNavigateCallback(data, ctx)) return;
     if (await this.handleSwitchSelectCallback(data, ctx)) return;
@@ -895,6 +905,7 @@ export class TelegramBot extends Bot {
     if (await this.handleSessionCallback(data, ctx)) return;
     if (await this.handleAgentCallback(data, ctx)) return;
     if (await this.handleModelCallback(data, ctx)) return;
+    if (await this.handleEffortCallback(data, ctx)) return;
     await ctx.answerCallback();
   }
 
@@ -927,26 +938,13 @@ export class TelegramBot extends Bot {
 
   /** Execute a project-defined skill by routing it to the current agent. */
   private async cmdSkill(cmd: string, args: string, ctx: TgContext) {
-    const skill = indexSkillsByCommand(this.fetchSkills().skills).get(cmd);
-    if (!skill) {
+    const resolved = resolveSkillPrompt(this, ctx.chatId, cmd, args);
+    if (!resolved) {
       await ctx.reply(`Skill not found for command /${cmd} in:\n<code>${escapeHtml(this.workdir)}</code>`, { parseMode: 'HTML' });
       return;
     }
-    const skillName = skill.name;
-    const cs = this.chat(ctx.chatId);
-    const extra = args.trim() ? ` ${args.trim()}` : '';
-
-    this.log(`skill: ${skillName} agent=${cs.agent}${extra ? ` args="${extra.trim()}"` : ''}`);
-
-    let prompt: string;
-    if (cs.agent === 'claude') {
-      prompt = `Please execute the /${skillName} skill defined in this project.${extra ? ` Additional context: ${extra.trim()}` : ''}`;
-    } else {
-      // codex - no native skill system, describe the requested skill semantically
-      prompt = `In this project's .claude/skills/${skillName}/ directory (or .claude/commands/${skillName}.md), there is a custom skill definition. Please read and execute the instructions defined in that skill file.${extra ? ` Additional context: ${extra.trim()}` : ''}`;
-    }
-
-    await this.handleMessage({ text: prompt, files: [] }, ctx);
+    this.log(`skill: ${resolved.skillName} agent=${this.chat(ctx.chatId).agent}${args.trim() ? ` args="${args.trim()}"` : ''}`);
+    await this.handleMessage({ text: resolved.prompt, files: [] }, ctx);
   }
 
   // ---- lifecycle ------------------------------------------------------------
@@ -958,7 +956,7 @@ export class TelegramBot extends Bot {
     this.channel = new TelegramChannel({
       token: this.token,
       workdir: tmpDir,
-      allowedChatIds: this.allowedChatIds.size ? this.allowedChatIds : undefined,
+      allowedChatIds: this.allowedChatIds.size ? this.allowedChatIds as Set<number> : undefined,
     });
     this.installSignalHandlers();
 
@@ -970,12 +968,12 @@ export class TelegramBot extends Bot {
       if (drained) this.log(`drained ${drained} pending update(s)`);
 
       // Seed knownChats so setupMenu applies per-chat commands
-      for (const cid of this.allowedChatIds) this.channel.knownChats.add(cid);
+      for (const cid of this.allowedChatIds) if (typeof cid === 'number') this.channel.knownChats.add(cid);
 
       await this.setupMenu();
 
-      for (const ag of ['claude', 'codex'] as const) {
-        this.log(`agent ${ag}: ${whichSync(ag) || 'NOT FOUND'}`);
+      for (const ag of this.fetchAgents().agents) {
+        this.log(`agent ${ag.agent}: ${ag.path || 'NOT FOUND'}`);
       }
       this.log(`config: agent=${this.defaultAgent} workdir=${this.workdir} timeout=${this.runTimeout}s`);
 

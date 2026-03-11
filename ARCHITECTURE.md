@@ -8,13 +8,19 @@ src/
   bot.ts                 Shared bot base: config, state, data methods, streaming, keep-alive
   bot-menu.ts            Telegram menu composition: welcome copy + skill command mapping
   bot-streaming.ts       Stream preview summarizers: prompt cleanup, plan/activity summaries
+  bot-commands.ts        Channel-agnostic command data layer (structured data, no rendering)
+  bot-handler.ts         Channel-agnostic message handling pipeline (MessagePipeline interface)
   bot-telegram.ts        Telegram bot orchestration: commands, callbacks, lifecycle
   bot-telegram-render.ts Telegram HTML/render helpers: markdown, status/final reply formatting
   bot-telegram-directory.ts Telegram workdir browser state + inline keyboards
   bot-telegram-live-preview.ts Telegram live preview controller: throttled edits + typing pulses
   channel-base.ts        Transport abstraction: lifecycle + outgoing primitives + capability helpers
   channel-telegram.ts    Telegram transport: API, polling, file download, message dispatch
-  code-agent.ts          AI agent abstraction: spawn claude/codex CLI, parse JSON stream
+  agent-driver.ts        AgentDriver interface + registry (registerDriver / getDriver / allDrivers)
+  code-agent.ts          Shared agent layer: types, session management, artifact helpers, CLI spawn
+  driver-claude.ts       Claude CLI driver: stream, sessions, tail, models, usage
+  driver-codex.ts        Codex CLI driver: app-server RPC, stream, sessions, tail, models, usage
+  driver-gemini.ts       Gemini CLI driver: stream, sessions, tail, models, usage (skeleton)
 ```
 
 ## Layering
@@ -70,11 +76,27 @@ src/
 │  ├ Group filter   @mention / reply-to-bot detection          │
 │  └ Smart behavior parseMode fallback, message splitting      │
 ├──────────────────────────────────────────────────────────────┤
-│  code-agent.ts  (AI agent abstraction)                       │
-│  ├ doStream()     spawn claude/codex CLI, parse JSONL        │
-│  ├ getSessions()  list local sessions by engine + workdir    │
-│  ├ getUsage()     inspect local Codex/Claude usage telemetry │
-│  └ listAgents()   detect installed CLIs + versions           │
+│  agent-driver.ts  (driver interface + registry)                │
+│  ├ AgentDriver    interface: doStream, getSessions, etc.      │
+│  ├ registerDriver register a driver implementation            │
+│  ├ getDriver      look up driver by id, throw if unknown      │
+│  └ allDrivers     list all registered drivers                 │
+├──────────────────────────────────────────────────────────────┤
+│  code-agent.ts  (shared agent layer)                          │
+│  ├ Types          StreamOpts, StreamResult, SessionInfo, ...  │
+│  ├ Session mgmt   workspace creation, index, staging, migrate │
+│  ├ Artifacts      collectArtifacts, buildArtifactPrompt       │
+│  ├ CLI spawn      run() — shared spawn+readline framework     │
+│  └ Dispatch       doStream/getSessions/... → getDriver(agent) │
+├──────────────────────────────────────────────────────────────┤
+│  driver-claude.ts / driver-codex.ts / driver-gemini.ts        │
+│  Each implements AgentDriver:                                 │
+│  ├ doStream       agent-specific streaming logic              │
+│  ├ getSessions    session listing from local index            │
+│  ├ getSessionTail read conversation history                   │
+│  ├ listModels     discover available models                   │
+│  ├ getUsage       rate limit / usage telemetry                │
+│  └ shutdown       cleanup (e.g. codex app-server)             │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -100,6 +122,145 @@ inlined inside `handleMessage()`.
 **Env var scoping** — bot.ts only reads channel-agnostic env vars (`CODECLAW_*`).
 Channel-specific env vars (`TELEGRAM_*`, `FEISHU_*`) are read in the corresponding
 bot-xxx.ts constructor.
+
+## Adding a New AI Agent (CLI)
+
+To integrate a new CLI agent (e.g. `aider`, `cursor`, `gemini`):
+
+### 1. Create the driver file
+
+Create `src/driver-xxx.ts`. Implement the `AgentDriver` interface and call `registerDriver()`:
+
+```typescript
+// src/driver-xxx.ts
+import { registerDriver, type AgentDriver } from './agent-driver.js';
+import {
+  type AgentInfo, type StreamOpts, type StreamResult,
+  type SessionListResult, type SessionTailOpts, type SessionTailResult,
+  type ModelListOpts, type ModelListResult,
+  type UsageOpts, type UsageResult,
+  run, detectAgentBin, listCodeclawSessions, emptyUsage,
+} from './code-agent.js';
+
+function xxxCmd(o: StreamOpts): string[] {
+  const args = ['xxx-cli'];
+  if (o.xxxModel) args.push('--model', o.xxxModel);
+  if (o.sessionId) args.push('--resume', o.sessionId);
+  return args;
+}
+
+function xxxParse(ev: any, s: any) {
+  // Parse the CLI's JSON stream events into s.text, s.thinking, s.sessionId, etc.
+  // See driver-claude.ts (claudeParse) for a line-by-line parsing example.
+}
+
+class XxxDriver implements AgentDriver {
+  readonly id = 'xxx';
+  readonly cmd = 'xxx-cli';
+  readonly thinkLabel = 'Thinking';
+
+  detect(): AgentInfo { return detectAgentBin('xxx-cli', 'xxx'); }
+
+  async doStream(opts: StreamOpts): Promise<StreamResult> {
+    // Option A: CLI spawn (like Claude) — use the shared run() framework
+    return run(xxxCmd(opts), opts, xxxParse);
+    // Option B: RPC/WebSocket — see driver-codex.ts for an app-server example
+  }
+
+  async getSessions(workdir: string, limit?: number): Promise<SessionListResult> {
+    // Session workspace is managed by code-agent.ts; just read the local index
+    const sessions = listCodeclawSessions(workdir, 'xxx', limit).map(r => ({
+      sessionId: r.engineSessionId, localSessionId: r.localSessionId,
+      engineSessionId: r.engineSessionId, agent: 'xxx' as const,
+      workdir: r.workdir, workspacePath: r.workspacePath,
+      model: r.model, createdAt: r.createdAt, title: r.title,
+      running: Date.now() - Date.parse(r.updatedAt) < 10_000,
+    }));
+    return { ok: true, sessions, error: null };
+  }
+
+  async getSessionTail(_opts: SessionTailOpts): Promise<SessionTailResult> {
+    return { ok: true, messages: [], error: null }; // implement when protocol is known
+  }
+
+  async listModels(_opts: ModelListOpts): Promise<ModelListResult> {
+    return { agent: 'xxx', models: [{ id: 'xxx-default', alias: null }], sources: [], note: null };
+  }
+
+  getUsage(_opts: UsageOpts): UsageResult {
+    return emptyUsage('xxx', 'Usage not yet implemented.');
+  }
+
+  shutdown() {}
+}
+
+registerDriver(new XxxDriver());
+```
+
+### 2. Register the driver
+
+Add a single import line in `src/code-agent.ts`:
+
+```typescript
+import './driver-xxx.js';
+```
+
+This triggers `registerDriver()` at startup. All dispatch points (`doStream`, `getSessions`,
+`getSessionTail`, `listModels`, `getUsage`, `listAgents`) automatically pick up the new agent.
+
+### 3. Add bot config
+
+In `src/bot.ts`, add a config entry in the `agentConfigs` initializer:
+
+```typescript
+this.agentConfigs = {
+  // ... existing entries
+  xxx: {
+    model: (process.env.XXX_MODEL || 'xxx-default').trim(),
+    extraArgs: shellSplit(process.env.XXX_EXTRA_ARGS || ''),
+  },
+};
+```
+
+### 4. Add StreamOpts fields (if needed)
+
+If the agent needs custom options beyond `model` and `extraArgs`, add optional fields to
+`StreamOpts` in `code-agent.ts`:
+
+```typescript
+export interface StreamOpts {
+  // ... existing fields
+  xxxModel?: string;
+  xxxExtraArgs?: string[];
+}
+```
+
+And populate them in `Bot.runStream()`:
+
+```typescript
+xxxModel: cs.agent === 'xxx' ? resolvedModel : (this.agentConfigs.xxx?.model || ''),
+```
+
+### What you don't need to touch
+
+- **Other driver files** — driver-claude.ts, driver-codex.ts are unchanged
+- **bot-telegram.ts** — commands, callbacks, live preview all work automatically
+- **bot-commands.ts** — agent listing, model switching, usage display work via registry
+- **Tests** — existing tests remain unaffected; add `driver-xxx.unit.test.ts` for yours
+
+### Key shared infrastructure
+
+| Function / Module | What it provides |
+|---|---|
+| `run(cmd, opts, parseLine)` | Spawn CLI, readline stdout, timeout, parse JSON events |
+| `detectAgentBin(cmd, id)` | `which` + `--version` detection |
+| `listCodeclawSessions(workdir, agent)` | Read local session index |
+| `findCodeclawSessionByLocalId(...)` | Lookup by local ID |
+| `collectArtifacts(workspacePath)` | Read return manifest, validate files |
+| `buildArtifactSystemPrompt(...)` | Artifact return instructions for system prompt |
+| `buildStreamPreviewMeta(s)` | Token usage → preview metadata |
+| `pushRecentActivity(lines, line)` | Activity feed accumulation |
+| `emptyUsage(agent, error)` | Empty usage result |
 
 ## Adding a New IM Channel
 

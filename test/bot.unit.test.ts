@@ -91,21 +91,27 @@ describe('Bot.runStream', () => {
     expect(cs.codexCumulative).toBeUndefined();
   });
 
-  it('uses persisted workdir when env is unset', () => {
+  it('uses current process cwd when env is unset', () => {
     const savedWorkdir = makeTmpDir('bot-unit-saved-');
+    const runtimeCwd = makeTmpDir('bot-unit-cwd-');
+    const originalCwd = process.cwd();
     saveUserConfig({ defaultWorkdir: savedWorkdir });
     delete process.env.CODECLAW_WORKDIR;
-
-    const bot = new Bot();
-
-    expect(bot.workdir).toBe(savedWorkdir);
+    try {
+      process.chdir(runtimeCwd);
+      const bot = new Bot();
+      expect(bot.workdir).toBe(process.cwd());
+    } finally {
+      process.chdir(originalCwd);
+    }
   });
 
-  it('persists switched workdir for future sessions', () => {
+  it('keeps switched workdir in runtime only', () => {
+    const initialWorkdir = process.env.CODECLAW_WORKDIR;
     saveUserConfig({
       defaultAgent: 'codex',
       telegramBotToken: '123:test-token',
-      defaultWorkdir: process.env.CODECLAW_WORKDIR,
+      defaultWorkdir: initialWorkdir,
     });
     const bot = new Bot();
     const nextWorkdir = makeTmpDir('bot-unit-next-persist-');
@@ -116,7 +122,7 @@ describe('Bot.runStream', () => {
     expect(loadUserConfig()).toMatchObject({
       defaultAgent: 'codex',
       telegramBotToken: '123:test-token',
-      defaultWorkdir: nextWorkdir,
+      defaultWorkdir: initialWorkdir,
     });
   });
 });

@@ -1,41 +1,70 @@
-import type { Agent, StreamPreviewMeta, StreamPreviewPlan } from './bot.js';
+import type { Agent, ChatId, StreamPreviewMeta, StreamPreviewPlan } from './bot.js';
 import { hasPreviewMeta, samePreviewMeta, samePreviewPlan } from './bot-streaming.js';
-import { buildInitialPreviewHtml, buildStreamPreviewHtml } from './bot-telegram-render.js';
+import type { StreamPreviewRenderInput } from './bot-telegram-render.js';
 
 const STREAM_PREVIEW_HEARTBEAT_MS = 5_000;
 const STREAM_TYPING_HEARTBEAT_MS = 4_000;
 const STREAM_STALLED_NOTICE_MS = 15_000;
 
-interface PreviewChannel {
-  editMessage(chatId: number, messageId: number, text: string, opts?: { parseMode?: string }): Promise<void>;
-  sendTyping(chatId: number, opts?: { messageThreadId?: number }): Promise<void>;
+// ---------------------------------------------------------------------------
+// Channel-agnostic interfaces
+// ---------------------------------------------------------------------------
+
+/** Minimal channel interface needed for live preview edits. */
+export interface PreviewChannel {
+  editMessage(chatId: ChatId, messageId: number | string, text: string, opts?: { parseMode?: string }): Promise<void>;
+  sendTyping(chatId: ChatId, opts?: { messageThreadId?: number }): Promise<void>;
 }
 
-interface TelegramLivePreviewOptions {
+/**
+ * Renderer that converts streaming state into a platform-specific string.
+ * Implement this per IM: Telegram HTML, Feishu Markdown, Discord Markdown, etc.
+ */
+export interface LivePreviewRenderer {
+  /** Render the initial placeholder text (e.g. "● codex · 0s"). */
+  renderInitial(agent: Agent): string;
+  /** Render the streaming preview with current state. */
+  renderStream(input: StreamPreviewRenderInput): string;
+}
+
+// ---------------------------------------------------------------------------
+// Options
+// ---------------------------------------------------------------------------
+
+export interface LivePreviewOptions {
   agent: Agent;
-  chatId: number;
-  placeholderMessageId: number;
+  chatId: ChatId;
+  placeholderMessageId: number | string;
   channel: PreviewChannel;
+  renderer: LivePreviewRenderer;
   streamEditIntervalMs: number;
   startTimeMs: number;
   canEditMessages: boolean;
   canSendTyping: boolean;
   messageThreadId?: number;
+  /** Parse mode string passed to editMessage (e.g. 'HTML', 'MarkdownV2'). */
+  parseMode?: string;
   log?: (message: string) => void;
 }
 
-export class TelegramLivePreview {
+// ---------------------------------------------------------------------------
+// LivePreview — generic streaming preview controller
+// ---------------------------------------------------------------------------
+
+export class LivePreview {
   readonly initialText: string;
 
   private readonly agent: Agent;
-  private readonly chatId: number;
-  private readonly placeholderMessageId: number;
+  private readonly chatId: ChatId;
+  private readonly placeholderMessageId: number | string;
   private readonly channel: PreviewChannel;
+  private readonly renderer: LivePreviewRenderer;
   private readonly streamEditIntervalMs: number;
   private readonly startTimeMs: number;
   private readonly canEditMessages: boolean;
   private readonly canSendTyping: boolean;
   private readonly messageThreadId?: number;
+  private readonly parseMode: string;
   private readonly log: (message: string) => void;
 
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -53,19 +82,21 @@ export class TelegramLivePreview {
   private latestMeta: StreamPreviewMeta | null = null;
   private latestPlan: StreamPreviewPlan | null = null;
 
-  constructor(options: TelegramLivePreviewOptions) {
+  constructor(options: LivePreviewOptions) {
     this.agent = options.agent;
     this.chatId = options.chatId;
     this.placeholderMessageId = options.placeholderMessageId;
     this.channel = options.channel;
+    this.renderer = options.renderer;
     this.streamEditIntervalMs = options.streamEditIntervalMs;
     this.startTimeMs = options.startTimeMs;
     this.canEditMessages = options.canEditMessages;
     this.canSendTyping = options.canSendTyping;
     this.messageThreadId = options.messageThreadId;
+    this.parseMode = options.parseMode ?? 'HTML';
     this.log = options.log ?? (() => {});
 
-    this.initialText = buildInitialPreviewHtml(this.agent);
+    this.initialText = this.renderer.renderInitial(this.agent);
     this.lastPreview = this.initialText;
     this.lastProgressAt = this.startTimeMs;
   }
@@ -148,7 +179,7 @@ export class TelegramLivePreview {
   }
 
   private renderPreview(): string {
-    return buildStreamPreviewHtml({
+    return this.renderer.renderStream({
       agent: this.agent,
       elapsedMs: Date.now() - this.startTimeMs,
       bodyText: this.latestText,
@@ -191,7 +222,7 @@ export class TelegramLivePreview {
       .then(async () => {
         if (version !== this.previewVersion) return;
         try {
-          await this.channel.editMessage(this.chatId, this.placeholderMessageId, preview, { parseMode: 'HTML' });
+          await this.channel.editMessage(this.chatId, this.placeholderMessageId, preview, { parseMode: this.parseMode });
         } catch (error: any) {
           this.log(`stream edit err: ${error?.message || error}`);
         }
@@ -210,3 +241,12 @@ export class TelegramLivePreview {
     await this.editChain.catch(() => {});
   }
 }
+
+// ---------------------------------------------------------------------------
+// Backward compat alias — existing code imports TelegramLivePreview
+// ---------------------------------------------------------------------------
+
+/** @deprecated Use `LivePreview` directly. */
+export const TelegramLivePreview = LivePreview;
+/** @deprecated Use `LivePreviewOptions` directly. */
+export type TelegramLivePreviewOptions = LivePreviewOptions;

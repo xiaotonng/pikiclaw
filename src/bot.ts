@@ -8,22 +8,37 @@ import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 import { execSync, spawn } from 'node:child_process';
-import { resolveUserWorkdir, updateUserConfig } from './user-config.js';
+import { getActiveUserConfig, onUserConfigChange, resolveUserWorkdir } from './user-config.js';
 import {
   doStream, getSessions, getSessionTail, getUsage, listAgents, listModels, listSkills,
   type Agent, type CodexCumulativeUsage, type StreamOpts, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type SessionInfo, type UsageResult,
   type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult,
   type SkillInfo, type SkillListResult,
 } from './code-agent.js';
+import { getDriver, hasDriver, allDriverIds } from './agent-driver.js';
 
 export { type Agent, type CodexCumulativeUsage, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type SessionInfo, type UsageResult, type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult, type SkillInfo, type SkillListResult };
-export const VERSION = '0.2.27';
+export type ChatId = number | string;
+export const VERSION = '0.2.28';
 const MACOS_USER_ACTIVITY_PULSE_INTERVAL_MS = 20_000;
 const MACOS_USER_ACTIVITY_PULSE_TIMEOUT_S = 30;
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * If `dir` has a .gitignore, ensure `.codeclaw` is listed so artifacts don't pollute git.
+ */
+function ensureGitignore(dir: string) {
+  try {
+    const gi = path.join(dir, '.gitignore');
+    if (!fs.existsSync(gi)) return;
+    const txt = fs.readFileSync(gi, 'utf8');
+    if (txt.split('\n').some(l => l.trim() === '.codeclaw' || l.trim() === '.codeclaw/')) return;
+    fs.appendFileSync(gi, `${txt.endsWith('\n') ? '' : '\n'}.codeclaw/\n`);
+  } catch { /* best-effort */ }
+}
 
 export function envBool(name: string, def: boolean): boolean {
   const raw = process.env[name];
@@ -79,21 +94,24 @@ export function fmtBytes(bytes: number): string {
   return `${(bytes / 1024 / 1024 / 1024 / 1024).toFixed(1)}TB`;
 }
 
-export function parseAllowedChatIds(raw: string): Set<number> {
-  const ids = new Set<number>();
+export function parseAllowedChatIds(raw: string): Set<ChatId> {
+  const ids = new Set<ChatId>();
   for (const t of raw.split(',')) {
-    const n = parseInt(t.trim(), 10);
-    if (!Number.isNaN(n)) ids.add(n);
+    const v = t.trim();
+    if (!v) continue;
+    const n = parseInt(v, 10);
+    // If the string is purely numeric, store as number for backward compat (Telegram).
+    // Otherwise store as string (Feishu, Discord, etc.).
+    if (!Number.isNaN(n) && String(n) === v) ids.add(n);
+    else if (v) ids.add(v);
   }
   return ids;
 }
 
-const VALID_AGENTS = new Set<Agent>(['codex', 'claude']);
-
 export function normalizeAgent(raw: string): Agent {
   const v = raw.trim().toLowerCase();
-  if (!VALID_AGENTS.has(v as Agent)) throw new Error(`Invalid agent: ${v}. Use: codex, claude`);
-  return v as Agent;
+  if (!hasDriver(v)) throw new Error(`Invalid agent: ${v}. Use: ${allDriverIds().join(', ')}`);
+  return v;
 }
 
 export function listSubdirs(dirPath: string): string[] {
@@ -108,7 +126,7 @@ export function listSubdirs(dirPath: string): string[] {
 }
 
 export function thinkLabel(agent: Agent): string {
-  return agent === 'codex' ? 'Reasoning' : 'Thinking';
+  try { return getDriver(agent).thinkLabel; } catch { return 'Thinking'; }
 }
 
 export function extractThinkingTail(text: string, maxLines = 3): string {
@@ -372,7 +390,7 @@ export interface SessionRuntime {
 
 export interface RunningTask {
   taskId: string;
-  chatId: number;
+  chatId: ChatId;
   agent: Agent;
   sessionKey: string;
   prompt: string;
@@ -388,18 +406,24 @@ export class Bot {
   workdir: string;
   defaultAgent: Agent;
   runTimeout: number;
-  allowedChatIds: Set<number>;
+  allowedChatIds: Set<ChatId>;
 
-  codexModel: string;
-  codexReasoningEffort: string;
-  codexFullAccess: boolean;
-  codexExtraArgs: string[];
+  // Per-agent config — keyed by agent id
+  agentConfigs: Record<string, Record<string, any>> = {};
 
-  claudeModel: string;
-  claudePermissionMode: string;
-  claudeExtraArgs: string[];
+  // Convenience accessors (backward-compat)
+  get codexModel(): string { return this.agentConfigs.codex?.model || ''; }
+  set codexModel(v: string) { this.agentConfigs.codex.model = v; }
+  get codexReasoningEffort(): string { return this.agentConfigs.codex?.reasoningEffort || 'xhigh'; }
+  set codexReasoningEffort(v: string) { this.agentConfigs.codex.reasoningEffort = v; }
+  get codexFullAccess(): boolean { return this.agentConfigs.codex?.fullAccess ?? true; }
+  get codexExtraArgs(): string[] { return this.agentConfigs.codex?.extraArgs || []; }
+  get claudeModel(): string { return this.agentConfigs.claude?.model || ''; }
+  set claudeModel(v: string) { this.agentConfigs.claude.model = v; }
+  get claudePermissionMode(): string { return this.agentConfigs.claude?.permissionMode || 'bypassPermissions'; }
+  get claudeExtraArgs(): string[] { return this.agentConfigs.claude?.extraArgs || []; }
 
-  chats = new Map<number, ChatState>();
+  chats = new Map<ChatId, ChatState>();
   sessionStates = new Map<string, SessionRuntime>();
   activeTasks = new Map<string, RunningTask>();
   startedAt = Date.now();
@@ -408,21 +432,36 @@ export class Bot {
   private keepAliveProc: ReturnType<typeof spawn> | null = null;
   private keepAlivePulseTimer: ReturnType<typeof setInterval> | null = null;
   private sessionChains = new Map<string, Promise<void>>();
+  private userConfigUnsubscribe: (() => void) | null = null;
 
   constructor() {
     this.workdir = resolveUserWorkdir();
-    this.defaultAgent = normalizeAgent(process.env.DEFAULT_AGENT || 'codex');
+
+    // Initialize per-agent configs
+    this.agentConfigs = {
+      codex: {
+        model: (process.env.CODEX_MODEL || 'gpt-5.4').trim(),
+        reasoningEffort: (process.env.CODEX_REASONING_EFFORT || 'xhigh').trim().toLowerCase(),
+        fullAccess: envBool('CODEX_FULL_ACCESS', true),
+        extraArgs: shellSplit(process.env.CODEX_EXTRA_ARGS || ''),
+      },
+      claude: {
+        model: (process.env.CLAUDE_MODEL || 'claude-opus-4-6').trim(),
+        reasoningEffort: (process.env.CLAUDE_REASONING_EFFORT || 'high').trim().toLowerCase(),
+        permissionMode: (process.env.CLAUDE_PERMISSION_MODE || 'bypassPermissions').trim(),
+        extraArgs: shellSplit(process.env.CLAUDE_EXTRA_ARGS || ''),
+      },
+      gemini: {
+        model: (process.env.GEMINI_MODEL || 'gemini-3.1-pro-preview').trim(),
+        extraArgs: shellSplit(process.env.GEMINI_EXTRA_ARGS || ''),
+      },
+    };
+
+    this.defaultAgent = normalizeAgent('codex');
     this.runTimeout = envInt('CODECLAW_TIMEOUT', 1800);
     this.allowedChatIds = parseAllowedChatIds(process.env.CODECLAW_ALLOWED_IDS || '');
-
-    this.codexModel = (process.env.CODEX_MODEL || 'gpt-5.4').trim();
-    this.codexReasoningEffort = (process.env.CODEX_REASONING_EFFORT || 'xhigh').trim().toLowerCase();
-    this.codexFullAccess = envBool('CODEX_FULL_ACCESS', true);
-    this.codexExtraArgs = shellSplit(process.env.CODEX_EXTRA_ARGS || '');
-
-    this.claudeModel = (process.env.CLAUDE_MODEL || 'claude-opus-4-6').trim();
-    this.claudePermissionMode = (process.env.CLAUDE_PERMISSION_MODE || 'bypassPermissions').trim();
-    this.claudeExtraArgs = shellSplit(process.env.CLAUDE_EXTRA_ARGS || '');
+    this.refreshManagedConfig(getActiveUserConfig(), { initial: true });
+    this.userConfigUnsubscribe = onUserConfigChange(config => this.refreshManagedConfig(config));
   }
 
   log(msg: string) {
@@ -430,7 +469,7 @@ export class Bot {
     process.stdout.write(`[codeclaw ${ts}] ${msg}\n`);
   }
 
-  chat(chatId: number): ChatState {
+  chat(chatId: ChatId): ChatState {
     let s = this.chats.get(chatId);
     if (!s) { s = { agent: this.defaultAgent, sessionId: null, activeSessionKey: null, modelId: null }; this.chats.set(chatId, s); }
     return s;
@@ -579,8 +618,7 @@ export class Bot {
   }
 
   modelForAgent(agent: Agent): string {
-    if (agent === 'codex') return this.codexModel;
-    return this.claudeModel;
+    return this.agentConfigs[agent]?.model || '';
   }
 
   fetchSessions(agent: Agent) {
@@ -603,13 +641,35 @@ export class Bot {
     return listModels(agent, { workdir: this.workdir, currentModel: this.modelForAgent(agent) });
   }
 
+  setDefaultAgent(agent: Agent) {
+    const next = normalizeAgent(agent);
+    const prev = this.defaultAgent;
+    this.defaultAgent = next;
+    for (const [, cs] of this.chats) {
+      if (cs.activeSessionKey || cs.localSessionId || cs.sessionId) continue;
+      if (cs.agent === prev) cs.agent = next;
+    }
+    this.log(`default agent changed to ${next}`);
+  }
+
   setModelForAgent(agent: Agent, modelId: string) {
-    if (agent === 'codex') this.codexModel = modelId;
-    else this.claudeModel = modelId;
+    const config = this.agentConfigs[agent];
+    if (config) config.model = modelId;
     this.log(`model for ${agent} changed to ${modelId}`);
   }
 
-  getStatusData(chatId: number) {
+  effortForAgent(agent: Agent): string | null {
+    if (agent === 'gemini') return null;
+    return this.agentConfigs[agent]?.reasoningEffort || 'high';
+  }
+
+  setEffortForAgent(agent: Agent, effort: string) {
+    const config = this.agentConfigs[agent];
+    if (config) config.reasoningEffort = effort;
+    this.log(`effort for ${agent} changed to ${effort}`);
+  }
+
+  getStatusData(chatId: ChatId) {
     const cs = this.chat(chatId);
     const selectedSession = this.getSelectedSession(cs);
     const selectedTask = this.runningTaskForSession(selectedSession?.key ?? null);
@@ -664,12 +724,7 @@ export class Bot {
     for (const [key, session] of this.sessionStates) {
       if (session.workdir === old && !session.runningTaskIds.size) this.sessionStates.delete(key);
     }
-    try {
-      updateUserConfig({ defaultWorkdir: resolvedPath });
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      this.log(`switch workdir: failed to persist config (${detail})`);
-    }
+    ensureGitignore(resolvedPath);
     this.log(`switch workdir: ${old} -> ${resolvedPath}`);
     this.afterSwitchWorkdir(old, resolvedPath);
     return old;
@@ -677,29 +732,53 @@ export class Bot {
 
   protected afterSwitchWorkdir(_oldPath: string, _newPath: string) {}
 
+  protected onManagedConfigChange(_config: Record<string, any>, _opts: { initial?: boolean } = {}) {}
+
+  private refreshManagedConfig(config: Record<string, any>, opts: { initial?: boolean } = {}) {
+    const nextWorkdir = resolveUserWorkdir({ config });
+    if (opts.initial) {
+      this.workdir = nextWorkdir;
+      ensureGitignore(this.workdir);
+    } else if (nextWorkdir !== this.workdir) {
+      this.switchWorkdir(nextWorkdir);
+    }
+
+    const nextDefaultAgent = normalizeAgent(String(config.defaultAgent || 'codex').trim().toLowerCase() || 'codex');
+    if (opts.initial) this.defaultAgent = nextDefaultAgent;
+    else if (nextDefaultAgent !== this.defaultAgent) this.setDefaultAgent(nextDefaultAgent);
+
+    if (!opts.initial) this.onManagedConfigChange(config, opts);
+  }
+
   async runStream(
     prompt: string, cs: Pick<SessionRuntime, 'key' | 'agent' | 'sessionId' | 'localSessionId' | 'workspacePath' | 'codexCumulative' | 'modelId'> | ChatState, attachments: string[],
     onText: (text: string, thinking: string, activity?: string, meta?: StreamPreviewMeta, plan?: StreamPreviewPlan | null) => void,
     systemPrompt?: string,
   ): Promise<StreamResult> {
     const resolvedModel = cs.modelId || this.modelForAgent(cs.agent);
+    const agentConfig = this.agentConfigs[cs.agent] || {};
+    const extraArgs: string[] = agentConfig.extraArgs || [];
     this.log(`[runStream] agent=${cs.agent} session=${cs.sessionId || '(new)'} local_session=${cs.localSessionId || '(new)'} workdir=${this.workdir} timeout=${this.runTimeout}s attachments=${attachments.length}`);
-    if (cs.agent === 'claude') {
-      this.log(`[runStream] claude config: model=${resolvedModel} permission=${this.claudePermissionMode} extraArgs=[${this.claudeExtraArgs.join(' ')}]`);
-    } else if (cs.agent === 'codex') {
-      this.log(`[runStream] codex config: model=${resolvedModel} reasoning=${this.codexReasoningEffort} fullAccess=${this.codexFullAccess} extraArgs=[${this.codexExtraArgs.join(' ')}]`);
-    }
+    this.log(`[runStream] ${cs.agent} config: model=${resolvedModel} extraArgs=[${extraArgs.join(' ')}]`);
     const opts: StreamOpts = {
       agent: cs.agent, prompt, workdir: this.workdir, timeout: this.runTimeout,
-      sessionId: cs.sessionId, localSessionId: cs.localSessionId ?? null, model: null, thinkingEffort: this.codexReasoningEffort, onText,
+      sessionId: cs.sessionId, localSessionId: cs.localSessionId ?? null, model: null,
+      thinkingEffort: agentConfig.reasoningEffort || 'high', onText,
       attachments: attachments.length ? attachments : undefined,
-      codexModel: cs.agent === 'codex' ? resolvedModel : this.codexModel, codexFullAccess: this.codexFullAccess,
+      // codex-specific
+      codexModel: cs.agent === 'codex' ? resolvedModel : this.codexModel,
+      codexFullAccess: this.codexFullAccess,
       codexDeveloperInstructions: systemPrompt || undefined,
       codexExtraArgs: this.codexExtraArgs.length ? this.codexExtraArgs : undefined,
       codexPrevCumulative: cs.codexCumulative,
-      claudeModel: cs.agent === 'claude' ? resolvedModel : this.claudeModel, claudePermissionMode: this.claudePermissionMode,
+      // claude-specific
+      claudeModel: cs.agent === 'claude' ? resolvedModel : this.claudeModel,
+      claudePermissionMode: this.claudePermissionMode,
       claudeAppendSystemPrompt: systemPrompt || undefined,
       claudeExtraArgs: this.claudeExtraArgs.length ? this.claudeExtraArgs : undefined,
+      // gemini-specific
+      geminiModel: cs.agent === 'gemini' ? resolvedModel : (this.agentConfigs.gemini?.model || ''),
+      geminiExtraArgs: this.agentConfigs.gemini?.extraArgs?.length ? this.agentConfigs.gemini.extraArgs : undefined,
     };
     const result = await doStream(opts);
     this.stats.totalTurns++;

@@ -5,6 +5,8 @@ import path from 'node:path';
 import type { AgentInfo } from './code-agent.js';
 
 export type AuthStatus = 'ready' | 'needs_login' | 'unknown';
+export type ChannelStatus = 'ready' | 'missing' | 'invalid' | 'error';
+export type SetupChannel = 'telegram' | 'feishu' | 'whatsapp';
 
 export interface AgentSetupState extends AgentInfo {
   label: string;
@@ -14,12 +16,22 @@ export interface AgentSetupState extends AgentInfo {
   authDetail: string;
 }
 
+export interface ChannelSetupState {
+  channel: SetupChannel;
+  configured: boolean;
+  ready: boolean;
+  validated: boolean;
+  status: ChannelStatus;
+  detail: string;
+}
+
 export interface SetupState {
   nodeVersion: string;
   nodeOk: boolean;
   channel: string;
   tokenProvided: boolean;
   agents: AgentSetupState[];
+  channels?: ChannelSetupState[];
 }
 
 function parseMajor(version: string): number {
@@ -123,19 +135,84 @@ function detectCodexAuth(homeDir: string): { status: AuthStatus; detail: string 
   };
 }
 
+function detectGeminiAuth(homeDir: string): { status: AuthStatus; detail: string } {
+  if ((process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY || '').trim()) {
+    return { status: 'ready', detail: 'GOOGLE_API_KEY or GEMINI_API_KEY detected.' };
+  }
+
+  const geminiStatePaths = [
+    path.join(homeDir, '.gemini'),
+    path.join(homeDir, '.config', 'gemini'),
+  ];
+  if (geminiStatePaths.some(fileExists)) {
+    return {
+      status: 'unknown',
+      detail: 'Local Gemini state detected. Verify login manually.',
+    };
+  }
+
+  return {
+    status: 'needs_login',
+    detail: 'No local Gemini credentials were detected.',
+  };
+}
+
 function enrichAgent(agent: AgentInfo): AgentSetupState {
   const homeDir = os.homedir();
-  const auth = agent.agent === 'claude' ? detectClaudeAuth(homeDir) : detectCodexAuth(homeDir);
+  const auth = agent.agent === 'claude'
+    ? detectClaudeAuth(homeDir)
+    : agent.agent === 'gemini'
+      ? detectGeminiAuth(homeDir)
+      : detectCodexAuth(homeDir);
+  const label = agent.agent === 'claude'
+    ? 'Claude Code'
+    : agent.agent === 'gemini'
+      ? 'Gemini CLI'
+      : 'Codex';
+  const installCommand = agent.agent === 'claude'
+    ? 'npm install -g @anthropic-ai/claude-code'
+    : agent.agent === 'gemini'
+      ? 'npm install -g @google/gemini-cli'
+      : 'npm install -g @openai/codex';
 
   return {
     ...agent,
-    label: agent.agent === 'claude' ? 'Claude Code' : 'Codex',
-    installCommand: agent.agent === 'claude'
-      ? 'npm install -g @anthropic-ai/claude-code'
-      : 'npm install -g @openai/codex',
+    label,
+    installCommand,
     loginCommand: agent.agent,
     authStatus: agent.installed ? auth.status : 'needs_login',
     authDetail: agent.installed ? auth.detail : 'Not installed yet.',
+  };
+}
+
+function defaultChannelState(channel: string, tokenProvided: boolean): ChannelSetupState {
+  if (channel === 'telegram') {
+    return {
+      channel: 'telegram',
+      configured: tokenProvided,
+      ready: tokenProvided,
+      validated: false,
+      status: tokenProvided ? 'ready' : 'missing',
+      detail: tokenProvided ? 'Telegram credentials are configured.' : 'Telegram is not configured.',
+    };
+  }
+  if (channel === 'feishu') {
+    return {
+      channel: 'feishu',
+      configured: tokenProvided,
+      ready: tokenProvided,
+      validated: false,
+      status: tokenProvided ? 'ready' : 'missing',
+      detail: tokenProvided ? 'Feishu credentials are configured.' : 'Feishu is not configured.',
+    };
+  }
+  return {
+    channel: 'whatsapp',
+    configured: tokenProvided,
+    ready: tokenProvided,
+    validated: false,
+    status: tokenProvided ? 'ready' : 'missing',
+    detail: tokenProvided ? 'WhatsApp credentials are configured.' : 'WhatsApp is not configured.',
   };
 }
 
@@ -144,6 +221,7 @@ export function collectSetupState(args: {
   channel: string;
   tokenProvided: boolean;
   nodeVersion?: string;
+  channels?: ChannelSetupState[];
 }): SetupState {
   const nodeVersion = args.nodeVersion || process.versions.node;
   return {
@@ -152,6 +230,7 @@ export function collectSetupState(args: {
     channel: args.channel,
     tokenProvided: args.tokenProvided,
     agents: args.agents.map(enrichAgent),
+    channels: args.channels?.length ? args.channels : [defaultChannelState(args.channel, args.tokenProvided)],
   };
 }
 
@@ -182,11 +261,16 @@ function agentSummary(state: AgentSetupState): string[] {
 }
 
 export function hasReadyAgent(state: SetupState): boolean {
+  return state.agents.some(agent => agent.installed && agent.authStatus === 'ready');
+}
+
+export function hasInstalledAgent(state: SetupState): boolean {
   return state.agents.some(agent => agent.installed);
 }
 
 export function isSetupReady(state: SetupState): boolean {
-  return state.nodeOk && state.tokenProvided && hasReadyAgent(state);
+  const readyChannel = state.channels?.some(channel => channel.ready) ?? state.tokenProvided;
+  return state.nodeOk && readyChannel && hasReadyAgent(state);
 }
 
 export function buildSetupGuide(state: SetupState, version: string, options?: { doctor?: boolean }): string {
@@ -225,15 +309,19 @@ export function buildSetupGuide(state: SetupState, version: string, options?: { 
     lines.push('OK       A Telegram token was provided.');
   } else if (isTelegram) {
     lines.push(
-      'MISSING  No TELEGRAM_BOT_TOKEN or CODECLAW_TOKEN was provided.',
-      '         Create one in Telegram:',
+      'MISSING  No Telegram token configured in ~/.codeclaw/setting.json',
+      '         Run `codeclaw` to open the dashboard and configure, or:',
       '         1. Open Telegram and search for @BotFather',
-      '         2. Send /newbot',
-      '         3. Choose a display name and a username for the bot',
-      '         4. Copy the token BotFather sends back',
+      '         2. Send /newbot and copy the token',
+      '         3. Add to ~/.codeclaw/setting.json: { "telegramBotToken": "..." }',
     );
+  } else if (state.channel === 'feishu' && state.tokenProvided) {
+    lines.push('OK       Feishu credentials provided (FEISHU_APP_ID + FEISHU_APP_SECRET).');
   } else if (state.channel === 'feishu') {
-    lines.push('MISSING  Feishu setup is not available yet. Use `--channel telegram` for now.');
+    lines.push(
+      'MISSING  No Feishu credentials configured in ~/.codeclaw/setting.json',
+      '         Run `codeclaw` to open the dashboard and configure, or add feishuAppId/feishuAppSecret to setting.json.',
+    );
   } else if (state.channel === 'whatsapp') {
     lines.push('MISSING  WhatsApp setup is not available yet. Use `--channel telegram` for now.');
   } else if (state.tokenProvided) {
@@ -262,7 +350,7 @@ export function buildSetupGuide(state: SetupState, version: string, options?: { 
     '  - Run `npx codeclaw@latest --help` for the full CLI reference.',
   );
 
-  if (!doctor && !hasReadyAgent(state)) {
+  if (!doctor && !hasInstalledAgent(state)) {
     lines.push('', 'You only need one local coding agent. Install Claude Code or Codex, then come back.');
   }
 

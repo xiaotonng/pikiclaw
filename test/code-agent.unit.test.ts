@@ -11,6 +11,7 @@ import {
   doCodexStream,
   doStream,
   getUsage,
+  labelFromWindowMinutes,
   listModels,
   shutdownCodexServer,
   stageSessionFiles,
@@ -60,6 +61,13 @@ describe('buildCodexTurnInput', () => {
       { type: 'text', text: `[Attached file: ${docPath}]` },
       { type: 'text', text: 'inspect this' },
     ]);
+  });
+});
+
+describe('usage helpers', () => {
+  it('normalizes near-canonical rate-limit windows', () => {
+    expect(labelFromWindowMinutes(301, 'Primary')).toBe('5h');
+    expect(labelFromWindowMinutes(10081, 'Secondary')).toBe('7d');
   });
 });
 
@@ -745,7 +753,8 @@ exit 0`;
       const claudeUsage = getUsage({ agent: 'claude', model: 'claude-opus-4-6' });
       expect(claudeUsage.ok).toBe(true);
       expect(claudeUsage.source).toBe('telemetry');
-      expect(claudeUsage.status).toBe('allowed_warning');
+      expect(claudeUsage.status).toBe('warning');
+      expect(claudeUsage.windows[0].status).toBe('warning');
       expect(claudeUsage.windows[0].resetAfterSeconds).toBe(39 * 3600);
     });
   });

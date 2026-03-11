@@ -6,18 +6,19 @@
 import { VERSION, envBool } from './bot.js';
 import { TelegramBot } from './bot-telegram.js';
 import { listAgents } from './code-agent.js';
+import { startDashboard, type DashboardServer } from './dashboard.js';
 import { buildSetupGuide, collectSetupState, hasReadyAgent, isSetupReady } from './onboarding.js';
 import { runSetupWizard } from './setup-wizard.js';
-import { applyUserConfig, loadUserConfig } from './user-config.js';
+import { applyUserConfig, loadUserConfig, startUserConfigSync, type ChannelName, type UserConfig } from './user-config.js';
 
-type Channel = 'telegram' | 'feishu' | 'whatsapp';
-const VALID_CHANNELS = new Set<Channel>(['telegram', 'feishu', 'whatsapp']);
+const VALID_CHANNELS = new Set<ChannelName>(['telegram', 'feishu', 'whatsapp']);
 
 function parseArgs(argv: string[]) {
   const args: Record<string, any> = {
     channel: null, token: null, agent: null, model: null, workdir: null,
     fullAccess: null, safeMode: false, allowedIds: null,
     timeout: null, version: false, help: false, doctor: false, setup: false,
+    noDashboard: false, dashboardPort: null,
   };
   const it = argv[Symbol.iterator]();
   for (const arg of it) {
@@ -33,6 +34,8 @@ function parseArgs(argv: string[]) {
       case '--timeout': args.timeout = parseInt(it.next().value ?? '', 10); break;
       case '--doctor': args.doctor = true; break;
       case '--setup': args.setup = true; break;
+      case '--no-dashboard': args.noDashboard = true; break;
+      case '--dashboard-port': args.dashboardPort = parseInt(it.next().value ?? '', 10); break;
       case '-v': case '--version': args.version = true; break;
       case '-h': case '--help': args.help = true; break;
       default:
@@ -44,48 +47,82 @@ function parseArgs(argv: string[]) {
 
 export async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const userConfig = loadUserConfig();
+  let userConfig = loadUserConfig();
 
   if (args.version) { process.stdout.write(`codeclaw ${VERSION}\n`); process.exit(0); }
 
-  const channel = (args.channel || process.env.CODECLAW_CHANNEL || userConfig.channel || 'telegram').trim().toLowerCase() as Channel;
-  if (!VALID_CHANNELS.has(channel)) {
-    process.stderr.write(`Unknown channel: ${channel}. Available: ${[...VALID_CHANNELS].join(', ')}\n`);
-    process.exit(1);
+  const configOverrides: Partial<UserConfig> = {};
+  if (args.agent) configOverrides.defaultAgent = args.agent;
+  if (args.workdir) configOverrides.defaultWorkdir = args.workdir;
+
+  // Apply config early so managed env vars are populated from setting.json.
+  applyUserConfig({ ...userConfig, ...configOverrides }, undefined, { overwrite: true, clearMissing: true });
+
+  // Detect which channels have credentials configured (config file is authoritative)
+  function hasChannelToken(ch: ChannelName): boolean {
+    const config = { ...userConfig, ...configOverrides };
+    switch (ch) {
+      case 'telegram': return !!(config.telegramBotToken || args.token);
+      case 'feishu': return !!(config.feishuAppId || args.token);
+      case 'whatsapp': return !!(args.token);
+    }
   }
 
-  applyUserConfig(userConfig, channel);
-  const tokenProvided = channel === 'telegram'
-    ? !!(args.token || process.env.CODECLAW_TOKEN || process.env.TELEGRAM_BOT_TOKEN || userConfig.telegramBotToken)
-    : channel === 'feishu'
-      ? !!(args.token || process.env.FEISHU_APP_ID)
-      : !!(args.token || process.env.CODECLAW_TOKEN || process.env.WHATSAPP_TOKEN);
+  // Resolve channels: explicit flag > config > auto-detect from tokens
+  let channels: ChannelName[];
+  const rawChannels = args.channel || '';
+  if (rawChannels) {
+    channels = rawChannels.split(',').map((c: string) => c.trim().toLowerCase()) as ChannelName[];
+  } else if (userConfig.channels?.length) {
+    channels = userConfig.channels;
+  } else {
+    // Auto-detect: launch all channels that have tokens configured
+    const detected: ChannelName[] = [];
+    // Feishu first (default priority)
+    if (hasChannelToken('feishu')) detected.push('feishu');
+    if (hasChannelToken('telegram')) detected.push('telegram');
+    channels = detected.length ? detected : [];
+  }
+  for (const ch of channels) {
+    if (!VALID_CHANNELS.has(ch)) {
+      process.stderr.write(`Unknown channel: ${ch}. Available: ${[...VALID_CHANNELS].join(', ')}\n`);
+      process.exit(1);
+    }
+  }
+  // Primary channel used for setup wizard / doctor checks (feishu preferred)
+  const channel: ChannelName = channels[0] || 'feishu';
+  const tokenProvided = channels.length > 0 && hasChannelToken(channel);
   if (args.help) {
     process.stdout.write(
-`codeclaw v${VERSION} — Run local coding agents through Telegram.
+`codeclaw v${VERSION} — Run local coding agents through IM.
 
-Run a bot that forwards Telegram messages to a local AI coding agent
+Run a bot that forwards IM messages to a local AI coding agent
 (Claude Code or Codex CLI), streams responses in real-time, and manages
 sessions, models, and workdirs.
 
+Channels are auto-detected from configured tokens. If both Feishu and
+Telegram tokens are present, both channels launch simultaneously.
+
 Usage:
-  npx codeclaw -c telegram -t <BOT_TOKEN>
-  npx codeclaw -c telegram -t <BOT_TOKEN> -a codex
-  npx codeclaw -c telegram -t <BOT_TOKEN> -w ~/project
-  CODECLAW_TOKEN=<TOKEN> npx codeclaw
+  npx codeclaw                              # auto-detect from config/env
+  npx codeclaw -c feishu,telegram           # explicit multi-channel
+  npx codeclaw -c telegram -t <BOT_TOKEN>   # single channel with token
+  npx codeclaw -w ~/project                 # set working directory
 
 Options:
-  -c, --channel <channel>   IM channel: telegram  [default: telegram]
+  -c, --channel <channels>  IM channel(s), comma-separated  [default: auto-detect]
   -t, --token <token>       Channel auth token (env: CODECLAW_TOKEN)
   -a, --agent <agent>       AI agent: claude | codex  [default: codex]
   -m, --model <model>       Default model, switchable in chat via /models
-  -w, --workdir <dir>       Working directory for the agent  [default: saved workdir or cwd]
+  -w, --workdir <dir>       Working directory for the agent  [default: current process cwd]
   --full-access             Codex full-access + Claude bypassPermissions  [default]
   --safe-mode               Use safer agent permission modes
   --allowed-ids <id,id>     Comma-separated chat/user ID whitelist
   --timeout <seconds>       Max seconds per agent request  [default: 1800]
   --doctor                  Run setup checks and exit
   --setup                   Run the interactive setup wizard
+  --no-dashboard            Skip the web dashboard
+  --dashboard-port <port>   Dashboard port  [default: 3939]
   -v, --version             Print version
   -h, --help                Print this help
 
@@ -119,8 +156,15 @@ Bot commands (available once running):
   /switch     Browse and change working directory
   /restart    Restart with latest version
 
+Environment variables (Feishu):
+  FEISHU_APP_ID              Feishu app ID (from Feishu Open Platform)
+  FEISHU_APP_SECRET          Feishu app secret
+  FEISHU_DOMAIN              API domain (default: https://open.feishu.cn)
+  FEISHU_USE_PROXY           Force Feishu APIs and WS to use process proxy settings
+  FEISHU_ALLOWED_CHAT_IDS    Comma-separated allowed Feishu chat IDs
+
 Notes:
-  - feishu / whatsapp are planned but not implemented yet.
+  - whatsapp is planned but not implemented yet.
   - --safe-mode delegates to the agent's own permission model; it does not add
     a codeclaw-specific approval workflow.
 
@@ -136,78 +180,107 @@ Docs: https://github.com/xiaotonng/codeclaw
     tokenProvided,
   });
   const canPromptInteractively = !!(process.stdin.isTTY && process.stdout.isTTY);
-  if (args.setup && !canPromptInteractively) {
-    process.stderr.write('--setup requires an interactive terminal.\n');
-    process.exit(1);
+
+  // ── Doctor mode: quick check and exit ──
+  if (args.doctor) {
+    const guide = buildSetupGuide(setupState, VERSION, { doctor: true });
+    const ready = isSetupReady(setupState);
+    if (ready) process.stdout.write(`${guide}\nSetup looks ready.\n`);
+    else process.stderr.write(guide);
+    process.exit(ready ? 0 : 1);
   }
+
+  // ── Dashboard mode (default) ──
+  // If config is incomplete or first-time: open dashboard for configuration.
+  // If config is ready: open dashboard + start bot channels.
+  const useDashboard = !args.noDashboard && !args.setup;
+  let dashboard: DashboardServer | null = null;
+
   const needsAgentAttention = setupState.agents.filter(agent => agent.installed).every(agent => agent.authStatus !== 'ready');
-  if (args.setup || (canPromptInteractively && !args.doctor && channel === 'telegram' && (!tokenProvided || !hasReadyAgent(setupState) || needsAgentAttention))) {
+  const noChannelsDetected = channels.length === 0;
+  const needsSetup = noChannelsDetected || !tokenProvided || !hasReadyAgent(setupState) || needsAgentAttention;
+
+  if (useDashboard) {
+    // Start dashboard — always. If config is incomplete, it serves as the setup UI.
+    dashboard = await startDashboard({
+      port: args.dashboardPort || 3939,
+      open: true,
+    });
+
+    if (needsSetup) {
+      // Dashboard is showing the config page. Wait for user to configure and restart.
+      const ts = new Date().toTimeString().slice(0, 8);
+      process.stdout.write(`[codeclaw ${ts}] waiting for configuration via dashboard...\n`);
+      process.stdout.write(`[codeclaw ${ts}] configure at ${dashboard.url}, then restart codeclaw.\n`);
+      // Keep process alive so dashboard remains accessible
+      await new Promise<void>(() => {}); // block forever
+    }
+  } else if (args.setup) {
+    // Explicit --setup: use the terminal-based wizard
+    if (!canPromptInteractively) {
+      process.stderr.write('--setup requires an interactive terminal.\n');
+      process.exit(1);
+    }
     const wizard = await runSetupWizard({
       version: VERSION,
       channel,
-      argsAgent: args.agent || process.env.DEFAULT_AGENT || userConfig.defaultAgent || null,
-      currentToken: args.token || process.env.TELEGRAM_BOT_TOKEN || process.env.CODECLAW_TOKEN || userConfig.telegramBotToken || null,
+      argsAgent: args.agent || userConfig.defaultAgent || null,
+      currentToken: args.token || userConfig.telegramBotToken || null,
       initialState: setupState,
       listAgents: () => listAgents().agents,
     });
     if (!wizard.completed) process.exit(1);
-    if (!args.token && wizard.token) process.env.TELEGRAM_BOT_TOKEN = wizard.token;
-    if (!args.agent && wizard.agent) process.env.DEFAULT_AGENT = wizard.agent;
+    userConfig = loadUserConfig();
+  } else if (needsSetup) {
+    // --no-dashboard and needs setup: show guide and exit
+    process.stdout.write(buildSetupGuide(setupState, VERSION));
+    process.exit(0);
   }
 
-  const refreshedTokenProvided = channel === 'telegram'
-    ? !!(args.token || process.env.CODECLAW_TOKEN || process.env.TELEGRAM_BOT_TOKEN)
-    : channel === 'feishu'
-      ? !!(args.token || process.env.FEISHU_APP_ID)
-      : !!(args.token || process.env.CODECLAW_TOKEN || process.env.WHATSAPP_TOKEN);
+  // Re-detect channels after wizard/dashboard may have set tokens
+  if (channels.length === 0) {
+    const detected: ChannelName[] = [];
+    if (hasChannelToken('feishu')) detected.push('feishu');
+    if (hasChannelToken('telegram')) detected.push('telegram');
+    channels = detected;
+  }
+  const refreshedTokenProvided = channels.length > 0;
+  if (!refreshedTokenProvided) {
+    const refreshedSetupState = collectSetupState({
+      agents: listAgents().agents,
+      channel,
+      tokenProvided: false,
+    });
+    process.stdout.write(buildSetupGuide(refreshedSetupState, VERSION));
+    process.exit(0);
+  }
+
   const refreshedSetupState = collectSetupState({
     agents: listAgents().agents,
     channel,
     tokenProvided: refreshedTokenProvided,
   });
-  if (args.doctor || !refreshedTokenProvided) {
-    const guide = buildSetupGuide(refreshedSetupState, VERSION, { doctor: args.doctor });
-    const ready = isSetupReady(refreshedSetupState);
-    if (args.doctor) {
-      if (ready) process.stdout.write(`${guide}\nSetup looks ready.\n`);
-      else process.stderr.write(guide);
-      process.exit(ready ? 0 : 1);
-    }
-    process.stdout.write(guide);
-    process.exit(0);
-  }
-
   if (!hasReadyAgent(refreshedSetupState)) {
     process.stderr.write(buildSetupGuide(refreshedSetupState, VERSION, { doctor: true }));
     process.exit(1);
   }
 
-  // map CLI flags to env (channel-agnostic → channel-specific)
+  const runtimeConfig: Partial<UserConfig> = { ...userConfig, ...configOverrides };
   if (args.token) {
-    if (channel === 'telegram') process.env.TELEGRAM_BOT_TOKEN = args.token;
+    if (channel === 'telegram') runtimeConfig.telegramBotToken = args.token;
     else if (channel === 'feishu') {
       const [appId, ...rest] = args.token.split(':');
-      process.env.FEISHU_APP_ID = appId;
-      if (rest.length) process.env.FEISHU_APP_SECRET = rest.join(':');
+      runtimeConfig.feishuAppId = appId;
+      runtimeConfig.feishuAppSecret = rest.join(':');
     }
-    else if (channel === 'whatsapp') process.env.WHATSAPP_TOKEN = args.token;
   }
-  // fallback: CODECLAW_TOKEN → channel-specific env
-  if (!args.token && process.env.CODECLAW_TOKEN) {
-    if (channel === 'telegram' && !process.env.TELEGRAM_BOT_TOKEN) process.env.TELEGRAM_BOT_TOKEN = process.env.CODECLAW_TOKEN;
-    else if (channel === 'whatsapp' && !process.env.WHATSAPP_TOKEN) process.env.WHATSAPP_TOKEN = process.env.CODECLAW_TOKEN;
-  }
-
-  if (args.agent) process.env.DEFAULT_AGENT = args.agent;
-  if (args.workdir) process.env.CODECLAW_WORKDIR = args.workdir;
+  if (args.allowedIds && channel === 'telegram') runtimeConfig.telegramAllowedChatIds = args.allowedIds;
+  applyUserConfig(runtimeConfig, undefined, { overwrite: true, clearMissing: true });
   if (args.model) {
-    const ag = args.agent || process.env.DEFAULT_AGENT || 'codex';
+    const ag = args.agent || runtimeConfig.defaultAgent || 'codex';
     if (ag === 'codex') process.env.CODEX_MODEL = args.model;
     else if (ag === 'gemini') process.env.GEMINI_MODEL = args.model;
     else process.env.CLAUDE_MODEL = args.model;
-  }
-  if (args.allowedIds) {
-    if (channel === 'telegram') process.env.TELEGRAM_ALLOWED_CHAT_IDS = args.allowedIds;
   }
   if (args.timeout != null) process.env.CODECLAW_TIMEOUT = String(args.timeout);
   if (args.safeMode) {
@@ -217,20 +290,44 @@ Docs: https://github.com/xiaotonng/codeclaw
     process.env.CODEX_FULL_ACCESS = 'true';
     process.env.CLAUDE_PERMISSION_MODE = 'bypassPermissions';
   }
+  const stopUserConfigSync = startUserConfigSync({
+    overrides: runtimeConfig,
+    log: message => {
+      const ts = new Date().toTimeString().slice(0, 8);
+      process.stdout.write(`[codeclaw ${ts}] ${message}\n`);
+    },
+  });
+  process.once('exit', stopUserConfigSync);
 
-  // dispatch to channel-specific bot
-  switch (channel) {
-    case 'telegram':
-      await new TelegramBot().run();
-      break;
-    case 'feishu':
-      process.stderr.write('Feishu channel is not yet implemented. Coming soon.\n');
-      process.exit(1);
-      break;
-    case 'whatsapp':
-      process.stderr.write('WhatsApp channel is not yet implemented. Coming soon.\n');
-      process.exit(1);
-      break;
+  // dispatch to channel-specific bot(s) — launch all channels concurrently
+  async function launchChannel(ch: ChannelName): Promise<void> {
+    switch (ch) {
+      case 'telegram': {
+        const bot = new TelegramBot();
+        // Attach bot to dashboard for runtime monitoring
+        if (dashboard) dashboard.attachBot(bot);
+        await bot.run();
+        break;
+      }
+      case 'feishu': {
+        const { FeishuBot } = await import('./bot-feishu.js');
+        const bot = new FeishuBot();
+        if (dashboard) dashboard.attachBot(bot);
+        await bot.run();
+        break;
+      }
+      case 'whatsapp':
+        process.stderr.write('WhatsApp channel is not yet implemented. Coming soon.\n');
+        break;
+    }
+  }
+
+  if (channels.length === 1) {
+    await launchChannel(channels[0]);
+  } else {
+    const ts = new Date().toTimeString().slice(0, 8);
+    process.stdout.write(`[codeclaw ${ts}] launching channels: ${channels.join(', ')}\n`);
+    await Promise.all(channels.map(ch => launchChannel(ch)));
   }
 }
 

@@ -1,0 +1,115 @@
+import type { AgentStatusResponse, AppState, HostInfo, LsDirResult, SessionTailMessage } from './types';
+
+export interface ApiRequestOptions extends RequestInit {
+  timeoutMs?: number;
+}
+
+const DEFAULT_TIMEOUT_MS = 15_000;
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, onTimeout?: () => void): Promise<T> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      onTimeout?.();
+      reject(new Error(`Request timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    promise
+      .then(value => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      })
+      .catch(error => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(error);
+      });
+  });
+}
+
+function forwardAbort(source: AbortSignal | null | undefined, controller: AbortController): () => void {
+  if (!source) return () => {};
+  const abort = () => controller.abort((source as AbortSignal & { reason?: unknown }).reason);
+  if (source.aborted) {
+    abort();
+    return () => {};
+  }
+  source.addEventListener('abort', abort, { once: true });
+  return () => source.removeEventListener('abort', abort);
+}
+
+async function json<T>(url: string, opts: ApiRequestOptions = {}): Promise<T> {
+  const { timeoutMs = DEFAULT_TIMEOUT_MS, signal, ...rest } = opts;
+  const controller = new AbortController();
+  const cleanupAbort = forwardAbort(signal, controller);
+  const timer = setTimeout(() => {
+    controller.abort(new Error(`Request timed out after ${timeoutMs}ms`));
+  }, timeoutMs);
+
+  try {
+    const res = await withTimeout(fetch(url, {
+      ...rest,
+      signal: controller.signal,
+    }), timeoutMs, () => controller.abort());
+    const raw = await withTimeout(res.text(), Math.min(timeoutMs, 5_000), () => controller.abort());
+    if (!raw) throw new Error(`Empty response (${res.status})`);
+    try {
+      return JSON.parse(raw) as T;
+    } catch {
+      throw new Error(`Invalid server response (${res.status})`);
+    }
+  } catch (err) {
+    if (controller.signal.aborted && !signal?.aborted) {
+      throw new Error(`Request timed out after ${timeoutMs}ms`);
+    }
+    if (err instanceof Error) throw err;
+    throw new Error(String(err ?? 'Request failed'));
+  } finally {
+    clearTimeout(timer);
+    cleanupAbort();
+  }
+}
+
+function post<T>(url: string, body: unknown, opts: ApiRequestOptions = {}): Promise<T> {
+  return json<T>(url, {
+    ...opts,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+export const api = {
+  getState: () => json<AppState>('/api/state'),
+  getHost: () => json<HostInfo>('/api/host'),
+  getAgentStatus: () => json<AgentStatusResponse>('/api/agent-status'),
+  getSessions: () => json<Record<string, { sessions: unknown[] }>>('/api/sessions'),
+  getSessionDetail: (agent: string, sessionId: string, limit = 8) =>
+    json<{ ok: boolean; messages?: SessionTailMessage[]; error?: string }>(
+      `/api/session-detail/${agent}/${encodeURIComponent(sessionId)}?limit=${limit}`
+    ),
+  updateRuntimeAgent: (patch: Record<string, unknown>) =>
+    post<{ ok: boolean; error?: string } & AgentStatusResponse>('/api/runtime-agent', patch),
+  saveConfig: (patch: Record<string, unknown>) => post<{ ok: boolean; configPath?: string }>('/api/config', patch),
+  validateTelegramConfig: (token: string, allowedChatIds = '', opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; error?: string | null; bot?: { username: string; displayName?: string }; normalizedAllowedChatIds?: string }>(
+      '/api/validate-telegram-token',
+      { token, allowedChatIds },
+      opts,
+    ),
+  validateFeishuConfig: (appId: string, appSecret: string, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; error?: string | null; app?: { appId: string; displayName?: string | null } }>(
+      '/api/validate-feishu-config',
+      { appId, appSecret },
+      opts,
+    ),
+  openPreferences: (permission: string) => post<{ ok: boolean }>('/api/open-preferences', { permission }),
+  restart: () => post<{ ok: boolean }>('/api/restart', {}),
+  switchWorkdir: (path: string) => post<{ ok: boolean; workdir?: string; error?: string }>('/api/switch-workdir', { path }),
+  lsDir: (dir?: string) => json<LsDirResult>(`/api/ls-dir${dir ? '?path=' + encodeURIComponent(dir) : ''}`),
+};

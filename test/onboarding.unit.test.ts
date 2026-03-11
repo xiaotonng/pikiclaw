@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { buildSetupGuide, collectSetupState, isSupportedNode } from '../src/onboarding.ts';
+import { buildSetupGuide, collectSetupState, isSetupReady, isSupportedNode } from '../src/onboarding.ts';
 import { captureEnv, makeTmpDir, restoreEnv } from './support/env.ts';
 
 const ENV_KEYS = [
@@ -46,7 +46,7 @@ describe('onboarding helpers', () => {
     expect(guide).toContain('MISSING  Claude Code is not installed.');
     expect(guide).toContain('Install with: npm install -g @anthropic-ai/claude-code');
     expect(guide).toContain('Install with: npm install -g @openai/codex');
-    expect(guide).toContain('No TELEGRAM_BOT_TOKEN or CODECLAW_TOKEN was provided.');
+    expect(guide).toContain('No Telegram token configured in ~/.codeclaw/setting.json');
     expect(guide).toContain('Open Telegram and search for @BotFather');
     expect(guide).toContain('npx codeclaw@latest -t <YOUR_BOT_TOKEN>');
   });
@@ -71,5 +71,28 @@ describe('onboarding helpers', () => {
     expect(guide).toContain('OK       Claude Code sign-in looks ready. ANTHROPIC_API_KEY detected.');
     expect(guide).toContain('OK       A Telegram token was provided.');
     expect(guide).toContain('npx codeclaw@latest --doctor');
+  });
+
+  it('does not report setup ready when a configured IM channel fails live validation', () => {
+    process.env.ANTHROPIC_API_KEY = 'test-key';
+
+    const state = collectSetupState({
+      agents: [
+        { agent: 'claude', installed: true, path: '/usr/local/bin/claude', version: '1.0.79' },
+      ],
+      channel: 'telegram',
+      tokenProvided: true,
+      nodeVersion: '20.18.1',
+      channels: [{
+        channel: 'telegram',
+        configured: true,
+        ready: false,
+        validated: true,
+        status: 'invalid',
+        detail: 'Telegram rejected this token: Unauthorized',
+      }],
+    });
+
+    expect(isSetupReady(state)).toBe(false);
   });
 });
