@@ -8,6 +8,7 @@ import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 import { execSync, spawn } from 'node:child_process';
+import { resolveUserWorkdir, updateUserConfig } from './user-config.js';
 import {
   doStream, getSessions, getSessionTail, getUsage, listAgents, listModels, listSkills,
   type Agent, type CodexCumulativeUsage, type StreamOpts, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type SessionInfo, type UsageResult,
@@ -16,7 +17,7 @@ import {
 } from './code-agent.js';
 
 export { type Agent, type CodexCumulativeUsage, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type SessionInfo, type UsageResult, type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult, type SkillInfo, type SkillListResult };
-export const VERSION = '0.2.26';
+export const VERSION = '0.2.27';
 const MACOS_USER_ACTIVITY_PULSE_INTERVAL_MS = 20_000;
 const MACOS_USER_ACTIVITY_PULSE_TIMEOUT_S = 30;
 
@@ -409,7 +410,7 @@ export class Bot {
   private sessionChains = new Map<string, Promise<void>>();
 
   constructor() {
-    this.workdir = path.resolve((process.env.CODECLAW_WORKDIR || process.cwd()).replace(/^~/, process.env.HOME || ''));
+    this.workdir = resolveUserWorkdir();
     this.defaultAgent = normalizeAgent(process.env.DEFAULT_AGENT || 'codex');
     this.runTimeout = envInt('CODECLAW_TIMEOUT', 1800);
     this.allowedChatIds = parseAllowedChatIds(process.env.CODECLAW_ALLOWED_IDS || '');
@@ -654,15 +655,23 @@ export class Bot {
 
   switchWorkdir(newPath: string) {
     const old = this.workdir;
-    this.workdir = newPath;
+    const resolvedPath = path.resolve(newPath.replace(/^~/, process.env.HOME || ''));
+    this.workdir = resolvedPath;
+    process.env.CODECLAW_WORKDIR = resolvedPath;
     for (const [, cs] of this.chats) {
       this.resetChatConversation(cs);
     }
     for (const [key, session] of this.sessionStates) {
       if (session.workdir === old && !session.runningTaskIds.size) this.sessionStates.delete(key);
     }
-    this.log(`switch workdir: ${old} -> ${newPath}`);
-    this.afterSwitchWorkdir(old, newPath);
+    try {
+      updateUserConfig({ defaultWorkdir: resolvedPath });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      this.log(`switch workdir: failed to persist config (${detail})`);
+    }
+    this.log(`switch workdir: ${old} -> ${resolvedPath}`);
+    this.afterSwitchWorkdir(old, resolvedPath);
     return old;
   }
 

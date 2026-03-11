@@ -11,6 +11,7 @@
 import { VERSION, formatThinkingForDisplay } from './bot.js';
 import { listAgents, listModels, listSkills, getUsage, doStream, getSessions, getSessionTail } from './code-agent.js';
 import type { Agent, StreamOpts } from './code-agent.js';
+import { loadUserConfig, resolveUserWorkdir } from './user-config.js';
 
 function parseArgs(argv: string[]) {
   const args: Record<string, any> = {
@@ -60,7 +61,7 @@ Commands:
 Options:
   -p, --prompt <text>   Prompt text (or pass after command as positional args)
   -m, --model <model>   Model to use / highlight
-  -w, --workdir <dir>   Working directory  [default: cwd]
+  -w, --workdir <dir>   Working directory  [default: saved workdir or cwd]
   -s, --session <id>    Session ID (for tail; omit to use latest session)
   -n <count>            Number of messages to show  [default: 4]
   --timeout <seconds>   Max seconds per request  [default: 1800]
@@ -76,7 +77,8 @@ Examples:
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const workdir = args.workdir || process.env.CODECLAW_WORKDIR || process.cwd();
+  const userConfig = loadUserConfig();
+  const workdir = resolveUserWorkdir({ workdir: args.workdir, config: userConfig });
 
   if (args.help || !args.command) {
     process.stdout.write(HELP);

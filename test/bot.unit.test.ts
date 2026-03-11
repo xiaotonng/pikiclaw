@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../src/code-agent.ts', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/code-agent.ts')>();
@@ -10,13 +10,22 @@ vi.mock('../src/code-agent.ts', async importOriginal => {
 
 import { doStream } from '../src/code-agent.ts';
 import { Bot } from '../src/bot.ts';
-import { makeTmpDir } from './support/env.ts';
+import { loadUserConfig, saveUserConfig } from '../src/user-config.ts';
+import { captureEnv, makeTmpDir, restoreEnv } from './support/env.ts';
 import { makeStreamResult } from './support/stream-result.ts';
 
+const envSnapshot = captureEnv(['CODECLAW_CONFIG_DIR', 'CODECLAW_WORKDIR', 'DEFAULT_AGENT']);
+
 beforeEach(() => {
+  restoreEnv(envSnapshot);
   vi.clearAllMocks();
+  process.env.CODECLAW_CONFIG_DIR = makeTmpDir('bot-unit-config-');
   process.env.CODECLAW_WORKDIR = makeTmpDir('bot-unit-workdir-');
   process.env.DEFAULT_AGENT = 'codex';
+});
+
+afterEach(() => {
+  restoreEnv(envSnapshot);
 });
 
 describe('Bot.runStream', () => {
@@ -80,5 +89,34 @@ describe('Bot.runStream', () => {
 
     expect(cs.sessionId).toBeNull();
     expect(cs.codexCumulative).toBeUndefined();
+  });
+
+  it('uses persisted workdir when env is unset', () => {
+    const savedWorkdir = makeTmpDir('bot-unit-saved-');
+    saveUserConfig({ defaultWorkdir: savedWorkdir });
+    delete process.env.CODECLAW_WORKDIR;
+
+    const bot = new Bot();
+
+    expect(bot.workdir).toBe(savedWorkdir);
+  });
+
+  it('persists switched workdir for future sessions', () => {
+    saveUserConfig({
+      defaultAgent: 'codex',
+      telegramBotToken: '123:test-token',
+      defaultWorkdir: process.env.CODECLAW_WORKDIR,
+    });
+    const bot = new Bot();
+    const nextWorkdir = makeTmpDir('bot-unit-next-persist-');
+
+    bot.switchWorkdir(nextWorkdir);
+
+    expect(process.env.CODECLAW_WORKDIR).toBe(nextWorkdir);
+    expect(loadUserConfig()).toMatchObject({
+      defaultAgent: 'codex',
+      telegramBotToken: '123:test-token',
+      defaultWorkdir: nextWorkdir,
+    });
   });
 });

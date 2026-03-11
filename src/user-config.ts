@@ -7,7 +7,12 @@ export interface UserConfig {
   version: 1;
   channel?: 'telegram' | 'feishu' | 'whatsapp';
   defaultAgent?: Agent;
+  defaultWorkdir?: string;
   telegramBotToken?: string;
+}
+
+function expandHomeDir(value: string): string {
+  return value.replace(/^~/, process.env.HOME || '');
 }
 
 function configRootDir(): string {
@@ -49,9 +54,30 @@ export function saveUserConfig(config: Partial<UserConfig>): string {
   return filePath;
 }
 
+export function updateUserConfig(patch: Partial<UserConfig>): string {
+  return saveUserConfig({ ...loadUserConfig(), ...patch });
+}
+
+export function resolveUserWorkdir(opts: {
+  workdir?: string | null;
+  config?: Partial<UserConfig>;
+  cwd?: string;
+} = {}): string {
+  const config = opts.config || loadUserConfig();
+  const raw = String(
+    opts.workdir
+    || process.env.CODECLAW_WORKDIR
+    || config.defaultWorkdir
+    || opts.cwd
+    || process.cwd(),
+  ).trim();
+  return path.resolve(expandHomeDir(raw));
+}
+
 export function applyUserConfig(config: Partial<UserConfig>, channel: string) {
   if (!process.env.CODECLAW_CHANNEL && config.channel) process.env.CODECLAW_CHANNEL = config.channel;
   if (!process.env.DEFAULT_AGENT && config.defaultAgent) process.env.DEFAULT_AGENT = config.defaultAgent;
+  if (!process.env.CODECLAW_WORKDIR && config.defaultWorkdir) process.env.CODECLAW_WORKDIR = config.defaultWorkdir;
 
   if (channel === 'telegram' && !process.env.TELEGRAM_BOT_TOKEN && config.telegramBotToken) {
     process.env.TELEGRAM_BOT_TOKEN = config.telegramBotToken;

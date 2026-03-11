@@ -248,7 +248,7 @@ npx codeclaw -t $BOT_TOKEN -m claude-sonnet-4-6
 | `-t, --token` | — | Bot Token（必填） |
 | `-a, --agent` | `codex` | 默认 Agent：`claude` 或 `codex` |
 | `-m, --model` | Agent 默认 | 覆盖模型 |
-| `-w, --workdir` | 当前目录 | 工作目录 |
+| `-w, --workdir` | 已保存目录或当前目录 | 工作目录 |
 | `-c, --channel` | `telegram` | IM 渠道 |
 | `--safe-mode` | `false` | 危险操作前要求确认 |
 | `--full-access` | `true` | 允许 Agent 无确认执行 |

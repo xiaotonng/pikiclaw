@@ -79,7 +79,7 @@ Options:
   -t, --token <token>       Channel auth token (env: CODECLAW_TOKEN)
   -a, --agent <agent>       AI agent: claude | codex  [default: codex]
   -m, --model <model>       Default model, switchable in chat via /models
-  -w, --workdir <dir>       Working directory for the agent  [default: cwd]
+  -w, --workdir <dir>       Working directory for the agent  [default: saved workdir or cwd]
   --full-access             Codex full-access + Claude bypassPermissions  [default]
   --safe-mode               Use safer agent permission modes
   --allowed-ids <id,id>     Comma-separated chat/user ID whitelist
