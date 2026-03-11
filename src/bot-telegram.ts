@@ -519,10 +519,8 @@ export class TelegramBot extends Bot {
           this.syncSelectedChats(session);
           if (!staged.importedFiles.length) throw new Error('no files persisted');
           this.log(`[handleMessage] staged workspace files chat=${ctx.chatId} local_session=${staged.localSessionId} files=${staged.importedFiles.length}`);
-          const ack = messageThreadId != null
-            ? await ctx.reply('ok', { messageThreadId })
-            : await ctx.reply('ok');
-          this.registerSessionMessage(ctx.chatId, ack, session);
+          this.registerSessionMessage(ctx.chatId, ctx.messageId, session);
+          await this.safeSetMessageReaction(ctx.chatId, ctx.messageId, ['👌']);
         } catch (e: any) {
           this.log(`[handleMessage] stage files failed: ${e?.message || e}`);
           await this.safeSetMessageReaction(ctx.chatId, ctx.messageId, ['⚠️']);

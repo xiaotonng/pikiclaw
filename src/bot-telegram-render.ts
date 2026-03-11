@@ -261,12 +261,12 @@ export function buildInitialPreviewHtml(agent: Agent): string {
 
 export function buildStreamPreviewHtml(input: StreamPreviewRenderInput): string {
   const maxBody = 2400;
-  const maxActivity = 900;
   const display = input.bodyText.trim();
   const rawThinking = input.thinking.trim();
   const thinkDisplay = formatThinkingForDisplay(input.thinking, maxBody);
   const planDisplay = renderPlanForPreview(input.plan ?? null);
   const activityDisplay = summarizeActivityForPreview(input.activity);
+  const maxActivity = !display && !thinkDisplay && !planDisplay ? 1800 : 900;
   const parts: string[] = [];
   const label = thinkLabel(input.agent);
 

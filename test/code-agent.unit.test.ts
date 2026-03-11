@@ -270,6 +270,177 @@ rl.on('line', (line) => {
     expect(activities.some(activity => activity.includes('Edit files...'))).toBe(true);
     expect(result.activity).toContain('Updated src/bot-telegram.ts');
   });
+
+  it('keeps long codex commentary lines intact until preview rendering trims them', async () => {
+    const commentary = 'I am verifying the release workflow, the npm publish result, and the final changelog content before I close this out. Tail marker: KEEP_THIS_VISIBLE_AT_THE_END';
+    const script = `#!/usr/bin/env node
+const readline = require('node:readline');
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+rl.on('line', (line) => {
+  if (!line.trim()) return;
+  const msg = JSON.parse(line);
+
+  if (msg.method === 'initialize') {
+    process.stdout.write(JSON.stringify({ id: msg.id, result: {} }) + '\\n');
+    return;
+  }
+
+  if (msg.method === 'thread/start') {
+    process.stdout.write(JSON.stringify({
+      id: msg.id,
+      result: { thread: { id: 'thread-commentary' }, model: msg.params.model || 'gpt-5.4' },
+    }) + '\\n');
+    return;
+  }
+
+  if (msg.method === 'turn/start') {
+    process.stdout.write(JSON.stringify({ id: msg.id, result: { turn: { id: 'turn-commentary' } } }) + '\\n');
+    process.stdout.write(JSON.stringify({
+      method: 'item/started',
+      params: {
+        threadId: 'thread-commentary',
+        item: { id: 'comment-1', type: 'agentMessage', phase: 'commentary', text: '' },
+      },
+    }) + '\\n');
+    process.stdout.write(JSON.stringify({
+      method: 'item/agentMessage/delta',
+      params: {
+        threadId: 'thread-commentary',
+        itemId: 'comment-1',
+        delta: ${JSON.stringify(commentary)},
+      },
+    }) + '\\n');
+    process.stdout.write(JSON.stringify({
+      method: 'item/completed',
+      params: {
+        threadId: 'thread-commentary',
+        item: { id: 'comment-1', type: 'agentMessage', phase: 'commentary', text: ${JSON.stringify(commentary)} },
+      },
+    }) + '\\n');
+    process.stdout.write(JSON.stringify({
+      method: 'item/started',
+      params: {
+        threadId: 'thread-commentary',
+        item: { id: 'msg-1', type: 'agentMessage', phase: 'final_answer' },
+      },
+    }) + '\\n');
+    process.stdout.write(JSON.stringify({
+      method: 'item/agentMessage/delta',
+      params: { threadId: 'thread-commentary', itemId: 'msg-1', delta: 'done' },
+    }) + '\\n');
+    process.stdout.write(JSON.stringify({
+      method: 'item/completed',
+      params: {
+        threadId: 'thread-commentary',
+        item: { id: 'msg-1', type: 'agentMessage', phase: 'final_answer', text: 'done' },
+      },
+    }) + '\\n');
+    process.stdout.write(JSON.stringify({
+      method: 'turn/completed',
+      params: { threadId: 'thread-commentary', turn: { id: 'turn-commentary', status: 'completed' } },
+    }) + '\\n');
+    return;
+  }
+
+  process.stdout.write(JSON.stringify({ id: msg.id, error: { message: 'unexpected method' } }) + '\\n');
+});`;
+    fs.writeFileSync(path.join(fakeBin, 'codex'), script, { mode: 0o755 });
+
+    const activities: string[] = [];
+    const result = await doCodexStream(baseOpts('codex', {
+      onText: (_text, _thinking, activity) => {
+        if (activity?.trim()) activities.push(activity);
+      },
+    }));
+
+    expect(result.ok).toBe(true);
+    expect(result.activity).toContain('KEEP_THIS_VISIBLE_AT_THE_END');
+    expect(activities.some(activity => activity.includes('KEEP_THIS_VISIBLE_AT_THE_END'))).toBe(true);
+  });
+
+  it('runs codex turns in parallel across sessions', async () => {
+    const spawnLog = path.join(tmpDir, 'codex-app-server-spawns.log');
+    const script = `#!/usr/bin/env node
+const fs = require('node:fs');
+const readline = require('node:readline');
+const spawnLog = ${JSON.stringify(spawnLog)};
+fs.appendFileSync(spawnLog, String(process.pid) + '\\n');
+
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+let threadSeq = 0;
+let turnSeq = 0;
+let busy = false;
+const queue = [];
+
+function flush(line) {
+  process.stdout.write(JSON.stringify(line) + '\\n');
+}
+
+function runTurn(threadId, turnId) {
+  busy = true;
+  flush({ method: 'turn/started', params: { threadId, turn: { id: turnId } } });
+  setTimeout(() => {
+    const msgId = 'msg-' + turnId;
+    flush({ method: 'item/started', params: { threadId, item: { id: msgId, type: 'agentMessage', phase: 'final_answer' } } });
+    flush({ method: 'item/agentMessage/delta', params: { threadId, itemId: msgId, delta: 'done ' + threadId } });
+    flush({ method: 'item/completed', params: { threadId, item: { id: msgId, type: 'agentMessage', phase: 'final_answer', text: 'done ' + threadId } } });
+    flush({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'completed' } } });
+    busy = false;
+    const next = queue.shift();
+    if (next) next();
+  }, 400);
+}
+
+rl.on('line', (line) => {
+  if (!line.trim()) return;
+  const msg = JSON.parse(line);
+
+  if (msg.method === 'initialize') {
+    flush({ id: msg.id, result: {} });
+    return;
+  }
+
+  if (msg.method === 'thread/start') {
+    const threadId = 'thread-' + process.pid + '-' + (++threadSeq);
+    flush({ id: msg.id, result: { thread: { id: threadId }, model: msg.params.model || 'gpt-5.4' } });
+    return;
+  }
+
+  if (msg.method === 'turn/start') {
+    const threadId = msg.params.threadId;
+    const turnId = 'turn-' + (++turnSeq);
+    flush({ id: msg.id, result: { turn: { id: turnId } } });
+    const start = () => runTurn(threadId, turnId);
+    if (busy) queue.push(start);
+    else start();
+    return;
+  }
+
+  if (msg.method === 'turn/interrupt') {
+    flush({ id: msg.id, result: { ok: true } });
+    return;
+  }
+
+  flush({ id: msg.id, error: { message: 'unexpected method' } });
+});`;
+    fs.writeFileSync(path.join(fakeBin, 'codex'), script, { mode: 0o755 });
+
+    const startedAt = Date.now();
+    const [first, second] = await Promise.all([
+      doCodexStream(baseOpts('codex', { prompt: 'parallel a' })),
+      doCodexStream(baseOpts('codex', { prompt: 'parallel b' })),
+    ]);
+    const elapsedMs = Date.now() - startedAt;
+
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+    expect(first.message).toContain('done thread-');
+    expect(second.message).toContain('done thread-');
+    expect(elapsedMs).toBeLessThan(1200);
+
+    const spawns = fs.readFileSync(spawnLog, 'utf-8').trim().split('\n').filter(Boolean);
+    expect(spawns).toHaveLength(2);
+  });
 });
 
 describe('claude stream', () => {

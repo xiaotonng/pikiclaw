@@ -940,15 +940,12 @@ function mapEffort(effort: string): string {
   return EFFORT_MAP[effort] ?? effort;
 }
 
-function compactLogLine(text: string, max = 120): string {
-  const line = text.replace(/\s+/g, ' ').trim();
-  if (!line) return '';
-  if (line.length <= max) return line;
-  return `${line.slice(0, max - 3)}...`;
+function normalizeActivityLine(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
 }
 
 function pushRecentActivity(lines: string[], line: string, maxLines = 12) {
-  const cleaned = compactLogLine(line, 140);
+  const cleaned = normalizeActivityLine(line);
   if (!cleaned) return;
   if (lines[lines.length - 1] === cleaned) return;
   lines.push(cleaned);
@@ -1134,7 +1131,7 @@ function buildCodexActivityPreview(s: {
 }): string {
   const lines = [...s.recentNarrative];
   for (const text of s.commentaryByItem.values()) {
-    const cleaned = compactLogLine(text, 140);
+    const cleaned = normalizeActivityLine(text);
     if (cleaned && lines[lines.length - 1] !== cleaned) lines.push(cleaned);
   }
   for (const failure of s.recentFailures) {
@@ -1173,325 +1170,332 @@ export function buildCodexTurnInput(prompt: string, attachments: string[]): any[
 
 export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
   const start = Date.now();
-  const srv = getCodexServer();
+  // Use a dedicated app-server for each live Codex turn so unrelated
+  // sessions can run in parallel instead of contending on one shared process.
+  const srv = new CodexAppServer();
   let timedOut = false;
+  let unsubscribeNotifications = () => {};
 
-  // Build config overrides from opts
-  const config: string[] = [];
-  if (opts.codexExtraArgs?.length) {
-    // Pass extra args as config overrides (best-effort: -c key=val pairs)
-    for (let i = 0; i < opts.codexExtraArgs.length; i++) {
-      if (opts.codexExtraArgs[i] === '-c' && opts.codexExtraArgs[i + 1]) {
-        config.push(opts.codexExtraArgs[++i]);
+  try {
+    // Build config overrides from opts
+    const config: string[] = [];
+    if (opts.codexExtraArgs?.length) {
+      // Pass extra args as config overrides (best-effort: -c key=val pairs)
+      for (let i = 0; i < opts.codexExtraArgs.length; i++) {
+        if (opts.codexExtraArgs[i] === '-c' && opts.codexExtraArgs[i + 1]) {
+          config.push(opts.codexExtraArgs[++i]);
+        }
       }
     }
-  }
 
-  if (!(await srv.ensureRunning(config))) {
-    return {
-      ok: false, message: 'Failed to start codex app-server.', thinking: null,
-      localSessionId: opts.localSessionId ?? null,
-      sessionId: opts.sessionId, workspacePath: null, model: opts.model, thinkingEffort: opts.thinkingEffort,
-      elapsedS: (Date.now() - start) / 1000, inputTokens: null, outputTokens: null,
-      cachedInputTokens: null, cacheCreationInputTokens: null, contextWindow: null, contextUsedTokens: null, contextPercent: null, error: 'Failed to start codex app-server.',
-      codexCumulative: null, stopReason: null, incomplete: true, activity: null, artifacts: [],
-    };
-  }
-
-  // Accumulator state
-  const s = {
-    sessionId: opts.sessionId as string | null,
-    text: '', thinking: '', activity: '', msgs: [] as string[], thinkParts: [] as string[],
-    model: opts.model as string | null,
-    thinkingEffort: opts.thinkingEffort,
-    inputTokens: null as number | null,
-    outputTokens: null as number | null,
-    cachedInputTokens: null as number | null,
-    cacheCreationInputTokens: null as number | null,
-    contextWindow: null as number | null,
-    codexCumulative: null as CodexCumulativeUsage | null,
-    turnId: null as string | null,
-    turnStatus: null as string | null,
-    turnError: null as string | null,
-    messagePhases: new Map<string, string>(),
-    commentaryByItem: new Map<string, string>(),
-    activeCommands: new Map<string, string>(),
-    activeToolCalls: new Map<string, CodexActiveToolCall>(),
-    recentNarrative: [] as string[],
-    recentFailures: [] as string[],
-    completedCommands: 0,
-    plan: null as StreamPreviewPlan | null,
-  };
-
-  // Step 1: thread/start or thread/resume
-  let threadResp: any;
-  if (opts.sessionId) {
-    agentLog(`[codex-rpc] thread/resume id=${opts.sessionId}`);
-    threadResp = await srv.call('thread/resume', {
-      threadId: opts.sessionId,
-      cwd: opts.workdir,
-      model: opts.codexModel || null,
-      approvalPolicy: opts.codexFullAccess ? 'never' : undefined,
-      sandbox: opts.codexFullAccess ? 'danger-full-access' : undefined,
-      developerInstructions: opts.codexDeveloperInstructions || undefined,
-    });
-  } else {
-    agentLog(`[codex-rpc] thread/start cwd=${opts.workdir} model=${opts.codexModel || '(default)'}`);
-    threadResp = await srv.call('thread/start', {
-      cwd: opts.workdir,
-      model: opts.codexModel || null,
-      approvalPolicy: opts.codexFullAccess ? 'never' : undefined,
-      sandbox: opts.codexFullAccess ? 'danger-full-access' : undefined,
-      developerInstructions: opts.codexDeveloperInstructions || undefined,
-    });
-  }
-
-  if (threadResp.error) {
-    const errMsg = threadResp.error.message || 'thread/start failed';
-    agentLog(`[codex-rpc] thread error: ${errMsg}`);
-    return {
-      ok: false, message: errMsg, thinking: null,
-      localSessionId: opts.localSessionId ?? null,
-      sessionId: opts.sessionId, workspacePath: null, model: opts.model, thinkingEffort: opts.thinkingEffort,
-      elapsedS: (Date.now() - start) / 1000, inputTokens: null, outputTokens: null,
-      cachedInputTokens: null, cacheCreationInputTokens: null, contextWindow: null, contextUsedTokens: null, contextPercent: null, error: errMsg,
-      codexCumulative: null, stopReason: null, incomplete: true, activity: null, artifacts: [],
-    };
-  }
-
-  const threadResult = threadResp.result;
-  s.sessionId = threadResult.thread?.id ?? s.sessionId;
-  s.model = threadResult.model ?? s.model;
-  agentLog(`[codex-rpc] thread ready: id=${s.sessionId} model=${s.model}`);
-
-  // Step 2: turn/start — send the prompt
-  const input = buildCodexTurnInput(opts.prompt, opts.attachments || []);
-
-  let unsubscribeNotifications = () => {};
-  const turnDone = new Promise<void>((resolve) => {
-    const deadline = start + opts.timeout * 1000;
-    const hardTimer = setTimeout(() => {
-      timedOut = true;
-      agentLog(`[codex-rpc] timeout: interrupting turn`);
-      if (s.turnId && s.sessionId) {
-        srv.call('turn/interrupt', { threadId: s.sessionId, turnId: s.turnId }).catch(() => {});
-      }
-      resolve();
-    }, opts.timeout * 1000 + 5_000);
-
-    const handleNotification = (method: string, params: any) => {
-      if (Date.now() > deadline) return;
-      const emit = () => {
-        s.activity = buildCodexActivityPreview(s);
-        opts.onText(s.text, s.thinking, s.activity, buildStreamPreviewMeta(s), s.plan);
+    if (!(await srv.ensureRunning(config))) {
+      return {
+        ok: false, message: 'Failed to start codex app-server.', thinking: null,
+        localSessionId: opts.localSessionId ?? null,
+        sessionId: opts.sessionId, workspacePath: null, model: opts.model, thinkingEffort: opts.thinkingEffort,
+        elapsedS: (Date.now() - start) / 1000, inputTokens: null, outputTokens: null,
+        cachedInputTokens: null, cacheCreationInputTokens: null, contextWindow: null, contextUsedTokens: null, contextPercent: null, error: 'Failed to start codex app-server.',
+        codexCumulative: null, stopReason: null, incomplete: true, activity: null, artifacts: [],
       };
+    }
 
-      if (method === 'item/started' && params.threadId === s.sessionId) {
-        const item = params.item || {};
-        if (item.type === 'agentMessage' && item.id) {
-          const phase = item.phase || 'final_answer';
-          s.messagePhases.set(item.id, phase);
-          if (phase !== 'final_answer') {
-            s.commentaryByItem.set(item.id, item.text || '');
-            emit();
-          }
-        }
-        if (item.type === 'commandExecution' && item.id && item.command) {
-          s.activeCommands.set(item.id, item.command);
-          emit();
-        }
-        if (item.id && isCodexToolCallItem(item)) {
-          const toolCall = summarizeCodexToolCall(item);
-          if (toolCall) {
-            s.activeToolCalls.set(item.id, toolCall);
-            emit();
-          }
-        }
-      }
+    // Accumulator state
+    const s = {
+      sessionId: opts.sessionId as string | null,
+      text: '', thinking: '', activity: '', msgs: [] as string[], thinkParts: [] as string[],
+      model: opts.model as string | null,
+      thinkingEffort: opts.thinkingEffort,
+      inputTokens: null as number | null,
+      outputTokens: null as number | null,
+      cachedInputTokens: null as number | null,
+      cacheCreationInputTokens: null as number | null,
+      contextWindow: null as number | null,
+      codexCumulative: null as CodexCumulativeUsage | null,
+      turnId: null as string | null,
+      turnStatus: null as string | null,
+      turnError: null as string | null,
+      messagePhases: new Map<string, string>(),
+      commentaryByItem: new Map<string, string>(),
+      activeCommands: new Map<string, string>(),
+      activeToolCalls: new Map<string, CodexActiveToolCall>(),
+      recentNarrative: [] as string[],
+      recentFailures: [] as string[],
+      completedCommands: 0,
+      plan: null as StreamPreviewPlan | null,
+    };
 
-      // Streaming text deltas
-      if (method === 'item/agentMessage/delta' && params.threadId === s.sessionId) {
-        const delta = params.delta || '';
-        const phase = params.itemId ? (s.messagePhases.get(params.itemId) || 'final_answer') : 'final_answer';
-        if (phase === 'final_answer') {
-          s.text += delta;
-        } else if (params.itemId) {
-          const prev = s.commentaryByItem.get(params.itemId) || '';
-          s.commentaryByItem.set(params.itemId, prev + delta);
-        }
-        emit();
-      }
+    // Step 1: thread/start or thread/resume
+    let threadResp: any;
+    if (opts.sessionId) {
+      agentLog(`[codex-rpc] thread/resume id=${opts.sessionId}`);
+      threadResp = await srv.call('thread/resume', {
+        threadId: opts.sessionId,
+        cwd: opts.workdir,
+        model: opts.codexModel || null,
+        approvalPolicy: opts.codexFullAccess ? 'never' : undefined,
+        sandbox: opts.codexFullAccess ? 'danger-full-access' : undefined,
+        developerInstructions: opts.codexDeveloperInstructions || undefined,
+      });
+    } else {
+      agentLog(`[codex-rpc] thread/start cwd=${opts.workdir} model=${opts.codexModel || '(default)'}`);
+      threadResp = await srv.call('thread/start', {
+        cwd: opts.workdir,
+        model: opts.codexModel || null,
+        approvalPolicy: opts.codexFullAccess ? 'never' : undefined,
+        sandbox: opts.codexFullAccess ? 'danger-full-access' : undefined,
+        developerInstructions: opts.codexDeveloperInstructions || undefined,
+      });
+    }
 
-      // Reasoning deltas
-      if ((method === 'item/reasoning/textDelta' || method === 'item/reasoning/summaryTextDelta') && params.threadId === s.sessionId) {
-        s.thinking += params.delta || '';
-        emit();
-      }
+    if (threadResp.error) {
+      const errMsg = threadResp.error.message || 'thread/start failed';
+      agentLog(`[codex-rpc] thread error: ${errMsg}`);
+      return {
+        ok: false, message: errMsg, thinking: null,
+        localSessionId: opts.localSessionId ?? null,
+        sessionId: opts.sessionId, workspacePath: null, model: opts.model, thinkingEffort: opts.thinkingEffort,
+        elapsedS: (Date.now() - start) / 1000, inputTokens: null, outputTokens: null,
+        cachedInputTokens: null, cacheCreationInputTokens: null, contextWindow: null, contextUsedTokens: null, contextPercent: null, error: errMsg,
+        codexCumulative: null, stopReason: null, incomplete: true, activity: null, artifacts: [],
+      };
+    }
 
-      // Item completed — collect full agent messages and reasoning
-      if (method === 'item/completed' && params.threadId === s.sessionId) {
-        const item = params.item || {};
-        if (item.type === 'agentMessage' && item.id) {
-          const phase = item.phase || s.messagePhases.get(item.id) || 'final_answer';
-          if (phase === 'final_answer') {
-            if (item.text?.trim()) s.msgs.push(item.text.trim());
-          } else {
-            const commentary = item.text?.trim() || s.commentaryByItem.get(item.id)?.trim() || '';
-            if (commentary) pushRecentActivity(s.recentNarrative, commentary);
-            s.commentaryByItem.delete(item.id);
-            emit();
-          }
-          s.messagePhases.delete(item.id);
-        }
-        if (item.type === 'reasoning') {
-          const parts = [...(item.summary || []), ...(item.content || [])];
-          const text = parts.join('\n').trim();
-          if (text) {
-            s.thinkParts.push(text);
-            emit();
-          }
-        }
-        if (item.type === 'commandExecution' && item.id) {
-          const cmd = item.command || s.activeCommands.get(item.id) || '';
-          s.activeCommands.delete(item.id);
-          if (cmd) {
-            const exitCode = typeof item.exitCode === 'number' ? item.exitCode : null;
-            if (exitCode != null && exitCode !== 0) {
-              pushRecentActivity(s.recentFailures, `Command failed (${exitCode}): ${cmd}`, 4);
-            } else {
-              s.completedCommands++;
-            }
-          }
-          emit();
-        }
-        if (item.id && isCodexToolCallItem(item)) {
-          const toolCall = s.activeToolCalls.get(item.id) || summarizeCodexToolCall(item);
-          s.activeToolCalls.delete(item.id);
-          if (toolCall) {
-            if (isCodexToolCallFailure(item)) {
-              pushRecentActivity(s.recentFailures, `${toolCall.summary} failed`, 4);
-            } else if (toolCall.kind !== 'apply_patch') {
-              pushRecentActivity(s.recentNarrative, `${toolCall.summary} done`);
-            }
-          }
-          emit();
-        }
-        if (item.type === 'fileChange') {
-          pushRecentActivity(s.recentNarrative, summarizeCodexFileChange(item));
-          emit();
-        }
-      }
+    const threadResult = threadResp.result;
+    s.sessionId = threadResult.thread?.id ?? s.sessionId;
+    s.model = threadResult.model ?? s.model;
+    agentLog(`[codex-rpc] thread ready: id=${s.sessionId} model=${s.model}`);
 
-      // Token usage updates
-      if (method === 'thread/tokenUsage/updated' && params.threadId === s.sessionId) {
-        applyCodexTokenUsage(s, params.tokenUsage, opts.codexPrevCumulative);
-        emit();
-      }
+    // Step 2: turn/start — send the prompt
+    const input = buildCodexTurnInput(opts.prompt, opts.attachments || []);
 
-      if (method === 'turn/plan/updated' && params.threadId === s.sessionId) {
-        const rawPlan = Array.isArray(params.plan) ? params.plan : [];
-        s.plan = {
-          explanation: typeof params.explanation === 'string' ? params.explanation : null,
-          steps: rawPlan
-            .map((entry: any) => ({
-              step: typeof entry?.step === 'string' ? entry.step : '',
-              status: entry?.status === 'completed' || entry?.status === 'pending' || entry?.status === 'inProgress'
-                ? entry.status
-                : 'pending',
-            }))
-            .filter((entry: StreamPreviewPlanStep) => entry.step.trim()),
-        };
-        emit();
-      }
-
-      // Turn completed
-      if (method === 'turn/completed' && params.threadId === s.sessionId) {
-        const turn = params.turn || {};
-        applyCodexTokenUsage(s, params.tokenUsage || turn.tokenUsage || turn.usage, opts.codexPrevCumulative);
-        s.turnStatus = turn.status ?? null;
-        if (turn.error) s.turnError = turn.error.message || turn.error.code || JSON.stringify(turn.error);
-        s.turnId = turn.id ?? s.turnId;
-        clearTimeout(hardTimer);
+    const turnDone = new Promise<void>((resolve) => {
+      const deadline = start + opts.timeout * 1000;
+      const hardTimer = setTimeout(() => {
+        timedOut = true;
+        agentLog(`[codex-rpc] timeout: interrupting turn`);
+        if (s.turnId && s.sessionId) {
+          srv.call('turn/interrupt', { threadId: s.sessionId, turnId: s.turnId }).catch(() => {});
+        }
         resolve();
-      }
+      }, opts.timeout * 1000 + 5_000);
 
-      // Turn started (capture turnId for interrupt)
-      if (method === 'turn/started' && params.threadId === s.sessionId) {
-        s.turnId = params.turn?.id ?? null;
-      }
+      const handleNotification = (method: string, params: any) => {
+        if (Date.now() > deadline) return;
+        const emit = () => {
+          s.activity = buildCodexActivityPreview(s);
+          opts.onText(s.text, s.thinking, s.activity, buildStreamPreviewMeta(s), s.plan);
+        };
 
-      // Model rerouted
-      if (method === 'model/rerouted' && params.threadId === s.sessionId) {
-        s.model = params.model ?? s.model;
-      }
-    };
-    unsubscribeNotifications = srv.onNotification(handleNotification);
-  });
+        if (method === 'item/started' && params.threadId === s.sessionId) {
+          const item = params.item || {};
+          if (item.type === 'agentMessage' && item.id) {
+            const phase = item.phase || 'final_answer';
+            s.messagePhases.set(item.id, phase);
+            if (phase !== 'final_answer') {
+              s.commentaryByItem.set(item.id, item.text || '');
+              emit();
+            }
+          }
+          if (item.type === 'commandExecution' && item.id && item.command) {
+            s.activeCommands.set(item.id, item.command);
+            emit();
+          }
+          if (item.id && isCodexToolCallItem(item)) {
+            const toolCall = summarizeCodexToolCall(item);
+            if (toolCall) {
+              s.activeToolCalls.set(item.id, toolCall);
+              emit();
+            }
+          }
+        }
 
-  agentLog(`[codex-rpc] turn/start prompt="${opts.prompt.slice(0, 120)}" effort=${mapEffort(opts.thinkingEffort)}`);
-  const turnResp = await srv.call('turn/start', {
-    threadId: s.sessionId,
-    input,
-    model: opts.codexModel || undefined,
-    effort: mapEffort(opts.thinkingEffort),
-  });
+        // Streaming text deltas
+        if (method === 'item/agentMessage/delta' && params.threadId === s.sessionId) {
+          const delta = params.delta || '';
+          const phase = params.itemId ? (s.messagePhases.get(params.itemId) || 'final_answer') : 'final_answer';
+          if (phase === 'final_answer') {
+            s.text += delta;
+          } else if (params.itemId) {
+            const prev = s.commentaryByItem.get(params.itemId) || '';
+            s.commentaryByItem.set(params.itemId, prev + delta);
+          }
+          emit();
+        }
 
-  if (turnResp.error) {
+        // Reasoning deltas
+        if ((method === 'item/reasoning/textDelta' || method === 'item/reasoning/summaryTextDelta') && params.threadId === s.sessionId) {
+          s.thinking += params.delta || '';
+          emit();
+        }
+
+        // Item completed — collect full agent messages and reasoning
+        if (method === 'item/completed' && params.threadId === s.sessionId) {
+          const item = params.item || {};
+          if (item.type === 'agentMessage' && item.id) {
+            const phase = item.phase || s.messagePhases.get(item.id) || 'final_answer';
+            if (phase === 'final_answer') {
+              if (item.text?.trim()) s.msgs.push(item.text.trim());
+            } else {
+              const commentary = item.text?.trim() || s.commentaryByItem.get(item.id)?.trim() || '';
+              if (commentary) pushRecentActivity(s.recentNarrative, commentary);
+              s.commentaryByItem.delete(item.id);
+              emit();
+            }
+            s.messagePhases.delete(item.id);
+          }
+          if (item.type === 'reasoning') {
+            const parts = [...(item.summary || []), ...(item.content || [])];
+            const text = parts.join('\n').trim();
+            if (text) {
+              s.thinkParts.push(text);
+              emit();
+            }
+          }
+          if (item.type === 'commandExecution' && item.id) {
+            const cmd = item.command || s.activeCommands.get(item.id) || '';
+            s.activeCommands.delete(item.id);
+            if (cmd) {
+              const exitCode = typeof item.exitCode === 'number' ? item.exitCode : null;
+              if (exitCode != null && exitCode !== 0) {
+                pushRecentActivity(s.recentFailures, `Command failed (${exitCode}): ${cmd}`, 4);
+              } else {
+                s.completedCommands++;
+              }
+            }
+            emit();
+          }
+          if (item.id && isCodexToolCallItem(item)) {
+            const toolCall = s.activeToolCalls.get(item.id) || summarizeCodexToolCall(item);
+            s.activeToolCalls.delete(item.id);
+            if (toolCall) {
+              if (isCodexToolCallFailure(item)) {
+                pushRecentActivity(s.recentFailures, `${toolCall.summary} failed`, 4);
+              } else if (toolCall.kind !== 'apply_patch') {
+                pushRecentActivity(s.recentNarrative, `${toolCall.summary} done`);
+              }
+            }
+            emit();
+          }
+          if (item.type === 'fileChange') {
+            pushRecentActivity(s.recentNarrative, summarizeCodexFileChange(item));
+            emit();
+          }
+        }
+
+        // Token usage updates
+        if (method === 'thread/tokenUsage/updated' && params.threadId === s.sessionId) {
+          applyCodexTokenUsage(s, params.tokenUsage, opts.codexPrevCumulative);
+          emit();
+        }
+
+        if (method === 'turn/plan/updated' && params.threadId === s.sessionId) {
+          const rawPlan = Array.isArray(params.plan) ? params.plan : [];
+          s.plan = {
+            explanation: typeof params.explanation === 'string' ? params.explanation : null,
+            steps: rawPlan
+              .map((entry: any) => ({
+                step: typeof entry?.step === 'string' ? entry.step : '',
+                status: entry?.status === 'completed' || entry?.status === 'pending' || entry?.status === 'inProgress'
+                  ? entry.status
+                  : 'pending',
+              }))
+              .filter((entry: StreamPreviewPlanStep) => entry.step.trim()),
+          };
+          emit();
+        }
+
+        // Turn completed
+        if (method === 'turn/completed' && params.threadId === s.sessionId) {
+          const turn = params.turn || {};
+          applyCodexTokenUsage(s, params.tokenUsage || turn.tokenUsage || turn.usage, opts.codexPrevCumulative);
+          s.turnStatus = turn.status ?? null;
+          if (turn.error) s.turnError = turn.error.message || turn.error.code || JSON.stringify(turn.error);
+          s.turnId = turn.id ?? s.turnId;
+          clearTimeout(hardTimer);
+          resolve();
+        }
+
+        // Turn started (capture turnId for interrupt)
+        if (method === 'turn/started' && params.threadId === s.sessionId) {
+          s.turnId = params.turn?.id ?? null;
+        }
+
+        // Model rerouted
+        if (method === 'model/rerouted' && params.threadId === s.sessionId) {
+          s.model = params.model ?? s.model;
+        }
+      };
+      unsubscribeNotifications = srv.onNotification(handleNotification);
+    });
+
+    agentLog(`[codex-rpc] turn/start prompt="${opts.prompt.slice(0, 120)}" effort=${mapEffort(opts.thinkingEffort)}`);
+    const turnResp = await srv.call('turn/start', {
+      threadId: s.sessionId,
+      input,
+      model: opts.codexModel || undefined,
+      effort: mapEffort(opts.thinkingEffort),
+    });
+
+    if (turnResp.error) {
+      unsubscribeNotifications();
+      const errMsg = turnResp.error.message || 'turn/start failed';
+      agentLog(`[codex-rpc] turn/start error: ${errMsg}`);
+      return {
+        ok: false, message: errMsg, thinking: null,
+        localSessionId: opts.localSessionId ?? null,
+        sessionId: s.sessionId, workspacePath: null, model: s.model, thinkingEffort: s.thinkingEffort,
+        elapsedS: (Date.now() - start) / 1000, inputTokens: null, outputTokens: null,
+        cachedInputTokens: null, cacheCreationInputTokens: null, contextWindow: null, contextUsedTokens: null, contextPercent: null, error: errMsg,
+        codexCumulative: null, stopReason: null, incomplete: true, activity: null, artifacts: [],
+      };
+    }
+
+    s.turnId = turnResp.result?.turn?.id ?? null;
+
+    // Wait for turn to complete (via notifications)
+    await turnDone;
     unsubscribeNotifications();
-    const errMsg = turnResp.error.message || 'turn/start failed';
-    agentLog(`[codex-rpc] turn/start error: ${errMsg}`);
+
+    // Build final text from accumulated parts
+    if (!s.text.trim() && s.msgs.length) s.text = s.msgs.join('\n\n');
+    if (!s.thinking.trim() && s.thinkParts.length) s.thinking = s.thinkParts.join('\n\n');
+
+    const ok = s.turnStatus === 'completed' && !timedOut;
+    const error = s.turnError
+      || (timedOut ? `Timed out after ${opts.timeout}s waiting for turn completion.` : null)
+      || (!ok ? `Turn ${s.turnStatus || 'unknown'}.` : null);
+    const stopReason = timedOut ? 'timeout' : (s.turnStatus === 'interrupted' ? 'interrupted' : null);
+    const incomplete = !ok;
+    const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+    agentLog(`[codex-rpc] result: ok=${ok} elapsed=${elapsed}s text=${s.text.length}chars session=${s.sessionId} status=${s.turnStatus}`);
+
     return {
-      ok: false, message: errMsg, thinking: null,
+      ok,
       localSessionId: opts.localSessionId ?? null,
-      sessionId: s.sessionId, workspacePath: null, model: s.model, thinkingEffort: s.thinkingEffort,
-      elapsedS: (Date.now() - start) / 1000, inputTokens: null, outputTokens: null,
-      cachedInputTokens: null, cacheCreationInputTokens: null, contextWindow: null, contextUsedTokens: null, contextPercent: null, error: errMsg,
-      codexCumulative: null, stopReason: null, incomplete: true, activity: null, artifacts: [],
+      sessionId: s.sessionId,
+      workspacePath: null,
+      model: s.model,
+      thinkingEffort: s.thinkingEffort,
+      message: s.text.trim() || error || '(no textual response)',
+      thinking: s.thinking.trim() || null,
+      elapsedS: (Date.now() - start) / 1000,
+      inputTokens: s.inputTokens,
+      outputTokens: s.outputTokens,
+      cachedInputTokens: s.cachedInputTokens,
+      cacheCreationInputTokens: s.cacheCreationInputTokens,
+      contextWindow: s.contextWindow,
+      ...computeContext(s),
+      codexCumulative: s.codexCumulative,
+      error,
+      stopReason,
+      incomplete,
+      activity: s.activity.trim() || null,
+      artifacts: [],
     };
+  } finally {
+    unsubscribeNotifications();
+    srv.kill();
   }
-
-  s.turnId = turnResp.result?.turn?.id ?? null;
-
-  // Wait for turn to complete (via notifications)
-  await turnDone;
-  unsubscribeNotifications();
-
-  // Build final text from accumulated parts
-  if (!s.text.trim() && s.msgs.length) s.text = s.msgs.join('\n\n');
-  if (!s.thinking.trim() && s.thinkParts.length) s.thinking = s.thinkParts.join('\n\n');
-
-  const ok = s.turnStatus === 'completed' && !timedOut;
-  const error = s.turnError
-    || (timedOut ? `Timed out after ${opts.timeout}s waiting for turn completion.` : null)
-    || (!ok ? `Turn ${s.turnStatus || 'unknown'}.` : null);
-  const stopReason = timedOut ? 'timeout' : (s.turnStatus === 'interrupted' ? 'interrupted' : null);
-  const incomplete = !ok;
-  const elapsed = ((Date.now() - start) / 1000).toFixed(1);
-  agentLog(`[codex-rpc] result: ok=${ok} elapsed=${elapsed}s text=${s.text.length}chars session=${s.sessionId} status=${s.turnStatus}`);
-
-  return {
-    ok,
-    localSessionId: opts.localSessionId ?? null,
-    sessionId: s.sessionId,
-    workspacePath: null,
-    model: s.model,
-    thinkingEffort: s.thinkingEffort,
-    message: s.text.trim() || error || '(no textual response)',
-    thinking: s.thinking.trim() || null,
-    elapsedS: (Date.now() - start) / 1000,
-    inputTokens: s.inputTokens,
-    outputTokens: s.outputTokens,
-    cachedInputTokens: s.cachedInputTokens,
-    cacheCreationInputTokens: s.cacheCreationInputTokens,
-    contextWindow: s.contextWindow,
-    ...computeContext(s),
-    codexCumulative: s.codexCumulative,
-    error,
-    stopReason,
-    incomplete,
-    activity: s.activity.trim() || null,
-    artifacts: [],
-  };
 }
 
 // --- claude ---

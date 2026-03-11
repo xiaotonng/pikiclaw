@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { buildSwitchWorkdirView, resolveRegisteredPath } from '../src/bot-telegram-directory.ts';
 import {
   buildFinalReplyRender,
+  buildStreamPreviewHtml,
   formatMenuLines,
   formatProviderUsageLines,
   renderSessionTurnHtml,
@@ -54,6 +55,32 @@ describe('bot-telegram render helpers', () => {
     expect(usageLines.join('\n')).toContain('Claude: 40% used / 60% left');
     expect(usageLines.join('\n')).toContain('rate limited');
     expect(formatMenuLines([{ command: 'status', description: 'Show status' }])[0]).toBe('/status — Show status');
+  });
+
+  it('keeps longer activity visible when the preview has no body text', () => {
+    const activity = [
+      'I have the current release target: 0.2.24 to 0.2.25. I am about to patch the version in the package metadata, runtime constant, and the install skill examples.',
+      'Updated 4 files',
+      'The version bump is in place: 0.2.25 in runtime, package metadata, and the install skill examples. Next I am running the build and link verification commands.',
+      'The build has started cleanly. I am waiting for TypeScript to finish before linking and version verification.',
+      'The skill build/install verification passed: node dist/cli.js --version reports codeclaw 0.2.25. I am checking the exact repo delta and the staged release workflow before cutting the tag.',
+      'The worktree is large enough that building alone is a weak release gate. I am running the test suite before I cut the tag; if anything is red, I will stop and inspect the failure instead of pushing through.',
+      'The release job succeeded on GitHub, and the Publish to npm step is explicitly green. I am replacing the auto-generated GitHub release text with a concise changelog and then I will wrap up.',
+      'commands: 47 done',
+    ].join('\n');
+
+    const html = buildStreamPreviewHtml({
+      agent: 'codex',
+      elapsedMs: 293_000,
+      bodyText: '',
+      thinking: '',
+      activity,
+      meta: { contextPercent: 38.9 } as any,
+      plan: null,
+    });
+
+    expect(html).toContain('The release job succeeded on GitHub');
+    expect(html).not.toContain('\n...\n');
   });
 });
 

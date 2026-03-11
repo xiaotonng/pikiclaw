@@ -362,7 +362,10 @@ describe('TelegramBot.handleMessage streaming', () => {
     stagedWorkspacePath = stagedHarness.bot.chat(stagedHarness.ctx.chatId).workspacePath ?? null;
 
     expect(stagedRunStream).not.toHaveBeenCalled();
-    expect(vi.mocked(stagedHarness.ctx.reply)).toHaveBeenCalledWith('ok');
+    expect(vi.mocked(stagedHarness.ctx.reply)).not.toHaveBeenCalled();
+    expect(stagedHarness.reactions).toEqual([
+      { chatId: stagedHarness.ctx.chatId, messageId: stagedHarness.ctx.messageId, reactions: ['👌'] },
+    ]);
     expect(stagedLocalSessionId).toBeTruthy();
     expect(stagedWorkspacePath).toBeTruthy();
     expect(fs.existsSync(path.join(stagedWorkspacePath!, 'report.pdf'))).toBe(true);
