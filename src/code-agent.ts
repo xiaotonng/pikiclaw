@@ -1112,7 +1112,7 @@ export interface SkillListResult { skills: SkillInfo[]; workdir: string; }
 export interface ProjectSkillPaths {
   sharedSkillFile: string | null;
   claudeSkillFile: string | null;
-  codexSkillFile: string | null;
+  agentsSkillFile: string | null;
   claudeCommandFile: string | null;
 }
 
@@ -1159,43 +1159,10 @@ function listRelativeFiles(dirPath: string, prefix = ''): string[] {
   return files;
 }
 
-function directoryFingerprint(dirPath: string): string | null {
-  if (!hasDir(dirPath)) return null;
-  const hash = crypto.createHash('sha1');
-  for (const rel of listRelativeFiles(dirPath)) {
-    hash.update(rel.replace(/\\/g, '/'));
-    hash.update('\0');
-    hash.update(fs.readFileSync(path.join(dirPath, rel)));
-    hash.update('\0');
-  }
-  return hash.digest('hex');
-}
-
-function ensureRealDirectory(dirPath: string) {
-  try {
-    const stat = fs.lstatSync(dirPath);
-    if (stat.isSymbolicLink()) fs.unlinkSync(dirPath);
-  } catch {}
-  fs.mkdirSync(dirPath, { recursive: true });
-}
-
-function replaceDirContents(srcDir: string, destDir: string) {
-  try { fs.rmSync(destDir, { recursive: true, force: true }); } catch {}
-  fs.mkdirSync(path.dirname(destDir), { recursive: true });
-  fs.cpSync(srcDir, destDir, { recursive: true });
-}
-
 interface ProjectSkillCandidate {
-  source: 'canonical' | 'claude' | 'codex';
+  source: 'canonical' | 'agents' | 'claude';
   dirPath: string;
   skillFile: string;
-  mtimeMs: number;
-}
-
-interface ProjectSkillFileCandidate {
-  source: ProjectSkillCandidate['source'];
-  relPath: string;
-  absPath: string;
   mtimeMs: number;
 }
 
@@ -1212,105 +1179,96 @@ function listProjectSkillCandidates(rootDir: string, source: ProjectSkillCandida
   return entries;
 }
 
-function preferredFileCandidate(candidates: ProjectSkillFileCandidate[]): ProjectSkillFileCandidate | null {
+function realPathOrNull(filePath: string): string | null {
+  try { return fs.realpathSync(filePath); } catch { return null; }
+}
+
+function chooseProjectSkillCandidate(candidates: ProjectSkillCandidate[]): ProjectSkillCandidate | null {
   if (!candidates.length) return null;
-  const canonical = candidates.find(candidate => candidate.source === 'canonical');
-  if (canonical) return canonical;
+  const priority: Record<ProjectSkillCandidate['source'], number> = {
+    canonical: 0,
+    agents: 1,
+    claude: 2,
+  };
   return [...candidates].sort((a, b) => {
+    const byPriority = priority[a.source] - priority[b.source];
+    if (byPriority !== 0) return byPriority;
     if (b.mtimeMs !== a.mtimeMs) return b.mtimeMs - a.mtimeMs;
-    return a.source.localeCompare(b.source);
+    return a.dirPath.localeCompare(b.dirPath);
   })[0] || null;
 }
 
-function listProjectSkillFiles(candidate: ProjectSkillCandidate): Map<string, ProjectSkillFileCandidate[]> {
-  const files = new Map<string, ProjectSkillFileCandidate[]>();
-  for (const relPath of listRelativeFiles(candidate.dirPath)) {
-    const absPath = path.join(candidate.dirPath, relPath);
-    let mtimeMs = candidate.mtimeMs;
-    try { mtimeMs = fs.statSync(absPath).mtimeMs; } catch {}
-    files.set(relPath, [
-      ...(files.get(relPath) || []),
-      { source: candidate.source, relPath, absPath, mtimeMs },
-    ]);
-  }
-  return files;
+function replaceDir(srcDir: string, destDir: string) {
+  try { fs.rmSync(destDir, { recursive: true, force: true }); } catch {}
+  fs.mkdirSync(path.dirname(destDir), { recursive: true });
+  fs.cpSync(srcDir, destDir, { recursive: true });
 }
 
-function copyFileContents(srcFile: string, destFile: string) {
-  fs.mkdirSync(path.dirname(destFile), { recursive: true });
-  fs.copyFileSync(srcFile, destFile);
+function ensureDirSymlink(linkPath: string, targetDir: string) {
+  const desiredTarget = path.relative(path.dirname(linkPath), targetDir) || '.';
+  try {
+    const stat = fs.lstatSync(linkPath);
+    if (stat.isSymbolicLink()) {
+      const currentTarget = fs.readlinkSync(linkPath);
+      const currentReal = realPathOrNull(path.resolve(path.dirname(linkPath), currentTarget));
+      const desiredReal = realPathOrNull(targetDir);
+      if (currentTarget === desiredTarget || (currentReal && desiredReal && currentReal === desiredReal)) return;
+    }
+    fs.rmSync(linkPath, { recursive: true, force: true });
+  } catch {}
+  fs.mkdirSync(path.dirname(linkPath), { recursive: true });
+  fs.symlinkSync(desiredTarget, linkPath, 'dir');
 }
 
 export function initializeProjectSkills(workdir: string, opts: { log?: (message: string) => void } = {}): void {
   const canonicalRoot = path.join(workdir, '.codeclaw', 'skills');
+  const agentsRoot = path.join(workdir, '.agents', 'skills');
   const claudeRoot = path.join(workdir, '.claude', 'skills');
-  const codexRoot = path.join(workdir, '.codex', 'skills');
   const candidatesByName = new Map<string, ProjectSkillCandidate[]>();
+  const canonicalReal = realPathOrNull(canonicalRoot);
+  const roots: Array<{ rootDir: string; source: ProjectSkillCandidate['source'] }> = [
+    { rootDir: canonicalRoot, source: 'canonical' },
+    { rootDir: agentsRoot, source: 'agents' },
+    { rootDir: claudeRoot, source: 'claude' },
+  ];
 
-  for (const [name, candidate] of listProjectSkillCandidates(canonicalRoot, 'canonical')) {
-    candidatesByName.set(name, [candidate]);
-  }
-  for (const [name, candidate] of listProjectSkillCandidates(claudeRoot, 'claude')) {
-    candidatesByName.set(name, [...(candidatesByName.get(name) || []), candidate]);
-  }
-  for (const [name, candidate] of listProjectSkillCandidates(codexRoot, 'codex')) {
-    candidatesByName.set(name, [...(candidatesByName.get(name) || []), candidate]);
+  for (const { rootDir, source } of roots) {
+    if (source !== 'canonical') {
+      const rootReal = realPathOrNull(rootDir);
+      if (rootReal && canonicalReal && rootReal === canonicalReal) continue;
+    }
+    for (const [name, candidate] of listProjectSkillCandidates(rootDir, source)) {
+      candidatesByName.set(name, [...(candidatesByName.get(name) || []), candidate]);
+    }
   }
 
-  if (!candidatesByName.size) return;
-
-  ensureRealDirectory(canonicalRoot);
+  fs.mkdirSync(canonicalRoot, { recursive: true });
   let merged = 0;
-  let synced = 0;
 
   for (const [name, candidates] of candidatesByName) {
     const canonicalDir = path.join(canonicalRoot, name);
-    const filesByPath = new Map<string, ProjectSkillFileCandidate[]>();
-
-    for (const candidate of candidates) {
-      for (const [relPath, fileCandidates] of listProjectSkillFiles(candidate)) {
-        filesByPath.set(relPath, [...(filesByPath.get(relPath) || []), ...fileCandidates]);
-      }
-    }
-
-    let mergedSkill = false;
-    for (const [relPath, fileCandidates] of filesByPath) {
-      const chosen = preferredFileCandidate(fileCandidates);
-      if (!chosen || chosen.source === 'canonical') continue;
-      const destFile = path.join(canonicalDir, relPath);
-      const current = hasFile(destFile) ? fs.readFileSync(destFile) : null;
-      const next = fs.readFileSync(chosen.absPath);
-      if (current && Buffer.compare(current, next) === 0) continue;
-      copyFileContents(chosen.absPath, destFile);
-      mergedSkill = true;
-    }
-    if (mergedSkill) merged += 1;
-
-    const sourceDir = path.join(canonicalRoot, name);
-    const sourceFingerprint = directoryFingerprint(sourceDir);
-    if (!sourceFingerprint) continue;
-
-    for (const targetRoot of [claudeRoot, codexRoot]) {
-      ensureRealDirectory(targetRoot);
-      const targetDir = path.join(targetRoot, name);
-      if (directoryFingerprint(targetDir) === sourceFingerprint) continue;
-      replaceDirContents(sourceDir, targetDir);
-      synced += 1;
-    }
+    if (hasDir(canonicalDir)) continue;
+    const chosen = chooseProjectSkillCandidate(candidates);
+    if (!chosen || chosen.source === 'canonical') continue;
+    replaceDir(chosen.dirPath, canonicalDir);
+    merged += 1;
   }
 
-  if (merged || synced) opts.log?.(`skills initialized: merged=${merged} synced=${synced} workdir=${workdir}`);
+  ensureDirSymlink(agentsRoot, canonicalRoot);
+  ensureDirSymlink(claudeRoot, canonicalRoot);
+
+  if (merged) opts.log?.(`skills initialized: merged=${merged} linked=2 workdir=${workdir}`);
 }
 
 export function getProjectSkillPaths(workdir: string, skillName: string): ProjectSkillPaths {
   const sharedSkillFile = path.join(workdir, '.codeclaw', 'skills', skillName, 'SKILL.md');
+  const agentsSkillFile = path.join(workdir, '.agents', 'skills', skillName, 'SKILL.md');
   const claudeSkillFile = path.join(workdir, '.claude', 'skills', skillName, 'SKILL.md');
-  const codexSkillFile = path.join(workdir, '.codex', 'skills', skillName, 'SKILL.md');
   const claudeCommandFile = path.join(workdir, '.claude', 'commands', `${skillName}.md`);
   return {
     sharedSkillFile: hasFile(sharedSkillFile) ? sharedSkillFile : null,
+    agentsSkillFile: hasFile(agentsSkillFile) ? agentsSkillFile : null,
     claudeSkillFile: hasFile(claudeSkillFile) ? claudeSkillFile : null,
-    codexSkillFile: hasFile(codexSkillFile) ? codexSkillFile : null,
     claudeCommandFile: hasFile(claudeCommandFile) ? claudeCommandFile : null,
   };
 }

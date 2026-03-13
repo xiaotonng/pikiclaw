@@ -9,4 +9,4 @@ dashboard/dist/
 !.codeclaw/skills/
 !.codeclaw/skills/**
 .claude/skills/
-.codex/skills/
+.agents/skills/

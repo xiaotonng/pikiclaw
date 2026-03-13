@@ -366,7 +366,7 @@ export function resolveSkillPrompt(bot: Bot, chatId: ChatId, cmd: string, args: 
       : `\`.codeclaw/skills/${skill.name}/SKILL.md\``;
     const locationText = paths.sharedSkillFile
       ? canonicalPath
-      : paths.codexSkillFile || paths.claudeSkillFile
+      : paths.agentsSkillFile || paths.claudeSkillFile
         ? canonicalPath
         : `\`${skill.name}/SKILL.md\``;
     prompt = `In this project, the ${skill.name} skill is defined in ${locationText}. Please read that SKILL.md file and execute the instructions.${suffix}`;

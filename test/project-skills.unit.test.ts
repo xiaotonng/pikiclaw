@@ -30,7 +30,7 @@ describe('project skills', () => {
   it('lists canonical project skills plus legacy command skills without duplicates', () => {
     const workdir = makeTmpDir('codeclaw-skills-');
     writeSkill(path.join(workdir, '.codeclaw', 'skills'), 'ship', '---\nlabel: Shared Ship\ndescription: shared\n---\n');
-    writeSkill(path.join(workdir, '.codex', 'skills'), 'ship', '---\nlabel: Codex Ship\ndescription: codex\n---\n');
+    writeSkill(path.join(workdir, '.agents', 'skills'), 'ship', '---\nlabel: Agents Ship\ndescription: agents\n---\n');
     writeSkill(path.join(workdir, '.claude', 'skills'), 'review', '---\nlabel: Claude Review\ndescription: claude\n---\n');
     writeFile(path.join(workdir, '.claude', 'commands', 'deploy.md'), '---\nlabel: Deploy Cmd\ndescription: legacy\n---\n');
 
@@ -72,7 +72,7 @@ describe('project skills', () => {
   it('routes codex skills to project skill files instead of hard-coding .claude paths', () => {
     const workdir = makeTmpDir('codeclaw-codex-skill-');
     writeSkill(path.join(workdir, '.codeclaw', 'skills'), 'fixup', '---\nlabel: Fixup\ndescription: shared\n---\n');
-    writeSkill(path.join(workdir, '.codex', 'skills'), 'fixup', '---\nlabel: Fixup\ndescription: codex\n---\n');
+    writeSkill(path.join(workdir, '.agents', 'skills'), 'fixup', '---\nlabel: Fixup\ndescription: agents\n---\n');
 
     const bot = new Bot();
     bot.switchWorkdir(workdir, { persist: false });
@@ -85,24 +85,22 @@ describe('project skills', () => {
     });
   });
 
-  it('merges legacy claude/codex skills into .codeclaw/skills and syncs them back out', () => {
+  it('migrates project skills into .codeclaw/skills and links claude/agents roots to it', () => {
     const workdir = makeTmpDir('codeclaw-migrate-skill-');
     writeSkill(path.join(workdir, '.codeclaw', 'skills'), 'ship', '---\nlabel: Ship\ndescription: canonical\n---\n');
-    writeFile(path.join(workdir, '.codeclaw', 'skills', 'ship', 'scripts', 'canonical.sh'), 'echo canonical\n');
     writeSkill(path.join(workdir, '.claude', 'skills'), 'ship', '---\nlabel: Ship\ndescription: claude\n---\n');
-    writeFile(path.join(workdir, '.claude', 'skills', 'ship', 'references', 'claude.txt'), 'claude notes\n');
-    writeSkill(path.join(workdir, '.codex', 'skills'), 'lint', '---\nlabel: Lint\ndescription: codex\n---\n');
-    writeFile(path.join(workdir, '.codex', 'skills', 'lint', 'assets', 'lint.txt'), 'lint asset\n');
+    writeFile(path.join(workdir, '.claude', 'skills', 'ship', 'references', 'claude.txt'), 'ignored because canonical wins\n');
+    writeSkill(path.join(workdir, '.agents', 'skills'), 'package', '---\nlabel: Package\ndescription: agents\n---\n');
 
     initializeProjectSkills(workdir);
 
     expect(fs.readFileSync(path.join(workdir, '.codeclaw', 'skills', 'ship', 'SKILL.md'), 'utf8')).toContain('description: canonical');
-    expect(fs.readFileSync(path.join(workdir, '.codeclaw', 'skills', 'ship', 'references', 'claude.txt'), 'utf8')).toContain('claude notes');
-    expect(fs.readFileSync(path.join(workdir, '.codeclaw', 'skills', 'ship', 'scripts', 'canonical.sh'), 'utf8')).toContain('canonical');
-    expect(fs.readFileSync(path.join(workdir, '.codeclaw', 'skills', 'lint', 'SKILL.md'), 'utf8')).toContain('description: codex');
-    expect(fs.readFileSync(path.join(workdir, '.codeclaw', 'skills', 'lint', 'assets', 'lint.txt'), 'utf8')).toContain('lint asset');
-    expect(fs.readFileSync(path.join(workdir, '.claude', 'skills', 'lint', 'SKILL.md'), 'utf8')).toContain('description: codex');
-    expect(fs.readFileSync(path.join(workdir, '.codex', 'skills', 'ship', 'SKILL.md'), 'utf8')).toContain('description: canonical');
-    expect(fs.readFileSync(path.join(workdir, '.codex', 'skills', 'ship', 'references', 'claude.txt'), 'utf8')).toContain('claude notes');
+    expect(fs.existsSync(path.join(workdir, '.codeclaw', 'skills', 'ship', 'references', 'claude.txt'))).toBe(false);
+    expect(fs.readFileSync(path.join(workdir, '.codeclaw', 'skills', 'package', 'SKILL.md'), 'utf8')).toContain('description: agents');
+    expect(fs.lstatSync(path.join(workdir, '.claude', 'skills')).isSymbolicLink()).toBe(true);
+    expect(fs.lstatSync(path.join(workdir, '.agents', 'skills')).isSymbolicLink()).toBe(true);
+    expect(fs.realpathSync(path.join(workdir, '.claude', 'skills'))).toBe(fs.realpathSync(path.join(workdir, '.codeclaw', 'skills')));
+    expect(fs.realpathSync(path.join(workdir, '.agents', 'skills'))).toBe(fs.realpathSync(path.join(workdir, '.codeclaw', 'skills')));
+    expect(fs.readFileSync(path.join(workdir, '.agents', 'skills', 'ship', 'SKILL.md'), 'utf8')).toContain('description: canonical');
   });
 });

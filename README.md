@@ -99,7 +99,7 @@ npx codeclaw@latest@latest --setup
 - **多会话管理** — 随时切换、恢复历史会话
 - **图片 / 文件输入** — 发截图、PDF、文档给 Agent 处理
 - **自定义 Skills** — 执行 `.codeclaw/skills/` 中定义的项目技能，并兼容已有 `.claude/commands/`
-  启动时会自动把历史 `.claude/skills/`、`.codex/skills/` 合并导入到 `.codeclaw/skills/`
+  启动时会自动把现有 `.agents/skills/`、`.claude/skills/` 迁移到 `.codeclaw/skills/`，并把 `.agents/skills/`、`.claude/skills/` 链接到这里
 - **安全模式** — 危险操作推送确认卡片到手机，白名单限制访问
 - **Web Dashboard** — 可视化配置、会话浏览、主机监控
 - **i18n 国际化** — 支持中文和英文界面
