@@ -21,6 +21,7 @@ import {
   type SendOpts,
   sleep,
 } from './channel-base.js';
+import { adaptMarkdownForFeishu } from './bot-feishu-render.js';
 
 export { FeishuChannel };
 export type FeishuCardActionItem = lark.InteractiveCardActionItem;
@@ -211,9 +212,10 @@ function keyboardToRows(keyboard: any): FeishuCardActionRow[] {
 }
 
 function buildCardFromView(view: FeishuCardView): lark.InteractiveCard {
-  const content = view.markdown.length > FEISHU_CARD_MAX
-    ? view.markdown.slice(0, FEISHU_CARD_MAX) + '\n\n...(truncated)'
-    : view.markdown;
+  const adapted = adaptMarkdownForFeishu(view.markdown);
+  const content = adapted.length > FEISHU_CARD_MAX
+    ? adapted.slice(0, FEISHU_CARD_MAX) + '\n\n...(truncated)'
+    : adapted;
   const card: lark.InteractiveCard = {
     config: { wide_screen_mode: true, update_multi: true },
     elements: [{ tag: 'markdown', content }],
@@ -248,9 +250,10 @@ function buildCard(markdown: string, opts?: { title?: string; template?: FeishuC
 }
 
 function buildCardKitMarkdownData(markdown: string): string {
-  const content = markdown.length > FEISHU_CARD_MAX
-    ? `${markdown.slice(0, FEISHU_CARD_MAX)}\n\n...(truncated)`
-    : markdown;
+  const adapted = adaptMarkdownForFeishu(markdown);
+  const content = adapted.length > FEISHU_CARD_MAX
+    ? `${adapted.slice(0, FEISHU_CARD_MAX)}\n\n...(truncated)`
+    : adapted;
   return JSON.stringify({
     schema: '2.0',
     body: {

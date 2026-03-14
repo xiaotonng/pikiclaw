@@ -195,8 +195,12 @@ export function renderSessionTurnMarkdown(userText: string | null | undefined, a
 // LivePreview renderer — produces Markdown for Feishu card elements
 // ---------------------------------------------------------------------------
 
-export function buildInitialPreviewMarkdown(agent: Agent): string {
-  return formatPreviewFooter(agent, 0);
+export function buildInitialPreviewMarkdown(agent: Agent, model?: string | null, effort?: string | null): string {
+  const parts: string[] = [];
+  if (model) parts.push(model);
+  else parts.push(agent);
+  if (effort) parts.push(`${effort}`);
+  return parts.join(' · ');
 }
 
 function buildPreviewMarkdown(input: StreamPreviewRenderInput, options?: { includeFooter?: boolean }): string {
@@ -617,4 +621,99 @@ export function renderHost(d: HostData): string {
     lines.push('```');
   }
   return lines.join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// GFM table → Feishu text conversion
+// ---------------------------------------------------------------------------
+// Feishu card markdown does not support GFM pipe-delimited table syntax.
+
+function isGfmTableRow(line: string): boolean {
+  return line.trim().startsWith('|');
+}
+
+function isGfmTableSeparator(line: string): boolean {
+  const t = line.trim();
+  if (!t.startsWith('|')) return false;
+  const inner = t.replace(/^\||\|$/g, '');
+  const cells = inner.split('|');
+  return cells.length > 0 && cells.every(c => /^\s*:?-{2,}:?\s*$/.test(c));
+}
+
+function parseGfmTableCells(line: string): string[] {
+  let t = line.trim();
+  if (t.startsWith('|')) t = t.slice(1);
+  if (t.endsWith('|')) t = t.slice(0, -1);
+  return t.split('|').map(c => c.trim());
+}
+
+function stripBoldMarkers(text: string): string {
+  return text.replace(/\*\*/g, '');
+}
+
+/** Strip anchor links [text](#id) → text (anchors don't work in Feishu cards). */
+function adaptLine(line: string): string {
+  return line.replace(/\[([^\]]+)\]\(#[^)]*\)/g, '$1');
+}
+
+export function adaptMarkdownForFeishu(markdown: string): string {
+  const lines = markdown.split('\n');
+  const out: string[] = [];
+  let i = 0;
+  let inCodeBlock = false;
+
+  while (i < lines.length) {
+    const trimmed = lines[i].trimStart();
+    if (trimmed.startsWith('```') || trimmed.startsWith('~~~')) {
+      inCodeBlock = !inCodeBlock;
+      out.push(lines[i]);
+      i++;
+      continue;
+    }
+    if (inCodeBlock) {
+      out.push(lines[i]);
+      i++;
+      continue;
+    }
+
+    // GFM table conversion
+    if (
+      i + 1 < lines.length &&
+      isGfmTableRow(lines[i]) &&
+      isGfmTableSeparator(lines[i + 1])
+    ) {
+      const headers = parseGfmTableCells(lines[i]);
+      i += 2;
+      const dataRows: string[][] = [];
+      while (i < lines.length && isGfmTableRow(lines[i]) && !isGfmTableSeparator(lines[i])) {
+        dataRows.push(parseGfmTableCells(lines[i]));
+        i++;
+      }
+
+      for (const row of dataRows) {
+        if (headers.length <= 2) {
+          const key = (row[0] || '').trim();
+          const val = (row[1] || '').trim();
+          if (key && val) {
+            out.push(adaptLine(`**${stripBoldMarkers(key)}** ${val}`));
+          } else if (key || val) {
+            out.push(adaptLine(key || val));
+          }
+        } else {
+          const parts = headers.map((h, idx) => {
+            const cell = (row[idx] || '').trim();
+            if (!cell) return '';
+            const header = stripBoldMarkers(h.trim());
+            return header ? `**${header}:** ${cell}` : cell;
+          }).filter(Boolean);
+          out.push(adaptLine(parts.join('  ')));
+        }
+      }
+    } else {
+      out.push(adaptLine(lines[i]));
+      i++;
+    }
+  }
+
+  return out.join('\n');
 }

@@ -52,6 +52,7 @@ import {
 } from './process-control.js';
 import {
   feishuPreviewRenderer,
+  feishuStreamingPreviewRenderer,
   buildInitialPreviewMarkdown,
   buildFinalReplyRender,
   renderCommandNotice,
@@ -491,7 +492,9 @@ export class FeishuBot extends Bot {
     const start = Date.now();
     this.log(`[handleMessage] queued chat=${ctx.chatId} agent=${session.agent} session=${session.sessionId || '(new)'} prompt="${prompt.slice(0, 100)}" files=${files.length}`);
 
-    const placeholderId = await this.channel.send(ctx.chatId, buildInitialPreviewMarkdown(session.agent), { replyTo: ctx.messageId || undefined });
+    const model = session.modelId || this.modelForAgent(session.agent);
+    const effort = this.effortForAgent(session.agent);
+    const placeholderId = await this.channel.sendStreamingCard(ctx.chatId, buildInitialPreviewMarkdown(session.agent, model, effort), { replyTo: ctx.messageId || undefined });
     if (placeholderId) {
       this.registerSessionMessage(ctx.chatId, placeholderId, session);
       this.log(`[handleMessage] preview card sent msg_id=${placeholderId}`);
@@ -512,12 +515,15 @@ export class FeishuBot extends Bot {
       let livePreview: LivePreview | null = null;
       try {
         if (placeholderId) {
+          const renderer = this.channel.isStreamingCard(placeholderId)
+            ? feishuStreamingPreviewRenderer
+            : feishuPreviewRenderer;
           livePreview = new LivePreview({
             agent: session.agent,
             chatId: ctx.chatId,
             placeholderMessageId: placeholderId,
             channel: this.channel,
-            renderer: feishuPreviewRenderer,
+            renderer,
             streamEditIntervalMs: 700,
             startTimeMs: start,
             canEditMessages: supportsChannelCapability(this.channel, 'editMessages'),

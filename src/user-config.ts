@@ -216,6 +216,10 @@ export function setUserWorkdir(workdir: string, options: { notify?: boolean } = 
   const resolvedWorkdir = resolveUserWorkdir({ workdir });
   const config = normalizeUserConfig({ ...loadUserConfig(), workdir: resolvedWorkdir });
   const configPath = saveUserConfig(config);
+  // Update sync overrides so the periodic config sync doesn't revert the change
+  if (userConfigSyncOverrides.workdir !== undefined || userConfigSyncTimer) {
+    userConfigSyncOverrides = { ...userConfigSyncOverrides, workdir: resolvedWorkdir };
+  }
   applyUserConfig(config, undefined, { overwrite: true, clearMissing: true, notify: options.notify ?? true });
   return { configPath, workdir: resolvedWorkdir, config };
 }
