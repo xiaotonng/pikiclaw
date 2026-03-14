@@ -24,10 +24,13 @@ node -e "
   fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
 "
 
+# Keep the lockfile version in sync so CI's npm ci installs the release version.
+npm install --package-lock-only --ignore-scripts
+
 # Update VERSION constant in src/bot.ts
 sed -i '' "s/export const VERSION = '${OLD_VERSION}'/export const VERSION = '${NEW_VERSION}'/" src/bot.ts
 
-echo "  ✓ package.json and src/bot.ts updated"
+echo "  ✓ package.json, package-lock.json, and src/bot.ts updated"
 
 # ── 2. Build & local install ─────────────────────────────────────────────────
 
