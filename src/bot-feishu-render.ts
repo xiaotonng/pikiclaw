@@ -199,13 +199,7 @@ export function buildInitialPreviewMarkdown(agent: Agent): string {
   return formatPreviewFooter(agent, 0);
 }
 
-export function buildStreamingBodyMarkdown(input: StreamPreviewRenderInput): string {
-  // CardKit streaming content works best when each update is append-only.
-  // Stream only the assistant/body text here; status stays in a separate card element.
-  return input.bodyText;
-}
-
-export function buildStreamPreviewMarkdown(input: StreamPreviewRenderInput): string {
+function buildPreviewMarkdown(input: StreamPreviewRenderInput, options?: { includeFooter?: boolean }): string {
   const maxBody = 2400;
   const display = input.bodyText.trim();
   const rawThinking = input.thinking.trim();
@@ -235,8 +229,20 @@ export function buildStreamPreviewMarkdown(input: StreamPreviewRenderInput): str
     parts.push(preview);
   }
 
-  parts.push(formatPreviewFooter(input.agent, input.elapsedMs, input.meta ?? null));
+  if (options?.includeFooter !== false) {
+    parts.push(formatPreviewFooter(input.agent, input.elapsedMs, input.meta ?? null));
+  }
   return parts.join('\n\n');
+}
+
+export function buildStreamingBodyMarkdown(input: StreamPreviewRenderInput): string {
+  // CardKit streaming content uses a separate status element, so keep the
+  // body focused on live plan/activity/thinking/output without duplicating the footer.
+  return buildPreviewMarkdown(input, { includeFooter: false });
+}
+
+export function buildStreamPreviewMarkdown(input: StreamPreviewRenderInput): string {
+  return buildPreviewMarkdown(input, { includeFooter: true });
 }
 
 export const feishuPreviewRenderer: LivePreviewRenderer = {

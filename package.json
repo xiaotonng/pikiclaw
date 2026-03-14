@@ -1,6 +1,6 @@
 {
   "name": "pikiclaw",
-  "version": "0.2.44",
+  "version": "0.2.45",
   "description": "The best IM-driven remote coding experience. Bridge AI coding agents to any IM.",
   "type": "module",
   "bin": {
