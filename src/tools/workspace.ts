@@ -59,6 +59,15 @@ const tools: McpToolModule['tools'] = [
 // Handlers
 // ---------------------------------------------------------------------------
 
+function summarizeSendFileArgs(filePath: string, caption: string, kind?: string): string {
+  const text = [
+    `path=${JSON.stringify(filePath || '')}`,
+    `kind=${JSON.stringify(kind || 'auto')}`,
+    `caption=${JSON.stringify(caption || '')}`,
+  ].join(' ');
+  return text.length <= 240 ? text : `${text.slice(0, 237).trimEnd()}...`;
+}
+
 function handleListFiles(args: Record<string, unknown>, ctx: ToolContext): ToolResult {
   const subdir = typeof args?.subdirectory === 'string' ? args.subdirectory : '';
   const dir = subdir ? path.resolve(ctx.workspace, subdir) : ctx.workspace;
@@ -120,10 +129,11 @@ async function handleSendFile(args: Record<string, unknown>, ctx: ToolContext): 
   const filePath = typeof args?.path === 'string' ? args.path.trim() : '';
   const caption = typeof args?.caption === 'string' ? args.caption.trim() : '';
   const kind = typeof args?.kind === 'string' ? args.kind : undefined;
-  toolLog('im_send_file', `path=${filePath} kind=${kind || 'auto'}`);
-  if (!filePath) { toolLog('im_send_file', 'ERROR missing path'); return toolResult('Error: "path" is required', true); }
-  if (!caption) { toolLog('im_send_file', 'ERROR missing caption'); return toolResult('Error: "caption" is required', true); }
-  if (!ctx.callbackUrl) { toolLog('im_send_file', 'ERROR no callback URL'); return toolResult('Error: MCP callback URL is not configured', true); }
+  const argSummary = summarizeSendFileArgs(filePath, caption, kind);
+  toolLog('im_send_file', argSummary);
+  if (!filePath) { toolLog('im_send_file', 'ERROR missing path'); return toolResult(`Error: "path" is required (${argSummary})`, true); }
+  if (!caption) { toolLog('im_send_file', 'ERROR missing caption'); return toolResult(`Error: "caption" is required (${argSummary})`, true); }
+  if (!ctx.callbackUrl) { toolLog('im_send_file', 'ERROR no callback URL'); return toolResult(`Error: MCP callback URL is not configured (${argSummary})`, true); }
 
   try {
     const result = await callbackSendFile(ctx.callbackUrl, filePath, {
@@ -135,11 +145,11 @@ async function handleSendFile(args: Record<string, unknown>, ctx: ToolContext): 
       return toolResult(`File sent successfully: ${filePath}`);
     } else {
       toolLog('im_send_file', `FAILED ${result.error || 'unknown error'}`);
-      return toolResult(`Failed to send file: ${result.error || 'unknown error'}`, true);
+      return toolResult(`Failed to send file: ${result.error || 'unknown error'} (${argSummary})`, true);
     }
   } catch (e: any) {
     toolLog('im_send_file', `ERROR ${e.message}`);
-    return toolResult(`Error sending file: ${e.message}`, true);
+    return toolResult(`Error sending file: ${e.message} (${argSummary})`, true);
   }
 }
 

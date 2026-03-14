@@ -30,7 +30,7 @@ function writeFakeScript(name: string, jsonLines: object[]) {
   fs.writeFileSync(p, script, { mode: 0o755 });
 }
 
-function baseOpts(agent: 'codex' | 'claude', extra: Partial<StreamOpts> = {}): StreamOpts {
+function baseOpts(agent: 'codex' | 'claude' | 'gemini', extra: Partial<StreamOpts> = {}): StreamOpts {
   return {
     agent,
     prompt: 'test prompt',
@@ -445,6 +445,82 @@ rl.on('line', (line) => {
 
     const spawns = fs.readFileSync(spawnLog, 'utf-8').trim().split('\n').filter(Boolean);
     expect(spawns).toHaveLength(2);
+  });
+});
+
+describe('gemini stream', () => {
+  it('injects MCP through temporary Gemini settings and enables full-access defaults', async () => {
+    const argvFile = path.join(tmpDir, 'gemini-argv.json');
+    const envFile = path.join(tmpDir, 'gemini-env.json');
+    const copiedSettingsFile = path.join(tmpDir, 'gemini-settings-copy.json');
+    const script = `#!/usr/bin/env node
+const fs = require('node:fs');
+const settingsPath = process.env.GEMINI_CLI_SYSTEM_SETTINGS_PATH || '';
+fs.writeFileSync(${JSON.stringify(argvFile)}, JSON.stringify(process.argv.slice(2)));
+fs.writeFileSync(${JSON.stringify(envFile)}, JSON.stringify({
+  GEMINI_CLI_SYSTEM_SETTINGS_PATH: settingsPath,
+}));
+if (settingsPath && fs.existsSync(settingsPath)) {
+  fs.copyFileSync(settingsPath, ${JSON.stringify(copiedSettingsFile)});
+}
+process.stdout.write(JSON.stringify({ type: 'init', session_id: 'gemini-session', model: 'gemini-2.5-pro' }) + '\\n');
+process.stdout.write(JSON.stringify({ type: 'message', role: 'assistant', delta: true, content: 'Gemini ok' }) + '\\n');
+process.stdout.write(JSON.stringify({ type: 'result', session_id: 'gemini-session', status: 'success' }) + '\\n');
+`;
+    fs.writeFileSync(path.join(fakeBin, 'gemini'), script, { mode: 0o755 });
+
+    const result = await doStream(baseOpts('gemini', {
+      geminiModel: 'gemini-2.5-pro',
+      mcpSendFile: async () => ({ ok: true }),
+    }));
+
+    expect(result.ok).toBe(true);
+    expect(result.sessionId).toBe('gemini-session');
+    expect(result.message).toBe('Gemini ok');
+
+    const argv = JSON.parse(fs.readFileSync(argvFile, 'utf-8'));
+    expect(argv).toContain('--output-format');
+    expect(argv).toContain('stream-json');
+    expect(argv).toContain('--approval-mode');
+    expect(argv).toContain('yolo');
+    expect(argv).toContain('--sandbox');
+    expect(argv).toContain('false');
+    expect(argv).not.toContain('--mcp-config');
+
+    const env = JSON.parse(fs.readFileSync(envFile, 'utf-8'));
+    expect(typeof env.GEMINI_CLI_SYSTEM_SETTINGS_PATH).toBe('string');
+    expect(env.GEMINI_CLI_SYSTEM_SETTINGS_PATH).toContain('gemini-system-settings.json');
+
+    const settings = JSON.parse(fs.readFileSync(copiedSettingsFile, 'utf-8'));
+    expect(settings.mcpServers?.pikiclaw?.command).toBeTruthy();
+    expect(settings.mcpServers?.pikiclaw?.env?.MCP_CALLBACK_URL).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+    expect(settings.mcpServers?.pikiclaw?.trust).toBe(true);
+  });
+
+  it('does not duplicate Gemini approval or sandbox flags when extra args already override them', async () => {
+    const argvFile = path.join(tmpDir, 'gemini-argv-override.json');
+    const script = `#!/usr/bin/env node
+const fs = require('node:fs');
+fs.writeFileSync(${JSON.stringify(argvFile)}, JSON.stringify(process.argv.slice(2)));
+process.stdout.write(JSON.stringify({ type: 'init', session_id: 'gemini-session-override', model: 'gemini-2.5-pro' }) + '\\n');
+process.stdout.write(JSON.stringify({ type: 'message', role: 'assistant', delta: true, content: 'Gemini override ok' }) + '\\n');
+process.stdout.write(JSON.stringify({ type: 'result', session_id: 'gemini-session-override', status: 'success' }) + '\\n');
+`;
+    fs.writeFileSync(path.join(fakeBin, 'gemini'), script, { mode: 0o755 });
+
+    const result = await doStream(baseOpts('gemini', {
+      geminiApprovalMode: 'yolo',
+      geminiSandbox: false,
+      geminiExtraArgs: ['--approval-mode', 'default', '--sandbox', 'true'],
+    }));
+
+    expect(result.ok).toBe(true);
+
+    const argv = JSON.parse(fs.readFileSync(argvFile, 'utf-8'));
+    expect(argv.filter((arg: string) => arg === '--approval-mode')).toHaveLength(1);
+    expect(argv.filter((arg: string) => arg === '--sandbox')).toHaveLength(1);
+    expect(argv).toContain('default');
+    expect(argv).toContain('true');
   });
 });
 

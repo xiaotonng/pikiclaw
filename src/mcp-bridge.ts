@@ -4,7 +4,7 @@
  * Runs inside the main pikiclaw process. For each agent stream:
  *   1. Starts a tiny HTTP callback server on localhost (random port).
  *   2. Writes an MCP config JSON pointing to `pikiclaw --mcp-serve`.
- *   3. The agent CLI spawns the MCP server via --mcp-config.
+ *   3. The agent CLI loads that config via its MCP registration mechanism.
  *   4. When the agent calls `send_file`, the MCP server POSTs to our callback.
  *   5. We forward the request to the IM channel and respond with success/failure.
  *
@@ -40,6 +40,8 @@ export type McpSendFileCallback = (
 export interface McpBridgeHandle {
   /** Path to the generated MCP config JSON — pass to agent CLI via --mcp-config. */
   configPath: string;
+  /** Extra environment variables required by the target agent to load the config. */
+  extraEnv?: Record<string, string>;
   /** Whether the MCP server emitted any tool-related activity during the stream. */
   hadActivity: () => boolean;
   /** Gracefully stop the callback server and clean up config file. */
@@ -346,6 +348,7 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
   };
 
   let configPath = '';
+  let extraEnv: Record<string, string> | undefined;
   let codexRegistered = false;
 
   if (opts.agent === 'codex') {
@@ -362,8 +365,19 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
       execFileSync('codex', codexArgs, { stdio: 'pipe', timeout: 10_000 });
       codexRegistered = true;
     }
+  } else if (opts.agent === 'gemini') {
+    // Gemini CLI 0.32+ loads MCP servers from settings.json rather than --mcp-config.
+    configPath = path.join(sessionDir, 'gemini-system-settings.json');
+    const config = {
+      mcpServers: {
+        pikiclaw: { command, args, env: envVars, trust: true },
+      },
+    };
+    fs.mkdirSync(sessionDir, { recursive: true });
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+    extraEnv = { GEMINI_CLI_SYSTEM_SETTINGS_PATH: configPath };
   } else {
-    // Claude/Gemini: write MCP config JSON for --mcp-config
+    // Claude: write MCP config JSON for --mcp-config
     configPath = path.join(sessionDir, 'mcp-config.json');
     const config = {
       mcpServers: {
@@ -376,6 +390,7 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
 
   return {
     configPath,
+    extraEnv,
     hadActivity: () => hadActivity,
     stop: async () => {
       await new Promise<void>(resolve => server.close(() => resolve()));

@@ -43,6 +43,17 @@ function log(msg: string) {
   if (_logFile != null) try { fs.writeSync(_logFile, line); } catch {}
 }
 
+function summarizeArgs(args: unknown, max = 200): string {
+  let text = '';
+  try {
+    text = JSON.stringify(args);
+  } catch {
+    text = String(args);
+  }
+  if (!text) return '{}';
+  return text.length <= max ? text : `${text.slice(0, Math.max(0, max - 3)).trimEnd()}...`;
+}
+
 // ---------------------------------------------------------------------------
 // Context from environment
 // ---------------------------------------------------------------------------
@@ -182,19 +193,19 @@ function handleMessage(msg: any) {
         respondError(id, -32601, `Unknown tool: ${name}`);
         break;
       }
-      const argsSummary = JSON.stringify(args).slice(0, 200);
+      const argsSummary = summarizeArgs(args);
       log(`tools/call tool="${name}" args=${argsSummary}`);
       const callStart = Date.now();
       void Promise.resolve(mod.handle(name, args, ctx)).then(
         result => {
           const elapsed = Date.now() - callStart;
           const text = result.content?.[0]?.text || '';
-          log(`tools/call tool="${name}" ${result.isError ? 'ERROR' : 'OK'} ${elapsed}ms result=${text.slice(0, 150)}`);
+          log(`tools/call tool="${name}" ${result.isError ? 'ERROR' : 'OK'} ${elapsed}ms args=${argsSummary} result=${text.slice(0, 150)}`);
           respond(id, result);
         },
         err => {
           const elapsed = Date.now() - callStart;
-          log(`tools/call tool="${name}" EXCEPTION ${elapsed}ms error=${err?.message || err}`);
+          log(`tools/call tool="${name}" EXCEPTION ${elapsed}ms args=${argsSummary} error=${err?.message || err}`);
           respond(id, { content: [{ type: 'text', text: `Tool error: ${err?.message || err}` }], isError: true });
         },
       );

@@ -23,11 +23,27 @@ import {
 // Command & parser
 // ---------------------------------------------------------------------------
 
+function hasGeminiFlag(args: string[] | undefined, names: string[]): boolean {
+  if (!args?.length) return false;
+  return args.some(arg => {
+    const trimmed = String(arg || '').trim();
+    if (!trimmed.startsWith('-')) return false;
+    return names.some(name => trimmed === name || trimmed.startsWith(`${name}=`));
+  });
+}
+
 function geminiCmd(o: StreamOpts): string[] {
+  const approvalMode = o.geminiApprovalMode || 'yolo';
+  const sandbox = typeof o.geminiSandbox === 'boolean' ? o.geminiSandbox : false;
   const args = ['gemini', '--output-format', 'stream-json'];
   if (o.geminiModel) args.push('--model', o.geminiModel);
   if (o.sessionId) args.push('--resume', o.sessionId);
-  if (o.mcpConfigPath) args.push('--mcp-config', o.mcpConfigPath);
+  if (!hasGeminiFlag(o.geminiExtraArgs, ['--approval-mode', '--yolo', '-y'])) {
+    args.push('--approval-mode', approvalMode);
+  }
+  if (!hasGeminiFlag(o.geminiExtraArgs, ['--sandbox', '-s'])) {
+    args.push('--sandbox', String(sandbox));
+  }
   if (o.geminiExtraArgs?.length) args.push(...o.geminiExtraArgs);
   // gemini's -p requires the prompt as its value (not via stdin)
   args.push('-p', o.prompt);

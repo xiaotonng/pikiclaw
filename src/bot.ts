@@ -64,6 +64,13 @@ export function envBool(name: string, def: boolean): boolean {
   return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase());
 }
 
+export function envString(name: string, def: string): string {
+  const raw = process.env[name];
+  if (raw == null) return def;
+  const trimmed = raw.trim();
+  return trimmed || def;
+}
+
 export function envInt(name: string, def: number): number {
   const raw = process.env[name];
   if (raw == null || raw.trim() === '') return def;
@@ -465,6 +472,9 @@ export class Bot {
   set claudeModel(v: string) { this.agentConfigs.claude.model = v; }
   get claudePermissionMode(): string { return this.agentConfigs.claude?.permissionMode || 'bypassPermissions'; }
   get claudeExtraArgs(): string[] { return this.agentConfigs.claude?.extraArgs || []; }
+  get geminiApprovalMode(): string { return this.agentConfigs.gemini?.approvalMode || 'yolo'; }
+  get geminiSandbox(): boolean { return this.agentConfigs.gemini?.sandbox ?? false; }
+  get geminiExtraArgs(): string[] { return this.agentConfigs.gemini?.extraArgs || []; }
 
   chats = new Map<ChatId, ChatState>();
   sessionStates = new Map<string, SessionRuntime>();
@@ -500,6 +510,8 @@ export class Bot {
       },
       gemini: {
         model: configModelValue(config, 'gemini'),
+        approvalMode: envString('GEMINI_APPROVAL_MODE', 'yolo'),
+        sandbox: envBool('GEMINI_SANDBOX', false),
         extraArgs: shellSplit(process.env.GEMINI_EXTRA_ARGS || ''),
       },
     };
@@ -885,7 +897,9 @@ export class Bot {
       claudeExtraArgs: this.claudeExtraArgs.length ? this.claudeExtraArgs : undefined,
       // gemini-specific
       geminiModel: cs.agent === 'gemini' ? resolvedModel : (this.agentConfigs.gemini?.model || ''),
-      geminiExtraArgs: this.agentConfigs.gemini?.extraArgs?.length ? this.agentConfigs.gemini.extraArgs : undefined,
+      geminiApprovalMode: this.geminiApprovalMode,
+      geminiSandbox: this.geminiSandbox,
+      geminiExtraArgs: this.geminiExtraArgs.length ? this.geminiExtraArgs : undefined,
       // MCP bridge
       mcpSendFile,
     };

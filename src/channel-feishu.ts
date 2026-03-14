@@ -6,8 +6,8 @@
  *   - Client.im: message send/edit/delete, image/file upload, resource download
  *   - Automatic tenant_access_token management
  *
- * CardKit streaming APIs (typewriter effect) use Client.request() directly
- * since the SDK doesn't wrap them yet.
+ * CardKit streaming APIs (typewriter effect) use the SDK's cardkit.v1 wrappers
+ * and degrade to regular interactive cards when the tenant/app cannot use them.
  */
 
 import * as lark from '@larksuiteoapi/node-sdk';
@@ -119,6 +119,39 @@ function describeError(err: unknown): string {
     if (value != null && value !== '') parts.push(`${key}=${value}`);
   }
   return parts.join(' | ');
+}
+
+function safeJson(value: unknown): string {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function describeFeishuApiError(err: unknown): string {
+  const base = describeError(err);
+  const method = String((err as any)?.config?.method || '').toUpperCase();
+  const url = String((err as any)?.config?.url || '').trim();
+  const response = (err as any)?.response?.data;
+  const parts = [base];
+  if (method || url) parts.push(`request=${[method, url].filter(Boolean).join(' ')}`);
+  if (response != null) parts.push(`response=${safeJson(response)}`);
+  return parts.join(' | ');
+}
+
+function isCardKitCapabilityError(err: unknown): boolean {
+  const text = describeFeishuApiError(err).toLowerCase();
+  return [
+    'status code 400',
+    'permission',
+    'scope',
+    'forbidden',
+    'unsupported',
+    'not support',
+    'cardkit',
+    'streaming',
+  ].some(token => text.includes(token));
 }
 
 function isRetryableWsStartError(err: unknown): boolean {
@@ -249,17 +282,23 @@ function buildCard(markdown: string, opts?: { title?: string; template?: FeishuC
   });
 }
 
-function buildCardKitMarkdownData(markdown: string): string {
+function buildCardKitMarkdownData(markdown: string, opts?: { clearStreamingStatus?: boolean }): string {
   const adapted = adaptMarkdownForFeishu(markdown);
   const content = adapted.length > FEISHU_CARD_MAX
     ? `${adapted.slice(0, FEISHU_CARD_MAX)}\n\n...(truncated)`
     : adapted;
+  const elements = opts?.clearStreamingStatus
+    ? [
+        { tag: 'markdown', content: '', element_id: 'status' },
+        { tag: 'markdown', content, element_id: 'content' },
+      ]
+    : [
+        { tag: 'markdown', content },
+      ];
   return JSON.stringify({
     schema: '2.0',
     body: {
-      elements: [
-        { tag: 'markdown', content },
-      ],
+      elements,
     },
   });
 }
@@ -299,6 +338,9 @@ class FeishuChannel extends Channel {
 
   /** Maps open_id → chat_id for resolving menu event context. */
   private _openIdToChat = new Map<string, string>();
+
+  /** Disable CardKit after tenant/app-level failures to avoid repeated 400s. */
+  private cardKitEnabled = true;
 
   private _hCommand: FeishuCommandHandler | null = null;
   private _hMessage: FeishuMessageHandler | null = null;
@@ -477,9 +519,6 @@ class FeishuChannel extends Channel {
     // Track open_id → chat_id for menu event resolution
     if (from.openId) this._openIdToChat.set(from.openId, chatId);
 
-    const fromDesc = from.userId || from.openId || '?';
-    this._log(`[recv] message chat=${chatId} from=${fromDesc} msg_id=${messageId} type=${msgType}`);
-
     // Group: require @mention
     if (chatType === 'group' && !this._isBotMentioned(msg)) {
       this._log(`[recv] skipped: not mentioned in group ${chatId}`);
@@ -502,7 +541,6 @@ class FeishuChannel extends Channel {
           try {
             const localPath = await this._downloadResource(messageId, content.image_key, 'image');
             files.push(localPath);
-            this._log(`[recv] image saved: ${localPath}`);
           } catch (e: any) { this._log(`[recv] image download failed: ${e}`); }
         }
       } else if (msgType === 'file') {
@@ -510,7 +548,6 @@ class FeishuChannel extends Channel {
           try {
             const localPath = await this._downloadResource(messageId, content.file_key, 'file', content.file_name);
             files.push(localPath);
-            this._log(`[recv] file saved: ${localPath}`);
           } catch (e: any) { this._log(`[recv] file download failed: ${e}`); }
         }
       } else if (msgType === 'post') {
@@ -534,7 +571,6 @@ class FeishuChannel extends Channel {
         const spaceIdx = trimmedText.indexOf(' ');
         const cmd = (spaceIdx > 0 ? trimmedText.slice(1, spaceIdx) : trimmedText.slice(1)).toLowerCase();
         const args = spaceIdx > 0 ? trimmedText.slice(spaceIdx + 1).trim() : '';
-        this._log(`[recv] command /${cmd} args="${args.slice(0, 80)}" chat=${chatId}`);
         await this._hCommand(cmd, args, ctx);
         return;
       }
@@ -542,7 +578,6 @@ class FeishuChannel extends Channel {
       // Message dispatch
       if (!this._hMessage) return;
       if (!trimmedText && !files.length) return;
-      this._log(`[dispatch] -> onMessage text="${trimmedText.slice(0, 80)}" files=${files.length} chat=${chatId}`);
       await this._hMessage({ text: trimmedText, files }, ctx);
     });
     const settled = current.catch(e => {
@@ -713,26 +748,24 @@ class FeishuChannel extends Channel {
     if (cardState?.streaming) {
       if (cardState.lastContent && !text.startsWith(cardState.lastContent)) {
         this._log(`[edit] CardKit preview lost append-only shape for msg=${msgId}; switching to regular card edits`);
-        await this.endStreaming(String(msgId), 'Streaming preview stabilized.');
-        await this.updateCardKitMessage(String(msgId), text);
+        await this.replaceStreamingCardWithRegularCard(chatId, msgId, text, opts, 'Streaming preview stabilized.');
         return;
       } else if (text.length > FEISHU_CARD_MAX) {
         this._log(`[edit] CardKit preview length cap reached for msg=${msgId}; switching to regular card edits`);
-        await this.endStreaming(String(msgId), 'Preview truncated.');
-        await this.updateCardKitMessage(String(msgId), text);
+        await this.replaceStreamingCardWithRegularCard(chatId, msgId, text, opts, 'Preview truncated.');
         return;
       } else {
         cardState.sequence++;
         cardState.lastContent = text;
         this._logOutgoing('stream-push', `card=${cardState.cardId} seq=${cardState.sequence} chars=${text.length}`);
         try {
-          await this.client.request({
-            method: 'PUT',
-            url: `/open-apis/cardkit/v1/cards/${cardState.cardId}/elements/content/content`,
+          await this.client.cardkit.v1.cardElement.content({
+            path: { card_id: cardState.cardId, element_id: 'content' },
             data: { content: text, sequence: cardState.sequence },
           });
         } catch (e: any) {
-          this._log(`[edit] CardKit push error: ${e?.message || e}`);
+          if (isCardKitCapabilityError(e)) this.disableCardKit(describeFeishuApiError(e));
+          this._log(`[edit] CardKit push error: ${describeFeishuApiError(e)}`);
         }
         return;
       }
@@ -775,6 +808,13 @@ class FeishuChannel extends Channel {
    * via the CardKit API instead of PATCH. Call `endStreaming()` to finalize.
    */
   async sendStreamingCard(chatId: string, initialContent: string, opts?: { replyTo?: string }): Promise<string | null> {
+    if (!this.cardKitEnabled) {
+      const text = initialContent || 'Generating...';
+      return opts?.replyTo
+        ? this.replyCard(opts.replyTo, { markdown: text })
+        : this.send(chatId, text);
+    }
+
     const cardData = {
       schema: '2.0',
       config: {
@@ -796,19 +836,18 @@ class FeishuChannel extends Channel {
     // Step 1: Create card entity via CardKit
     let cardId: string;
     try {
-      const createResp: any = await this.client.request({
-        method: 'POST',
-        url: '/open-apis/cardkit/v1/cards',
+      const createResp = await this.client.cardkit.v1.card.create({
         data: {
           type: 'card_json',
           data: JSON.stringify(cardData),
         },
       });
-      cardId = createResp?.data?.card_id;
-      if (!cardId) throw new Error('no card_id returned');
+      const nextCardId = createResp?.data?.card_id;
+      if (!nextCardId) throw new Error('no card_id returned');
+      cardId = nextCardId;
     } catch (e: any) {
-      const detail = e?.response?.data ? ` resp=${JSON.stringify(e.response.data)}` : '';
-      this._log(`[streaming] CardKit create failed: ${e?.message || e}${detail}, falling back to regular card`);
+      if (isCardKitCapabilityError(e)) this.disableCardKit(describeFeishuApiError(e));
+      this._log(`[streaming] CardKit create failed: ${describeFeishuApiError(e)}, falling back to regular card`);
       return this.send(chatId, initialContent);
     }
 
@@ -847,7 +886,8 @@ class FeishuChannel extends Channel {
 
   /**
    * End streaming mode on a CardKit card.
-   * Subsequent edits still use CardKit full-card updates for reliability.
+   * Subsequent edits may continue through CardKit full-card updates or switch
+   * to regular message patching, depending on the fallback path.
    */
   async endStreaming(messageId: string, summary?: string): Promise<void> {
     const state = this.cardStates.get(messageId);
@@ -863,19 +903,47 @@ class FeishuChannel extends Channel {
 
     this._logOutgoing('endStreaming', `card=${state.cardId} seq=${state.sequence}`);
     try {
-      await this.client.request({
-        method: 'PATCH',
-        url: `/open-apis/cardkit/v1/cards/${state.cardId}/settings`,
+      await this.client.cardkit.v1.card.settings({
+        path: { card_id: state.cardId },
         data: {
           settings: JSON.stringify(settings),
           sequence: state.sequence,
         },
       });
     } catch (e: any) {
-      this._log(`[streaming] end streaming error: ${e?.message || e}`);
+      if (isCardKitCapabilityError(e)) this.disableCardKit(describeFeishuApiError(e));
+      this._log(`[streaming] end streaming error: ${describeFeishuApiError(e)}`);
     }
     state.streaming = false;
     state.lastContent = '';
+  }
+
+  private async replaceStreamingCardWithRegularCard(
+    chatId: number | string,
+    msgId: number | string,
+    text: string,
+    opts: SendOpts,
+    summary: string,
+  ): Promise<void> {
+    await this.endStreaming(String(msgId), summary);
+
+    const rows = keyboardToRows(opts.keyboard);
+    const card = buildCardFromView({ markdown: text, rows });
+    this._logOutgoing('edit', `chat=${chatId} msg_id=${msgId} chars=${text.length} rows=${rows.length}`);
+    try {
+      await this.client.im.message.patch({
+        path: { message_id: String(msgId) },
+        data: { content: JSON.stringify(card) },
+      });
+      this.cardStates.delete(String(msgId));
+    } catch (e: any) {
+      const msg = String(e?.message || e).toLowerCase();
+      if (msg.includes('not modified') || msg.includes('edit is not allowed')) {
+        this.cardStates.delete(String(msgId));
+        return;
+      }
+      throw e;
+    }
   }
 
   private async updateCardKitMessage(messageId: string, text: string): Promise<void> {
@@ -885,17 +953,21 @@ class FeishuChannel extends Channel {
     state.sequence++;
     state.lastContent = text;
     this._logOutgoing('card-update', `card=${state.cardId} seq=${state.sequence} chars=${text.length}`);
-    await this.client.request({
-      method: 'PUT',
-      url: `/open-apis/cardkit/v1/cards/${state.cardId}`,
-      data: {
-        card: {
-          type: 'card_json',
-          data: buildCardKitMarkdownData(text),
+    try {
+      await this.client.cardkit.v1.card.update({
+        path: { card_id: state.cardId },
+        data: {
+          card: {
+            type: 'card_json',
+            data: buildCardKitMarkdownData(text, { clearStreamingStatus: true }),
+          },
+          sequence: state.sequence,
         },
-        sequence: state.sequence,
-      },
-    });
+      });
+    } catch (e: any) {
+      if (isCardKitCapabilityError(e)) this.disableCardKit(describeFeishuApiError(e));
+      throw e;
+    }
   }
 
   // ========================================================================
@@ -995,7 +1067,6 @@ class FeishuChannel extends Channel {
         return requireMessageId(resp, 'send image');
       } catch (err) {
         if (isRetryableUploadError(err)) throw err;
-        this._log(`[send] image upload rejected file=${filename}: ${describeError(err)}; retrying as file`);
       }
     }
 
@@ -1096,6 +1167,13 @@ class FeishuChannel extends Channel {
   }
 
   private _logOutgoing(action: string, meta: string) {
-    this._log(`[send] ${action} ${meta}`);
+    void action;
+    void meta;
+  }
+
+  private disableCardKit(reason: string) {
+    if (!this.cardKitEnabled) return;
+    this.cardKitEnabled = false;
+    this._log(`[streaming] CardKit disabled for this process: ${reason}`);
   }
 }

@@ -91,6 +91,46 @@ function describeError(err: unknown): string {
   return parts.join(' | ');
 }
 
+function formatToolLog(activity: string | null | undefined): string {
+  const lines = String(activity || '')
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean)
+    .filter(line => (
+      /^Read\b/.test(line)
+      || /^Edit\b/.test(line)
+      || /^Write\b/.test(line)
+      || /^List files\b/.test(line)
+      || /^Search text\b/.test(line)
+      || /^Fetch\b/.test(line)
+      || /^Search web\b/.test(line)
+      || /^Update plan\b/.test(line)
+      || /^Run task\b/.test(line)
+      || /^Run shell\b/.test(line)
+      || /^Use\b/.test(line)
+      || /^Using\b/.test(line)
+      || /^Updated\b/.test(line)
+      || /^Inspect image\b/.test(line)
+      || /^Request user input\b/.test(line)
+      || /^Run multiple tools\b/.test(line)
+      || /\bdone\b/.test(line)
+      || /\bfailed\b/.test(line)
+    ));
+
+  const deduped: string[] = [];
+  const seen = new Set<string>();
+  for (const line of lines) {
+    if (seen.has(line)) continue;
+    seen.add(line);
+    deduped.push(line);
+  }
+
+  if (!deduped.length) return '-';
+
+  const summary = deduped.slice(0, 6).join(' | ');
+  return summary.length <= 240 ? summary : `${summary.slice(0, 237).trimEnd()}...`;
+}
+
 // ---------------------------------------------------------------------------
 // FeishuBot
 // ---------------------------------------------------------------------------
@@ -490,14 +530,16 @@ export class FeishuBot extends Bot {
     const files = msg.files;
     const prompt = buildPrompt(text, files);
     const start = Date.now();
-    this.log(`[handleMessage] queued chat=${ctx.chatId} agent=${session.agent} session=${session.sessionId || '(new)'} prompt="${prompt.slice(0, 100)}" files=${files.length}`);
+    this.log(
+      `[handleMessage] start chat=${ctx.chatId} agent=${session.agent} session=${session.sessionId || '(new)'} ` +
+      `files=${files.length} prompt="${prompt.slice(0, 100)}"`,
+    );
 
     const model = session.modelId || this.modelForAgent(session.agent);
     const effort = this.effortForAgent(session.agent);
     const placeholderId = await this.channel.sendStreamingCard(ctx.chatId, buildInitialPreviewMarkdown(session.agent, model, effort), { replyTo: ctx.messageId || undefined });
     if (placeholderId) {
       this.registerSessionMessage(ctx.chatId, placeholderId, session);
-      this.log(`[handleMessage] preview card sent msg_id=${placeholderId}`);
     }
 
     const taskId = this.createTaskId(session);
@@ -542,18 +584,19 @@ export class FeishuBot extends Bot {
         }, undefined, mcpSendFile);
         await livePreview?.settle();
 
-        this.log(
-          `[handleMessage] done agent=${session.agent} ok=${result.ok} elapsed=${result.elapsedS.toFixed(1)}s ` +
-          `tokens=in:${fmtTokens(result.inputTokens)}/out:${fmtTokens(result.outputTokens)}`,
-        );
-
         const finalReplyIds = await this.sendFinalReply(ctx, placeholderId, session.agent, result);
         this.registerSessionMessages(ctx.chatId, finalReplyIds, session);
-
-        this.log(`[handleMessage] final reply sent to chat=${ctx.chatId}`);
+        this.log(
+          `[handleMessage] end chat=${ctx.chatId} agent=${session.agent} ok=${result.ok} session=${result.sessionId || session.sessionId || '(new)'} ` +
+          `elapsed=${result.elapsedS.toFixed(1)}s tokens=in:${fmtTokens(result.inputTokens)}/out:${fmtTokens(result.outputTokens)} ` +
+          `tools=${formatToolLog(result.activity)}`,
+        );
       } catch (e: any) {
         const msgText = String(e?.message || e || 'Unknown error');
-        this.log(`[handleMessage] task failed chat=${ctx.chatId} error=${msgText}`);
+        this.log(
+          `[handleMessage] end chat=${ctx.chatId} agent=${session.agent} ok=false session=${session.sessionId || '(new)'} ` +
+          `elapsed=${((Date.now() - start) / 1000).toFixed(1)}s error="${msgText.slice(0, 240)}" tools=-`,
+        );
         const errorText = `**Error**\n\n\`${msgText.slice(0, 500)}\``;
         if (placeholderId) {
           try {

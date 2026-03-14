@@ -89,6 +89,8 @@ export interface StreamOpts {
   claudeExtraArgs?: string[];
   // gemini
   geminiModel?: string;
+  geminiApprovalMode?: string;
+  geminiSandbox?: boolean;
   geminiExtraArgs?: string[];
   /** Override stdin payload (used for stream-json multimodal input) */
   _stdinOverride?: string;
@@ -96,6 +98,8 @@ export interface StreamOpts {
   mcpSendFile?: import('./mcp-bridge.js').McpSendFileCallback;
   /** Path to MCP config JSON — set by prepareStreamOpts, consumed by drivers. */
   mcpConfigPath?: string;
+  /** Extra environment variables for the spawned agent process. */
+  extraEnv?: Record<string, string>;
 }
 
 export interface StreamResult {
@@ -786,6 +790,7 @@ export async function run(cmd: string[], opts: StreamOpts, parseLine: (ev: any, 
 
   const proc = spawn(shellCmd, {
     cwd: opts.workdir,
+    env: { ...process.env, ...(opts.extraEnv || {}) },
     stdio: ['pipe', 'pipe', 'pipe'],
     shell: true,
     detached: process.platform !== 'win32',
@@ -940,6 +945,7 @@ export async function doStream(opts: StreamOpts): Promise<StreamResult> {
         onLog: (message: string) => agentLog(`[mcp] ${message}`),
       });
       prepared.mcpConfigPath = bridge.configPath;
+      if (bridge.extraEnv) prepared.extraEnv = { ...(prepared.extraEnv || {}), ...bridge.extraEnv };
       if (bridge.configPath) agentLog(`[mcp] bridge started on ${bridge.configPath}`);
       else agentLog('[mcp] bridge registered with codex');
       try { agentLog(`[mcp] config content:\n${fs.readFileSync(bridge.configPath, 'utf-8')}`); } catch {};

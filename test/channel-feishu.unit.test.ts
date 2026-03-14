@@ -31,6 +31,10 @@ function createTestChannel() {
           createCalls.push(payload);
           return { data: { message_id: `msg-${createCalls.length}` } };
         }),
+        reply: vi.fn(async (payload: any) => {
+          createCalls.push(payload);
+          return { data: { message_id: `msg-${createCalls.length}` } };
+        }),
         patch: vi.fn(async (payload: any) => {
           patchCalls.push(payload);
           return { data: {} };
@@ -40,6 +44,42 @@ function createTestChannel() {
       image: { create: vi.fn() },
       file: { create: vi.fn() },
       messageResource: { get: vi.fn() },
+    },
+    cardkit: {
+      v1: {
+        card: {
+          create: vi.fn(async (payload: any) => {
+            requestCalls.push({ method: 'POST', url: '/open-apis/cardkit/v1/cards', data: payload.data });
+            return { data: { card_id: `card-${requestCalls.length}` } };
+          }),
+          settings: vi.fn(async (payload: any) => {
+            requestCalls.push({
+              method: 'PATCH',
+              url: `/open-apis/cardkit/v1/cards/${payload.path.card_id}/settings`,
+              data: payload.data,
+            });
+            return { data: {} };
+          }),
+          update: vi.fn(async (payload: any) => {
+            requestCalls.push({
+              method: 'PUT',
+              url: `/open-apis/cardkit/v1/cards/${payload.path.card_id}`,
+              data: payload.data,
+            });
+            return { data: {} };
+          }),
+        },
+        cardElement: {
+          content: vi.fn(async (payload: any) => {
+            requestCalls.push({
+              method: 'PUT',
+              url: `/open-apis/cardkit/v1/cards/${payload.path.card_id}/elements/${payload.path.element_id}/content`,
+              data: payload.data,
+            });
+            return { data: {} };
+          }),
+        },
+      },
     },
     request: vi.fn(async (payload: any) => {
       requestCalls.push(payload);
@@ -152,7 +192,7 @@ describe('FeishuChannel cards', () => {
 });
 
 describe('FeishuChannel streaming cards', () => {
-  it('streams append-only body content and falls back to regular edits when content rewrites', async () => {
+  it('streams append-only body content and falls back to regular card edits when content rewrites', async () => {
     const { ch, createCalls, patchCalls, requestCalls } = createTestChannel();
 
     expect(await ch.sendStreamingCard('chat-1', '● codex · 0s')).toBe('msg-1');
@@ -183,13 +223,42 @@ describe('FeishuChannel streaming cards', () => {
       call.url === '/open-apis/cardkit/v1/cards/card-1/settings',
     );
     expect(endReq?.data.sequence).toBe(3);
-    const updateReq = requestCalls.find(call =>
+    expect(requestCalls.some(call =>
       call.method === 'PUT' &&
       call.url === '/open-apis/cardkit/v1/cards/card-1' &&
       call.data?.card?.type === 'card_json',
-    );
-    expect(updateReq).toBeTruthy();
-    expect(patchCalls).toHaveLength(0);
+    )).toBe(false);
+    expect(patchCalls).toHaveLength(1);
+    expect(JSON.parse(patchCalls[0].data.content)).toEqual({
+      config: { wide_screen_mode: true, update_multi: true },
+      elements: [{ tag: 'markdown', content: 'rewritten output' }],
+    });
+
+    await ch.editMessage('chat-1', 'msg-1', 'rewritten output v2');
+
+    expect(patchCalls).toHaveLength(2);
+    expect(JSON.parse(patchCalls[1].data.content)).toEqual({
+      config: { wide_screen_mode: true, update_multi: true },
+      elements: [{ tag: 'markdown', content: 'rewritten output v2' }],
+    });
+  });
+
+  it('disables CardKit after a 400 create failure and falls back to regular cards', async () => {
+    const { ch, createCalls } = createTestChannel();
+    const createCard = vi.spyOn((ch as any).client.cardkit.v1.card, 'create');
+    createCard.mockRejectedValueOnce(Object.assign(new Error('Request failed with status code 400'), {
+      config: { method: 'post', url: '/open-apis/cardkit/v1/cards' },
+      response: { data: { code: 200650, msg: 'permission denied' } },
+    }));
+
+    expect(await ch.sendStreamingCard('chat-1', '● codex · 0s')).toBe('msg-1');
+    expect(createCalls).toHaveLength(1);
+    expect(JSON.parse(createCalls[0].data.content).elements[0].content).toBe('● codex · 0s');
+
+    createCard.mockClear();
+    expect(await ch.sendStreamingCard('chat-1', '● codex · 1s')).toBe('msg-2');
+    expect(createCard).not.toHaveBeenCalled();
+    expect(createCalls).toHaveLength(2);
   });
 });
 

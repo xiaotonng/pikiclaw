@@ -242,7 +242,7 @@ Options:
   -a, --agent <agent>       AI agent: claude | codex  [default: codex]
   -m, --model <model>       Default model, switchable in chat via /models
   -w, --workdir <dir>       Working directory for the agent  [default: current process cwd]
-  --full-access             Codex full-access + Claude bypassPermissions  [default]
+  --full-access             Codex full-access + Claude bypassPermissions + Gemini yolo/no-sandbox  [default]
   --safe-mode               Use safer agent permission modes
   --allowed-ids <id,id>     Comma-separated chat/user ID whitelist
   --timeout <seconds>       Max seconds per agent request  [default: 1800]
@@ -274,6 +274,10 @@ Environment variables (per agent):
   CODEX_REASONING_EFFORT     Reasoning effort (default: xhigh)
   CODEX_FULL_ACCESS          Full-access mode (default: true)
   CODEX_EXTRA_ARGS           Extra CLI args for codex
+  GEMINI_MODEL               Gemini model name
+  GEMINI_APPROVAL_MODE       Approval mode (default: yolo)
+  GEMINI_SANDBOX             Sandbox mode (default: false)
+  GEMINI_EXTRA_ARGS          Extra CLI args for gemini
 
 Bot commands (available once running):
   /sessions   List or switch coding sessions
@@ -434,9 +438,13 @@ Docs: https://github.com/xiaotonng/pikiclaw
   if (args.safeMode) {
     process.env.CODEX_FULL_ACCESS = 'false';
     process.env.CLAUDE_PERMISSION_MODE = 'default';
+    process.env.GEMINI_APPROVAL_MODE = 'default';
+    process.env.GEMINI_SANDBOX = 'true';
   } else if (args.fullAccess || envBool('PIKICLAW_FULL_ACCESS', true)) {
     process.env.CODEX_FULL_ACCESS = 'true';
     process.env.CLAUDE_PERMISSION_MODE = 'bypassPermissions';
+    process.env.GEMINI_APPROVAL_MODE = 'yolo';
+    process.env.GEMINI_SANDBOX = 'false';
   }
   const stopUserConfigSync = startUserConfigSync({
     overrides: runtimeConfig,

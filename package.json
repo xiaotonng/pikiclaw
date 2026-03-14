@@ -1,7 +1,7 @@
 {
   "name": "pikiclaw",
-  "version": "0.2.47",
-  "description": "The best IM-driven remote coding experience. Bridge AI coding agents to any IM.",
+  "version": "0.2.48",
+  "description": "Put the world's smartest AI agents in your pocket. Command local Claude & Gemini via IM. | 让最好用的 IM 变成你电脑上的顶级 Agent 控制台",
   "type": "module",
   "bin": {
     "pikiclaw": "dist/cli.js"
