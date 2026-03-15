@@ -7,7 +7,7 @@ import { Badge, Button, Card, Dot, Label, Modal, ModalHeader, SectionLabel, Sele
 import { BrandBadge, BrandIcon } from './BrandIcon';
 import { cn, getAgentMeta } from '../utils';
 import { formatUsageSummary, usageBadgeText, usageTone } from '../usage';
-import type { AgentRuntimeStatus, AgentStatusResponse, PermissionStatus } from '../types';
+import type { AgentRuntimeStatus, AgentStatusResponse, ExtensionStatus, PermissionStatus } from '../types';
 
 const effortOptions: Record<string, string[]> = {
   claude: ['low', 'medium', 'high'],
@@ -459,6 +459,99 @@ function SystemPermissions() {
         onClose={() => setGuide(null)}
         onRefresh={handleRefreshPermissionState}
       />
+    </Card>
+  );
+}
+
+export function Extensions({ onOpenPlaywrightSetup, onOpenDesktopSetup }: { onOpenPlaywrightSetup: () => void; onOpenDesktopSetup: () => void }) {
+  const { toast, locale } = useStore();
+  const t = createT(locale);
+  const [ext, setExt] = useState<ExtensionStatus | null>(null);
+  const [disabling, setDisabling] = useState(false);
+
+  const refreshExt = useCallback(() => {
+    api.getExtensions().then(setExt).catch(() => {});
+  }, []);
+
+  useEffect(() => { refreshExt(); }, [refreshExt]);
+
+  const browserIcon = (
+    <MacSymbol>
+      <rect x="3" y="4" width="18" height="13" rx="2" />
+      <path d="M8 21h8" />
+      <path d="M12 17v4" />
+    </MacSymbol>
+  );
+
+  const desktopIcon = (
+    <MacSymbol>
+      <rect x="2" y="3" width="20" height="14" rx="2" />
+      <path d="M8 21h8" />
+      <path d="M12 17v4" />
+      <path d="M7 9h3" />
+      <path d="M7 12h5" />
+    </MacSymbol>
+  );
+
+  const browserHasToken = ext?.browser.hasToken ?? false;
+  const desktopEnabled = ext?.desktop.enabled ?? false;
+  const desktopRunning = ext?.desktop.running ?? false;
+
+  const desktopStatus = desktopRunning
+    ? t('ext.running')
+    : desktopEnabled
+      ? t('ext.enabled')
+      : ext?.desktop.installed === false
+        ? t('ext.notInstalled')
+        : t('ext.disabled');
+
+  const desktopStatusVariant = desktopRunning ? 'ok' as const : desktopEnabled ? 'accent' as const : 'muted' as const;
+
+  const handleDesktopDisable = async () => {
+    setDisabling(true);
+    try {
+      const r = await api.desktopToggle(false);
+      if (r.ok) {
+        toast(t('ext.desktopStopped'));
+        refreshExt();
+      } else {
+        toast(r.error || t('ext.desktopInstallFailed'), false);
+      }
+    } catch {
+      toast(t('ext.desktopInstallFailed'), false);
+    } finally {
+      setDisabling(false);
+    }
+  };
+
+  return (
+    <Card>
+      <div className="mb-4 text-sm leading-relaxed text-fg-4">{t('ext.hint')}</div>
+      <div className="divide-y divide-edge">
+        <SettingRow
+          icon={browserIcon}
+          title={t('ext.browser')}
+          description={t('ext.browserDesc')}
+          meta={t('ext.browserExtMode')}
+          status={browserHasToken ? t('ext.tokenSet') : t('ext.tokenMissing')}
+          statusVariant={browserHasToken ? 'ok' : 'warn'}
+          actionLabel={t('ext.setup')}
+          onAction={onOpenPlaywrightSetup}
+        />
+        <SettingRow
+          icon={desktopIcon}
+          title={t('ext.desktop')}
+          description={t('ext.desktopDesc')}
+          meta={desktopEnabled && ext?.desktop.appiumUrl ? `Appium: ${ext.desktop.appiumUrl}` : undefined}
+          status={desktopStatus}
+          statusVariant={desktopStatusVariant}
+          actionLabel={desktopEnabled
+            ? (disabling ? t('ext.disabling') : t('ext.disable'))
+            : t('ext.setup')}
+          actionDisabled={disabling}
+          onAction={desktopEnabled ? handleDesktopDisable : onOpenDesktopSetup}
+        />
+      </div>
     </Card>
   );
 }

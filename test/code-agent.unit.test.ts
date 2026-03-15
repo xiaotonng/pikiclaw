@@ -365,9 +365,9 @@ rl.on('line', (line) => {
     expect(result3.inputTokens).toBe(11417);
     expect(result3.cachedInputTokens).toBe(10752);
     expect(result3.outputTokens).toBe(125);
-    expect(result3.contextUsedTokens).toBe(35024);
-    expect(result3.contextPercent).toBe(13.6);
-    expect(previewMeta.some(meta => meta?.contextPercent === 13.6)).toBe(true);
+    expect(result3.contextUsedTokens).toBe(22169);
+    expect(result3.contextPercent).toBe(8.6);
+    expect(previewMeta.some(meta => meta?.contextPercent === 8.6)).toBe(true);
   });
 
   it('keeps long codex commentary lines intact and runs turns in parallel across sessions', async () => {

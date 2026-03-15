@@ -94,6 +94,10 @@ function claudeParse(ev: any, s: any) {
       s.cachedInputTokens = u?.cache_read_input_tokens ?? null;
       s.cacheCreationInputTokens = u?.cache_creation_input_tokens ?? null;
       s.outputTokens = null;
+      // Snapshot per-call input total so result-event cumulative values don't
+      // inflate the context-window percentage.
+      const callCtx = (u?.input_tokens ?? 0) + (u?.cache_read_input_tokens ?? 0) + (u?.cache_creation_input_tokens ?? 0);
+      if (callCtx > 0) s.contextUsedTokens = callCtx;
     }
     if (inner.type === 'content_block_delta') {
       const d = inner.delta || {};

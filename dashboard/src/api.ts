@@ -1,6 +1,7 @@
 import type {
   AgentStatusResponse,
   AppState,
+  ExtensionStatus,
   HostInfo,
   LsDirResult,
   PermissionRequestResult,
@@ -95,4 +96,11 @@ export const api = {
   restart: () => post<{ ok: boolean; error?: string | null }>('/api/restart', {}),
   switchWorkdir: (path: string) => post<{ ok: boolean; workdir?: string; error?: string }>('/api/switch-workdir', { path }),
   lsDir: (dir?: string) => json<LsDirResult>(`/api/ls-dir${dir ? '?path=' + encodeURIComponent(dir) : ''}`),
+  getExtensions: () => json<ExtensionStatus>('/api/extensions'),
+  saveExtensionToken: (token: string, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; valid?: boolean; error?: string }>('/api/save-extension-token', { token }, { timeoutMs: 20_000, ...opts }),
+  desktopInstall: (opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; installed?: boolean; error?: string }>('/api/desktop-install', {}, { timeoutMs: 300_000, ...opts }),
+  desktopToggle: (enabled: boolean, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; enabled?: boolean; error?: string }>('/api/desktop-toggle', { enabled }, { timeoutMs: 60_000, ...opts }),
 };

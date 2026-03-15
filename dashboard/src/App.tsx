@@ -6,7 +6,8 @@ import { fmtBytes } from './utils';
 import { Sidebar } from './components/Sidebar';
 import { ConfigTab } from './components/ConfigTab';
 import { SessionsTab } from './components/SessionsTab';
-import { TelegramModal, FeishuModal, WorkdirModal, SessionDetailModal } from './components/Modals';
+import { ExtensionsTab } from './components/ExtensionsTab';
+import { TelegramModal, FeishuModal, WorkdirModal, SessionDetailModal, PlaywrightSetupModal, DesktopSetupModal } from './components/Modals';
 import { Badge, Button, Dot, Toasts } from './components/ui';
 import { api } from './api';
 import type { SessionInfo } from './types';
@@ -18,6 +19,8 @@ type ModalState =
   | { type: 'telegram' }
   | { type: 'feishu' }
   | { type: 'workdir' }
+  | { type: 'playwright-setup' }
+  | { type: 'desktop-setup' }
   | { type: 'session'; agent: string; sessionId: string; session: SessionInfo | null };
 
 export function App() {
@@ -67,7 +70,7 @@ export function App() {
   const hostSummary = host ? `${host.hostName || '—'}  ·  ${host.cpuCount} cores  ·  ${fmtBytes(host.memoryUsed || (host.totalMem || 0) - (host.freeMem || 0))} / ${fmtBytes(host.totalMem || 0)}` : '';
   const currentWorkdir = state?.bot?.workdir || state?.runtimeWorkdir || state?.config.workdir || '';
 
-  const tabTitles: Record<string, string> = { config: t('tab.config'), sessions: t('tab.sessions') };
+  const tabTitles: Record<string, string> = { config: t('tab.config'), extensions: t('tab.extensions'), sessions: t('tab.sessions') };
 
   return (
     <div className="noise-overlay">
@@ -112,6 +115,7 @@ export function App() {
               </div>
             </div>
             {tab === 'config' && <ConfigTab onOpenTelegram={() => setModal({ type: 'telegram' })} onOpenFeishu={() => setModal({ type: 'feishu' })} />}
+            {tab === 'extensions' && <ExtensionsTab onOpenPlaywrightSetup={() => setModal({ type: 'playwright-setup' })} onOpenDesktopSetup={() => setModal({ type: 'desktop-setup' })} />}
             {tab === 'sessions' && <SessionsTab onOpenSession={handleOpenSession} />}
           </div>
         </main>
@@ -119,6 +123,8 @@ export function App() {
 
       <TelegramModal open={modal?.type === 'telegram'} onClose={closeModal} />
       <FeishuModal open={modal?.type === 'feishu'} onClose={closeModal} />
+      <PlaywrightSetupModal open={modal?.type === 'playwright-setup'} onClose={closeModal} onSaved={() => reload()} />
+      <DesktopSetupModal open={modal?.type === 'desktop-setup'} onClose={closeModal} onSaved={() => reload()} />
       <WorkdirModal open={modal?.type === 'workdir'} onClose={closeModal} />
       <SessionDetailModal
         open={modal?.type === 'session'}

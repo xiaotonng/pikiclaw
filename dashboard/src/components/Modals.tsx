@@ -6,6 +6,8 @@ import { Modal, ModalHeader, Button, Input, Label, Badge } from './ui';
 import { fmtTime, getAgentMeta } from '../utils';
 import type { SessionInfo, SessionTailMessage, DirEntry } from '../types';
 
+const PLAYWRIGHT_MCP_EXTENSION_URL = 'https://chromewebstore.google.com/detail/playwright-mcp-bridge/mmlmfjhmonkocbjadbfplnigmagldckm';
+
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && (
     error.name === 'AbortError'
@@ -525,6 +527,229 @@ export function SessionDetailModal({ open, onClose, agent, sessionId, session }:
             );
           })
         )}
+      </div>
+    </Modal>
+  );
+}
+
+/* ═══════════════════════════════════════════════════
+   Playwright Setup Modal
+   ═══════════════════════════════════════════════════ */
+const PLAYWRIGHT_MCP_EXTENSION_STATUS_URL = 'chrome-extension://mmlmfjhmonkocbjadbfplnigmagldckm/status.html';
+
+export function PlaywrightSetupModal({ open, onClose, onSaved }: { open: boolean; onClose: () => void; onSaved?: () => void }) {
+  const { toast, locale } = useStore();
+  const t = createT(locale);
+  const [token, setToken] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
+
+  useEffect(() => {
+    if (open) {
+      setSaving(false);
+      setResult(null);
+      api.getExtensions().then(ext => {
+        setToken(ext.browser.token || '');
+      }).catch(() => {
+        setToken('');
+      });
+    }
+  }, [open]);
+
+  const handleSave = async () => {
+    if (!token.trim()) { toast(t('modal.inputToken'), false); return; }
+    setSaving(true);
+    setResult(null);
+    try {
+      const r = await api.saveExtensionToken(token.trim());
+      if (r.ok) {
+        setResult({ ok: true, text: '\u2713 ' + t('ext.tokenSaved') });
+        toast(t('ext.tokenSaved'));
+        onSaved?.();
+        setTimeout(onClose, 600);
+      } else {
+        setResult({ ok: false, text: '\u2717 ' + (r.error || t('ext.tokenInvalid')) });
+      }
+    } catch {
+      setResult({ ok: false, text: '\u2717 ' + t('ext.tokenInvalid') });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal open={open} onClose={onClose}>
+      <ModalHeader title={t('ext.setupBrowser')} description={t('ext.setupBrowserDesc')} onClose={onClose} />
+      <div className="space-y-5">
+        {/* Step 1: Install */}
+        <div className="rounded-lg border border-edge bg-panel-alt p-4">
+          <div className="text-sm font-medium text-fg-2 mb-1">{t('ext.step1Title')}</div>
+          <div className="text-xs text-fg-4 mb-3">{t('ext.step1Desc')}</div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => window.open(PLAYWRIGHT_MCP_EXTENSION_URL, '_blank')}
+          >
+            {t('ext.step1Action')}
+          </Button>
+        </div>
+
+        {/* Step 2: Open extension status page to get token */}
+        <div className="rounded-lg border border-edge bg-panel-alt p-4">
+          <div className="text-sm font-medium text-fg-2 mb-1">{t('ext.step2Title')}</div>
+          <div className="text-xs text-fg-4 mb-3">{t('ext.step2Desc')}</div>
+          <div className="flex items-center gap-2">
+            <Input
+              className="font-mono text-xs flex-1"
+              value={PLAYWRIGHT_MCP_EXTENSION_STATUS_URL}
+              readOnly
+              onClick={e => (e.target as HTMLInputElement).select()}
+            />
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                navigator.clipboard.writeText(PLAYWRIGHT_MCP_EXTENSION_STATUS_URL);
+                toast(t('ext.step2Copied'));
+              }}
+            >
+              {t('ext.step2Action')}
+            </Button>
+          </div>
+        </div>
+
+        {/* Step 3: Paste token */}
+        <div className="rounded-lg border border-edge bg-panel-alt p-4">
+          <div className="text-sm font-medium text-fg-2 mb-1">{t('ext.step3Title')}</div>
+          <div className="text-xs text-fg-4 mb-3">{t('ext.step3Desc')}</div>
+          <Input
+            className="font-mono text-xs"
+            placeholder={t('ext.tokenPlaceholder')}
+            value={token}
+            onChange={e => setToken(e.target.value)}
+          />
+          {result && (
+            <div className="mt-2 text-xs" style={{ color: result.ok ? 'var(--th-ok)' : 'var(--th-err)' }}>
+              {result.text}
+            </div>
+          )}
+        </div>
+      </div>
+      <div className="flex justify-end gap-2 mt-6">
+        <Button variant="ghost" onClick={onClose}>{t('modal.cancel')}</Button>
+        <Button variant="primary" disabled={saving || !token.trim()} onClick={handleSave}>
+          {saving ? t('ext.savingToken') : t('ext.saveToken')}
+        </Button>
+      </div>
+    </Modal>
+  );
+}
+
+/* ═══════════════════════════════════════════════════
+   Desktop Setup Modal
+   ═══════════════════════════════════════════════════ */
+export function DesktopSetupModal({ open, onClose, onSaved }: { open: boolean; onClose: () => void; onSaved?: () => void }) {
+  const { toast, locale } = useStore();
+  const t = createT(locale);
+  const [installing, setInstalling] = useState(false);
+  const [installed, setInstalled] = useState(false);
+  const [enabling, setEnabling] = useState(false);
+  const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
+
+  useEffect(() => {
+    if (open) {
+      setInstalling(false);
+      setEnabling(false);
+      setResult(null);
+      api.getExtensions().then(ext => {
+        setInstalled(ext.desktop.installed);
+      }).catch(() => {});
+    }
+  }, [open]);
+
+  const handleInstall = async () => {
+    setInstalling(true);
+    setResult(null);
+    try {
+      const r = await api.desktopInstall();
+      if (r.ok) {
+        setInstalled(true);
+        setResult({ ok: true, text: '\u2713 ' + t('ext.desktopInstalled') });
+        toast(t('ext.desktopInstalled'));
+      } else {
+        setResult({ ok: false, text: '\u2717 ' + (r.error || t('ext.desktopInstallFailed')) });
+      }
+    } catch {
+      setResult({ ok: false, text: '\u2717 ' + t('ext.desktopInstallFailed') });
+    } finally {
+      setInstalling(false);
+    }
+  };
+
+  const handleEnable = async () => {
+    setEnabling(true);
+    setResult(null);
+    try {
+      const r = await api.desktopToggle(true);
+      if (r.ok) {
+        setResult({ ok: true, text: '\u2713 ' + t('ext.desktopStarted') });
+        toast(t('ext.desktopStarted'));
+        onSaved?.();
+        setTimeout(onClose, 600);
+      } else {
+        setResult({ ok: false, text: '\u2717 ' + (r.error || t('ext.desktopInstallFailed')) });
+      }
+    } catch {
+      setResult({ ok: false, text: '\u2717 ' + t('ext.desktopInstallFailed') });
+    } finally {
+      setEnabling(false);
+    }
+  };
+
+  return (
+    <Modal open={open} onClose={onClose}>
+      <ModalHeader title={t('ext.setupDesktop')} description={t('ext.setupDesktopDesc')} onClose={onClose} />
+      <div className="space-y-5">
+        {/* Step 1: Install */}
+        <div className="rounded-lg border border-edge bg-panel-alt p-4">
+          <div className="text-sm font-medium text-fg-2 mb-1">{t('ext.desktopStep1Title')}</div>
+          <div className="text-xs text-fg-4 mb-3">{t('ext.desktopStep1Desc')}</div>
+          {result && !installed && (
+            <div className="mb-2 text-xs" style={{ color: result.ok ? 'var(--th-ok)' : 'var(--th-err)' }}>
+              {result.text}
+            </div>
+          )}
+          <Button
+            variant={installed ? 'ghost' : 'outline'}
+            size="sm"
+            disabled={installing || installed}
+            onClick={handleInstall}
+          >
+            {installing ? t('ext.desktopInstalling') : installed ? t('ext.desktopStep1Done') : t('ext.desktopStep1Action')}
+          </Button>
+        </div>
+
+        {/* Step 2: Enable & Start */}
+        <div className="rounded-lg border border-edge bg-panel-alt p-4">
+          <div className="text-sm font-medium text-fg-2 mb-1">{t('ext.desktopStep2Title')}</div>
+          <div className="text-xs text-fg-4 mb-3">{t('ext.desktopStep2Desc')}</div>
+          {result && installed && (
+            <div className="mb-2 text-xs" style={{ color: result.ok ? 'var(--th-ok)' : 'var(--th-err)' }}>
+              {result.text}
+            </div>
+          )}
+          <Button
+            variant="primary"
+            size="sm"
+            disabled={!installed || enabling}
+            onClick={handleEnable}
+          >
+            {enabling ? t('ext.desktopStarting') : t('ext.desktopStep2Action')}
+          </Button>
+        </div>
+      </div>
+      <div className="flex justify-end gap-2 mt-6">
+        <Button variant="ghost" onClick={onClose}>{t('modal.cancel')}</Button>
       </div>
     </Modal>
   );

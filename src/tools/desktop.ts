@@ -155,11 +155,9 @@ function desktopUnsupported(): ToolResult {
 
 function desktopSetupHint(message: string): ToolResult {
   return toolResult(
-    `${message}\nInstall/start Appium Mac2 first:\n` +
-    '1. npm install -g appium\n' +
-    '2. appium driver install mac2\n' +
-    '3. appium\n' +
-    '4. Grant Accessibility permission to the terminal app running pikiclaw.',
+    `${message}\n` +
+    'Enable desktop automation in the pikiclaw dashboard (Extensions > Desktop Automation > Setup).\n' +
+    'Also ensure Accessibility permission is granted to the terminal app running pikiclaw.',
     true,
   );
 }

@@ -19,6 +19,7 @@ export function Sidebar({
 
   const tabs = [
     { key: 'config', label: t('tab.config') },
+    { key: 'extensions', label: t('tab.extensions') },
     { key: 'sessions', label: t('tab.sessions') },
   ];
 

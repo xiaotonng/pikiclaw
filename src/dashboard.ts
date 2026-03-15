@@ -8,7 +8,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { exec, execFileSync, execSync } from 'node:child_process';
+import { exec, execFileSync, execSync, spawn, type ChildProcess } from 'node:child_process';
 import { collectSetupState, isSetupReady, type SetupState } from './onboarding.js';
 import { loadUserConfig, saveUserConfig, applyUserConfig, resolveUserWorkdir, setUserWorkdir, hasUserConfigFile, type UserConfig } from './user-config.js';
 import { listAgents, getSessionTail, getSessions, listModels, type AgentDetectOptions, type SessionInfo, type SessionListResult, type UsageResult } from './code-agent.js';
@@ -18,6 +18,7 @@ import type { Bot } from './bot.js';
 import { validateFeishuConfig, validateTelegramConfig } from './config-validation.js';
 import { getDashboardHtml } from './dashboard-ui.js';
 import { shouldCacheChannelStates } from './channel-states.js';
+import { resolveGuiIntegrationConfig, type GuiIntegrationConfig } from './mcp-bridge.js';
 import {
   formatActiveTaskRestartError,
   getActiveTaskCount,
@@ -425,6 +426,105 @@ async function parseJsonBody(req: http.IncomingMessage): Promise<any> {
     req.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString())); } catch { reject(new Error('Invalid JSON')); } });
     req.on('error', reject);
   });
+}
+
+// ---------------------------------------------------------------------------
+// Appium lifecycle management
+// ---------------------------------------------------------------------------
+
+const APPIUM_INSTALL_DIR = path.join(os.homedir(), '.pikiclaw', 'appium');
+let managedAppiumProc: ChildProcess | null = null;
+
+function findAppiumBin(): string | null {
+  const localBin = path.join(APPIUM_INSTALL_DIR, 'node_modules', '.bin', 'appium');
+  if (fs.existsSync(localBin)) return localBin;
+  try {
+    const result = execFileSync('which', ['appium'], { encoding: 'utf-8', timeout: 5_000 });
+    return result.trim() || null;
+  } catch { return null; }
+}
+
+function isAppiumInstalled(): boolean {
+  const bin = findAppiumBin();
+  if (!bin) return false;
+  try {
+    const out = execFileSync(bin, ['driver', 'list', '--installed', '--json'], { encoding: 'utf-8', timeout: 15_000 });
+    return out.includes('mac2');
+  } catch { return false; }
+}
+
+async function installAppium(log: (msg: string) => void): Promise<string> {
+  fs.mkdirSync(APPIUM_INSTALL_DIR, { recursive: true });
+  const pkgPath = path.join(APPIUM_INSTALL_DIR, 'package.json');
+  if (!fs.existsSync(pkgPath)) fs.writeFileSync(pkgPath, '{"private":true}');
+
+  const existingBin = findAppiumBin();
+  if (!existingBin) {
+    log('Installing Appium...');
+    execFileSync('npm', ['install', '--save', 'appium'], { cwd: APPIUM_INSTALL_DIR, stdio: 'pipe', timeout: 300_000 });
+  }
+  const bin = findAppiumBin();
+  if (!bin) throw new Error('Appium binary not found after install');
+
+  try {
+    const out = execFileSync(bin, ['driver', 'list', '--installed', '--json'], { encoding: 'utf-8', timeout: 15_000 });
+    if (!out.includes('mac2')) {
+      log('Installing Mac2 driver...');
+      execFileSync(bin, ['driver', 'install', 'mac2'], { stdio: 'pipe', timeout: 120_000 });
+    }
+  } catch {
+    log('Installing Mac2 driver...');
+    execFileSync(bin, ['driver', 'install', 'mac2'], { stdio: 'pipe', timeout: 120_000 });
+  }
+
+  log('Appium installation complete.');
+  return bin;
+}
+
+function checkAppiumReachable(appiumUrl: string): Promise<boolean> {
+  return new Promise(resolve => {
+    const url = new URL('/status', appiumUrl);
+    const req = http.get(url, { timeout: 3_000 }, (res) => {
+      res.resume();
+      resolve(res.statusCode === 200);
+    });
+    req.on('error', () => resolve(false));
+    req.on('timeout', () => { req.destroy(); resolve(false); });
+  });
+}
+
+async function startManagedAppium(appiumUrl: string, log: (msg: string) => void): Promise<void> {
+  if (await checkAppiumReachable(appiumUrl)) {
+    log('Appium server is already running.');
+    return;
+  }
+  stopManagedAppium();
+
+  const bin = findAppiumBin();
+  if (!bin) throw new Error('Appium is not installed');
+
+  const port = new URL(appiumUrl).port || '4723';
+  log('Starting Appium server...');
+  managedAppiumProc = spawn(bin, ['--port', port, '--log-level', 'warn'], { stdio: 'ignore' });
+  managedAppiumProc.unref();
+  managedAppiumProc.on('exit', () => { managedAppiumProc = null; });
+
+  for (let i = 0; i < 30; i++) {
+    await new Promise(r => setTimeout(r, 1_000));
+    if (await checkAppiumReachable(appiumUrl)) {
+      log('Appium server is ready.');
+      return;
+    }
+  }
+  stopManagedAppium();
+  throw new Error('Appium server failed to start within 30 seconds');
+}
+
+function stopManagedAppium(): void {
+  if (managedAppiumProc && !managedAppiumProc.killed) {
+    managedAppiumProc.kill();
+    managedAppiumProc = null;
+  }
 }
 
 function json(res: http.ServerResponse, data: unknown, status = 200) {
@@ -926,6 +1026,118 @@ export async function startDashboard(opts: DashboardOptions = {}): Promise<Dashb
         }
         const saved = setUserWorkdir(resolvedPath);
         return json(res, { ok: true, workdir: saved.workdir });
+      }
+
+      // Extension config status
+      if (url.pathname === '/api/extensions' && method === 'GET') {
+        const config = loadUserConfig();
+        const gui = resolveGuiIntegrationConfig(config);
+        const installed = isAppiumInstalled();
+        return json(res, {
+          browser: {
+            hasToken: !!gui.browserExtensionToken,
+            token: gui.browserExtensionToken || '',
+          },
+          desktop: {
+            enabled: gui.desktopEnabled,
+            installed,
+            running: managedAppiumProc != null && !managedAppiumProc.killed,
+            appiumUrl: gui.desktopAppiumUrl,
+          },
+        });
+      }
+
+      // Save extension token and validate
+      if (url.pathname === '/api/save-extension-token' && method === 'POST') {
+        const body = await parseJsonBody(req);
+        const token = String(body.token || '').trim();
+        if (!token) return json(res, { ok: false, error: 'Token is required' }, 400);
+
+        // Validate by spawning Playwright MCP with the token — if the process starts
+        // and emits valid JSON-RPC output, the token is valid.
+        dashboardLog('[extensions] validating extension token...');
+        try {
+          const { spawn } = await import('node:child_process');
+          const proc = spawn('npx', ['-y', '@playwright/mcp@latest', '--extension'], {
+            stdio: ['pipe', 'pipe', 'pipe'],
+            env: { ...process.env, PLAYWRIGHT_MCP_EXTENSION_TOKEN: token },
+            timeout: 12_000,
+          });
+          let stdout = '';
+          proc.stdout?.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
+          let stderr = '';
+          proc.stderr?.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
+          const exitCode = await new Promise<number | null>((resolve) => {
+            const timer = setTimeout(() => {
+              // Process staying alive means it connected successfully (MCP stdio server)
+              proc.kill('SIGTERM');
+              resolve(0);
+            }, 5_000);
+            proc.on('exit', (code) => { clearTimeout(timer); resolve(code); });
+            proc.on('error', () => { clearTimeout(timer); resolve(1); });
+          });
+
+          // If the process started and didn't immediately exit with an error, the token is good.
+          // MCP stdio servers stay alive waiting for input, so a timeout kill is expected success.
+          const valid = exitCode === 0 || exitCode === null;
+          if (valid) {
+            const config = loadUserConfig();
+            saveUserConfig({ ...config, browserGuiExtensionToken: token });
+            applyUserConfig(loadUserConfig());
+            dashboardLog('[extensions] extension token saved and validated');
+            return json(res, { ok: true, valid: true });
+          }
+          dashboardLog(`[extensions] token validation failed: exit=${exitCode} stderr=${stderr.slice(0, 200)}`);
+          return json(res, { ok: false, error: 'Token validation failed — the extension did not accept this token.' });
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err);
+          dashboardLog(`[extensions] token validation error: ${detail}`);
+          return json(res, { ok: false, error: detail }, 500);
+        }
+      }
+
+      // Desktop: install Appium + Mac2 driver
+      if (url.pathname === '/api/desktop-install' && method === 'POST') {
+        if (process.platform !== 'darwin') {
+          return json(res, { ok: false, error: 'Desktop automation is only supported on macOS' }, 400);
+        }
+        dashboardLog('[desktop] install requested');
+        try {
+          await installAppium(msg => dashboardLog(`[desktop] ${msg}`));
+          return json(res, { ok: true, installed: true });
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err);
+          dashboardLog(`[desktop] install failed: ${detail}`);
+          return json(res, { ok: false, error: detail }, 500);
+        }
+      }
+
+      // Desktop: toggle enable/disable (start/stop Appium)
+      if (url.pathname === '/api/desktop-toggle' && method === 'POST') {
+        const body = await parseJsonBody(req);
+        const enabled = !!body.enabled;
+        dashboardLog(`[desktop] toggle enabled=${enabled}`);
+        try {
+          const config = loadUserConfig();
+          if (enabled) {
+            const gui = resolveGuiIntegrationConfig(config);
+            if (!isAppiumInstalled()) {
+              await installAppium(msg => dashboardLog(`[desktop] ${msg}`));
+            }
+            await startManagedAppium(gui.desktopAppiumUrl, msg => dashboardLog(`[desktop] ${msg}`));
+            saveUserConfig({ ...config, desktopGuiEnabled: true });
+            applyUserConfig(loadUserConfig());
+          } else {
+            stopManagedAppium();
+            saveUserConfig({ ...config, desktopGuiEnabled: false });
+            applyUserConfig(loadUserConfig());
+          }
+          return json(res, { ok: true, enabled });
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err);
+          dashboardLog(`[desktop] toggle failed: ${detail}`);
+          return json(res, { ok: false, error: detail }, 500);
+        }
       }
 
       // List directory entries for tree browser

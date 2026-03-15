@@ -174,21 +174,28 @@ export function resolveGuiIntegrationConfig(
 export function buildSupplementalMcpServers(gui: GuiIntegrationConfig = resolveGuiIntegrationConfig()): RegisteredMcpServer[] {
   const servers: RegisteredMcpServer[] = [];
   if (gui.browserEnabled) {
-    const args = ['-y', '@playwright/mcp@latest'];
-    if (gui.browserUseExtension) {
-      args.push('--extension');
+    // In extension mode, skip browser integration if no token is configured —
+    // without a token, each connection requires a manual browser authorization
+    // click that remote users cannot perform.
+    if (gui.browserUseExtension && !gui.browserExtensionToken) {
+      // Silently skip — the dashboard Extensions section will show "Token required".
     } else {
-      if (gui.browserHeadless) args.push('--headless');
-      if (gui.browserIsolated) args.push('--isolated');
+      const args = ['-y', '@playwright/mcp@latest'];
+      if (gui.browserUseExtension) {
+        args.push('--extension');
+      } else {
+        if (gui.browserHeadless) args.push('--headless');
+        if (gui.browserIsolated) args.push('--isolated');
+      }
+      servers.push({
+        name: 'pikiclaw-browser',
+        command: 'npx',
+        args,
+        env: gui.browserUseExtension && gui.browserExtensionToken
+          ? { PLAYWRIGHT_MCP_EXTENSION_TOKEN: gui.browserExtensionToken }
+          : undefined,
+      });
     }
-    servers.push({
-      name: 'pikiclaw-browser',
-      command: 'npx',
-      args,
-      env: gui.browserUseExtension && gui.browserExtensionToken
-        ? { PLAYWRIGHT_MCP_EXTENSION_TOKEN: gui.browserExtensionToken }
-        : undefined,
-    });
   }
   return servers;
 }

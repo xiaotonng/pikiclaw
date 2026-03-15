@@ -165,6 +165,19 @@ export interface SessionTailMessage {
   text: string;
 }
 
+export interface ExtensionStatus {
+  browser: {
+    hasToken: boolean;
+    token: string;
+  };
+  desktop: {
+    enabled: boolean;
+    installed: boolean;
+    running: boolean;
+    appiumUrl: string;
+  };
+}
+
 export interface DirEntry {
   name: string;
   path: string;

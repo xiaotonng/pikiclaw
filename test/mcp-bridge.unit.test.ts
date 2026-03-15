@@ -145,6 +145,20 @@ describe('buildSupplementalMcpServers', () => {
     ]);
   });
 
+  it('skips browser integration in extension mode when no token is configured', () => {
+    const servers = buildSupplementalMcpServers({
+      browserEnabled: true,
+      browserHeadless: false,
+      browserIsolated: false,
+      browserUseExtension: true,
+      browserExtensionToken: '',
+      desktopEnabled: true,
+      desktopAppiumUrl: 'http://127.0.0.1:4723',
+    });
+
+    expect(servers).toEqual([]);
+  });
+
   it('uses extension mode to connect to the existing Chrome profile when configured', () => {
     const servers = buildSupplementalMcpServers({
       browserEnabled: true,

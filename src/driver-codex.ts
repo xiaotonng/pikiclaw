@@ -327,17 +327,6 @@ function buildCodexCumulativeUsage(raw: any): CodexCumulativeUsage | null {
   return { input: input ?? 0, output: output ?? 0, cached: cached ?? 0 };
 }
 
-function codexUsageTotalTokens(raw: any): number | null {
-  if (!raw || typeof raw !== 'object') return null;
-  const explicit = numberOrNull(raw.totalTokens, raw.total_tokens);
-  if (explicit != null) return explicit;
-  const input = numberOrNull(raw.inputTokens, raw.input_tokens) ?? 0;
-  const cached = numberOrNull(raw.cachedInputTokens, raw.cached_input_tokens) ?? 0;
-  const output = numberOrNull(raw.outputTokens, raw.output_tokens) ?? 0;
-  const reasoning = numberOrNull(raw.reasoningOutputTokens, raw.reasoning_output_tokens) ?? 0;
-  const total = input + cached + output + reasoning;
-  return total > 0 ? total : null;
-}
 
 function applyCodexTokenUsage(
   s: {
@@ -371,8 +360,10 @@ function applyCodexTokenUsage(
     if (lastOutput == null) s.outputTokens = prev ? Math.max(0, total.output - prev.output) : total.output;
     if (lastCached == null) s.cachedInputTokens = prev ? Math.max(0, total.cached - prev.cached) : total.cached;
   }
-  const contextUsedTokens = codexUsageTotalTokens(totalUsage);
-  if (contextUsedTokens != null) s.contextUsedTokens = contextUsedTokens;
+  // NOTE: do NOT set s.contextUsedTokens from cumulative totals —
+  // codexUsageTotalTokens sums input+output+cached+reasoning across all turns,
+  // which is NOT the current context-window occupancy. Let computeContext()
+  // fall back to the per-turn input/cached/cacheCreation tokens instead.
   const contextWindow = numberOrNull(
     info.modelContextWindow,
     info.model_context_window,
