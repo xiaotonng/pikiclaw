@@ -594,17 +594,12 @@ export async function startDashboard(opts: DashboardOptions = {}): Promise<Dashb
     }
 
     const fallback = buildLocalChannelStates(config);
+    const telegramPromise = validateTelegramConfig(config.telegramBotToken, config.telegramAllowedChatIds).then(result => result.state);
+    const feishuPromise = validateFeishuConfig(config.feishuAppId, config.feishuAppSecret).then(result => result.state);
+
     const [telegram, feishu] = await Promise.all([
-      withTimeoutFallback(
-        validateTelegramConfig(config.telegramBotToken, config.telegramAllowedChatIds).then(result => result.state),
-        CHANNEL_STATUS_VALIDATION_TIMEOUT_MS,
-        fallback[0],
-      ),
-      withTimeoutFallback(
-        validateFeishuConfig(config.feishuAppId, config.feishuAppSecret).then(result => result.state),
-        CHANNEL_STATUS_VALIDATION_TIMEOUT_MS,
-        fallback[1],
-      ),
+      withTimeoutFallback(telegramPromise, CHANNEL_STATUS_VALIDATION_TIMEOUT_MS, fallback[0]),
+      withTimeoutFallback(feishuPromise, CHANNEL_STATUS_VALIDATION_TIMEOUT_MS, fallback[1]),
     ]);
 
     const channels: NonNullable<SetupState['channels']> = [telegram, feishu];
@@ -614,6 +609,20 @@ export async function startDashboard(opts: DashboardOptions = {}): Promise<Dashb
         expiresAt: now + CHANNEL_STATUS_CACHE_TTL_MS,
         channels,
       };
+    } else {
+      // Validation timed out — let it finish in the background and populate cache
+      // so the next frontend poll picks up the result instantly.
+      void Promise.all([telegramPromise, feishuPromise]).then(([bgTelegram, bgFeishu]) => {
+        const bgChannels: NonNullable<SetupState['channels']> = [bgTelegram, bgFeishu];
+        if (!shouldCacheChannelStates(bgChannels)) return;
+        // Only update if no newer config has replaced the cache
+        if (channelStateCache && channelStateCache.key !== key) return;
+        channelStateCache = {
+          key,
+          expiresAt: Date.now() + CHANNEL_STATUS_CACHE_TTL_MS,
+          channels: bgChannels,
+        };
+      }).catch(() => {});
     }
     return channels;
   }

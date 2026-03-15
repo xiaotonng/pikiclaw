@@ -132,7 +132,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     if (!hasPendingChannelValidation(state?.setupState?.channels || null)) return;
     const timer = setTimeout(() => {
       void reload();
-    }, 2500);
+    }, 1500);
     return () => clearTimeout(timer);
   }, [state, reload]);
 

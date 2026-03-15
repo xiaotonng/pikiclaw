@@ -2,8 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { useStore } from '../store';
 import { createT } from '../i18n';
 import { api } from '../api';
-import { channelBadgeState, channelSummaryText } from '../channel-status';
-import { Badge, Button, Card, Dot, Label, Modal, ModalHeader, SectionLabel, Select, Skeleton } from './ui';
+import { channelBadgeState, channelSummaryText, isChannelValidationPending } from '../channel-status';
+import { Badge, Button, Card, Dot, Label, Modal, ModalHeader, SectionLabel, Select, Skeleton, Spinner } from './ui';
 import { BrandBadge, BrandIcon } from './BrandIcon';
 import { cn, getAgentMeta } from '../utils';
 import { formatUsageSummary, usageBadgeText, usageTone } from '../usage';
@@ -69,6 +69,7 @@ function SettingRow({
   description,
   status,
   statusVariant,
+  loading,
   actionLabel,
   actionDisabled,
   onAction,
@@ -80,6 +81,7 @@ function SettingRow({
   description: ReactNode;
   status?: string;
   statusVariant?: 'ok' | 'warn' | 'err' | 'muted' | 'accent';
+  loading?: boolean;
   actionLabel?: string;
   actionDisabled?: boolean;
   onAction?: () => void | Promise<void>;
@@ -94,7 +96,7 @@ function SettingRow({
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
           <div className="text-sm font-medium text-fg-2">{title}</div>
-          {status && <Badge variant={statusVariant || 'muted'}>{status}</Badge>}
+          {status && <Badge variant={statusVariant || 'muted'}>{loading && <Spinner />}{status}</Badge>}
         </div>
         <div className={cn('mt-1 text-sm leading-relaxed text-fg-4 break-words', descriptionMono && 'font-mono text-[12px] text-fg-3')}>
           {description}
@@ -197,56 +199,50 @@ function AgentInventory({
   const { locale } = useStore();
   const t = createT(locale);
 
-  if (loading) {
-    return (
-      <div className="space-y-2">
-        {[0, 1, 2].map(index => (
-          <div key={index} className="rounded-lg border border-edge bg-panel-alt p-4">
-            <Skeleton className="mb-3 h-4 w-28" />
-            <Skeleton className="mb-2 h-3 w-40" />
-            <Skeleton className="h-3 w-full" />
-          </div>
-        ))}
-      </div>
-    );
-  }
+  const items = loading && agents.length === 0
+    ? (['claude', 'codex', 'gemini'] as const).map(id => ({ agent: id, loading: true }))
+    : agents.map(agent => ({ agent: agent.agent, loading: false }));
 
   return (
     <div className="space-y-2">
-      {agents.map(agent => {
-        const meta = getAgentMeta(agent.agent);
-        const selected = agent.agent === activeAgent;
-        const installState = agent.installed ? 'ok' : 'err';
+      {items.map(item => {
+        const agent = agents.find(a => a.agent === item.agent);
+        const meta = getAgentMeta(item.agent);
+        const selected = item.agent === activeAgent;
 
         return (
           <button
-            key={agent.agent}
+            key={item.agent}
             type="button"
-            disabled={!agent.installed}
-            onClick={() => agent.installed && onSelect(agent.agent)}
+            disabled={item.loading || !agent?.installed}
+            onClick={() => agent?.installed && onSelect(item.agent)}
             className={cn(
               'w-full rounded-lg border p-4 text-left transition-[border-color,background,box-shadow,transform] duration-200',
               'focus-visible:outline-none focus-visible:shadow-[0_0_0_4px_var(--th-glow-a)]',
               selected
                 ? 'border-edge-h bg-panel-h shadow-[0_12px_28px_rgba(2,6,23,0.12)]'
                 : 'border-edge bg-panel-alt hover:border-edge-h hover:bg-panel',
-              !agent.installed && 'cursor-not-allowed opacity-65'
+              !item.loading && !agent?.installed && 'cursor-not-allowed opacity-65'
             )}
           >
             <div className="flex items-start gap-3">
-              <BrandBadge brand={agent.agent} size={40} iconSize={19} className="rounded-lg bg-panel-alt shadow-[0_0_16px_var(--th-glow-a)]" />
+              <BrandBadge brand={item.agent} size={40} iconSize={19} className="rounded-lg bg-panel-alt shadow-[0_0_16px_var(--th-glow-a)]" />
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-2">
                   <div className="text-sm font-medium text-fg-2">{meta.label}</div>
-                  <Dot variant={installState} />
-                  {agent.isDefault && <Badge variant="accent">{t('config.defaultBadge')}</Badge>}
+                  {item.loading
+                    ? <Spinner className="text-fg-5" />
+                    : <Dot variant={agent?.installed ? 'ok' : 'err'} />}
+                  {agent?.isDefault && <Badge variant="accent">{t('config.defaultBadge')}</Badge>}
                 </div>
                 <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-fg-5">
-                  <span className="font-mono text-fg-4">{agent.version || t('config.notInstalled')}</span>
-                  {agent.installed && <span>{formatUsageSummary(agent.usage, t)}</span>}
+                  <span className="font-mono text-fg-4">
+                    {item.loading ? t('status.loading') : agent?.version || t('config.notInstalled')}
+                  </span>
+                  {agent?.installed && <span>{formatUsageSummary(agent.usage, t)}</span>}
                 </div>
                 <div className="mt-2 text-sm leading-relaxed text-fg-4">{t(meta.advantageKey)}</div>
-                {!agent.installed && agent.installCommand && (
+                {!item.loading && !agent?.installed && agent?.installCommand && (
                   <div className="mt-2 font-mono text-[11px] text-fg-5">{agent.installCommand}</div>
                 )}
               </div>
@@ -298,7 +294,12 @@ function IMChannels({
         </div>
         <div className="flex flex-wrap gap-2">
           {rows.map(row => {
-            const badge = channelBadgeState(row.channel, t);
+            const loading = !state;
+            const badge = loading
+              ? { label: t('status.loading'), variant: 'muted' as const }
+              : channelBadgeState(row.channel, t);
+            const pending = loading || isChannelValidationPending(row.channel);
+            const summary = loading ? '' : channelSummaryText(row.channel, t);
             return (
               <div
                 key={row.key}
@@ -310,11 +311,14 @@ function IMChannels({
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">
                     <div className="text-sm font-medium text-fg-2">{row.title}</div>
-                    <Badge variant={badge.variant}>{badge.label}</Badge>
+                    <Badge variant={badge.variant}>
+                      {pending && <Spinner />}
+                      {badge.label}
+                    </Badge>
                   </div>
-                  <div className="truncate text-xs text-fg-5">{channelSummaryText(row.channel, t)}</div>
+                  {summary && <div className="truncate text-xs text-fg-5">{summary}</div>}
                 </div>
-                <Button variant="outline" size="sm" onClick={row.action}>
+                <Button variant="outline" size="sm" onClick={row.action} disabled={loading}>
                   {row.channel?.configured ? t('perm.settings') : t('config.configure')}
                 </Button>
               </div>
@@ -422,37 +426,33 @@ function SystemPermissions() {
     <Card>
       <div className="mb-4 text-sm leading-relaxed text-fg-4">{t('config.permissionHint')}</div>
 
-      {!state ? (
-        <div className="space-y-2">
-          {[0, 1, 2].map(index => <Skeleton key={index} className="h-16 rounded-lg" />)}
-        </div>
-      ) : (
-        <div className="divide-y divide-edge">
-          {Object.entries(info).map(([key, item]) => {
-            const value = permissions[key] as PermissionStatus | undefined;
-            const granted = !!value?.granted;
-            const permissionKey = key as PermissionKey;
-            return (
-              <SettingRow
-                key={key}
-                icon={item.icon}
-                title={t(item.labelKey)}
-                description={t(item.reasonKey)}
-                meta={!granted && item.manualHintKey ? t(item.manualHintKey) : undefined}
-                status={granted ? t('config.authorized') : t('config.pendingAuth')}
-                statusVariant={granted ? 'ok' : 'warn'}
-                actionLabel={value?.checkable && !granted
-                  ? pendingPermission === permissionKey
-                    ? t('perm.waiting')
-                    : t(item.actionLabelKey)
-                  : undefined}
-                actionDisabled={pendingPermission != null}
-                onAction={value?.checkable && !granted ? () => handlePermissionAction(permissionKey) : undefined}
-              />
-            );
-          })}
-        </div>
-      )}
+      <div className="divide-y divide-edge">
+        {Object.entries(info).map(([key, item]) => {
+          const loading = !state;
+          const value = permissions[key] as PermissionStatus | undefined;
+          const granted = !!value?.granted;
+          const permissionKey = key as PermissionKey;
+          return (
+            <SettingRow
+              key={key}
+              icon={item.icon}
+              title={t(item.labelKey)}
+              description={t(item.reasonKey)}
+              meta={!granted && !loading && item.manualHintKey ? t(item.manualHintKey) : undefined}
+              status={loading ? t('status.loading') : granted ? t('config.authorized') : t('config.pendingAuth')}
+              statusVariant={loading ? 'muted' : granted ? 'ok' : 'warn'}
+              loading={loading}
+              actionLabel={!loading && value?.checkable && !granted
+                ? pendingPermission === permissionKey
+                  ? t('perm.waiting')
+                  : t(item.actionLabelKey)
+                : undefined}
+              actionDisabled={loading || pendingPermission != null}
+              onAction={value?.checkable && !granted ? () => handlePermissionAction(permissionKey) : undefined}
+            />
+          );
+        })}
+      </div>
       <PermissionGuideModal
         guide={guide}
         hostApp={state?.hostApp}
@@ -533,9 +533,11 @@ export function Extensions({ onOpenPlaywrightSetup, onOpenDesktopSetup }: { onOp
           title={t('ext.browser')}
           description={t('ext.browserDesc')}
           meta={t('ext.browserExtMode')}
-          status={browserHasToken ? t('ext.tokenSet') : t('ext.tokenMissing')}
-          statusVariant={browserHasToken ? 'ok' : 'warn'}
+          status={!ext ? t('status.loading') : browserHasToken ? t('ext.tokenSet') : t('ext.tokenMissing')}
+          statusVariant={!ext ? 'muted' : browserHasToken ? 'ok' : 'warn'}
+          loading={!ext}
           actionLabel={t('ext.setup')}
+          actionDisabled={!ext}
           onAction={onOpenPlaywrightSetup}
         />
         <SettingRow
@@ -543,12 +545,13 @@ export function Extensions({ onOpenPlaywrightSetup, onOpenDesktopSetup }: { onOp
           title={t('ext.desktop')}
           description={t('ext.desktopDesc')}
           meta={desktopEnabled && ext?.desktop.appiumUrl ? `Appium: ${ext.desktop.appiumUrl}` : undefined}
-          status={desktopStatus}
-          statusVariant={desktopStatusVariant}
+          status={!ext ? t('status.loading') : desktopStatus}
+          statusVariant={!ext ? 'muted' : desktopStatusVariant}
+          loading={!ext}
           actionLabel={desktopEnabled
             ? (disabling ? t('ext.disabling') : t('ext.disable'))
             : t('ext.setup')}
-          actionDisabled={disabling}
+          actionDisabled={!ext || disabling}
           onAction={desktopEnabled ? handleDesktopDisable : onOpenDesktopSetup}
         />
       </div>
@@ -720,33 +723,28 @@ export function ConfigTab({
 
             <div className="space-y-4">
               <Field label={t('config.model')}>
-                {loadingAgents ? (
-                  <Skeleton className="h-9 rounded-md" />
-                ) : (
-                  <Select
-                    value={activeAgent?.selectedModel || ''}
-                    options={modelOptions}
-                    onChange={handleModelChange}
-                    disabled={!activeAgent?.installed || modelOptions.length === 0}
-                    placeholder={t('config.noModel')}
-                  />
-                )}
+                <Select
+                  value={activeAgent?.selectedModel || ''}
+                  options={modelOptions}
+                  onChange={handleModelChange}
+                  disabled={loadingAgents || !activeAgent?.installed || modelOptions.length === 0}
+                  placeholder={loadingAgents ? t('status.loading') : t('config.noModel')}
+                />
               </Field>
 
               <Field label={t('config.thinkingMode')}>
-                {loadingAgents ? (
-                  <Skeleton className="h-9 rounded-md" />
-                ) : reasoningOptions.length > 0 ? (
+                {!loadingAgents && reasoningOptions.length === 0 ? (
+                  <div className="flex h-9 items-center rounded-md border border-edge bg-inset px-3 text-sm text-fg-5">
+                    {t('config.noReasoningMode')}
+                  </div>
+                ) : (
                   <Select
                     value={activeAgent?.selectedEffort || reasoningOptions[0]?.value || ''}
                     options={reasoningOptions}
                     onChange={handleEffortChange}
-                    disabled={!activeAgent?.installed}
+                    disabled={loadingAgents || !activeAgent?.installed}
+                    placeholder={loadingAgents ? t('status.loading') : undefined}
                   />
-                ) : (
-                  <div className="flex h-9 items-center rounded-md border border-edge bg-inset px-3 text-sm text-fg-5">
-                    {t('config.noReasoningMode')}
-                  </div>
                 )}
               </Field>
             </div>
