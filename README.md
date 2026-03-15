@@ -6,9 +6,7 @@
 
 *让最好用的 IM 变成你电脑上的顶级 Agent 控制台*
 
-```bash
-npx pikiclaw@latest
-```
+> npx pikiclaw@latest
 
 <p align="center">
 <a href="https://www.npmjs.com/package/pikiclaw"><img src="https://img.shields.io/npm/v/pikiclaw" alt="npm"></a>
