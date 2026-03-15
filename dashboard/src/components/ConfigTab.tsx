@@ -66,6 +66,7 @@ function MacSymbol({
 function SettingRow({
   icon,
   title,
+  titleHref,
   description,
   status,
   statusVariant,
@@ -78,6 +79,7 @@ function SettingRow({
 }: {
   icon: ReactNode;
   title: string;
+  titleHref?: string;
   description: ReactNode;
   status?: string;
   statusVariant?: 'ok' | 'warn' | 'err' | 'muted' | 'accent';
@@ -95,7 +97,14 @@ function SettingRow({
       </div>
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
-          <div className="text-sm font-medium text-fg-2">{title}</div>
+          {titleHref ? (
+            <a href={titleHref} target="_blank" rel="noopener noreferrer" className="text-sm font-medium text-fg-2 hover:text-primary transition-colors">
+              {title}
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="ml-1 inline-block -mt-0.5 opacity-40"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+            </a>
+          ) : (
+            <div className="text-sm font-medium text-fg-2">{title}</div>
+          )}
           {status && <Badge variant={statusVariant || 'muted'}>{loading && <Spinner />}{status}</Badge>}
         </div>
         <div className={cn('mt-1 text-sm leading-relaxed text-fg-4 break-words', descriptionMono && 'font-mono text-[12px] text-fg-3')}>
@@ -464,7 +473,7 @@ function SystemPermissions() {
 }
 
 export function Extensions({ onOpenPlaywrightSetup, onOpenDesktopSetup }: { onOpenPlaywrightSetup: () => void; onOpenDesktopSetup: () => void }) {
-  const { toast, locale } = useStore();
+  const { state, toast, locale } = useStore();
   const t = createT(locale);
   const [ext, setExt] = useState<ExtensionStatus | null>(null);
   const [disabling, setDisabling] = useState(false);
@@ -473,25 +482,7 @@ export function Extensions({ onOpenPlaywrightSetup, onOpenDesktopSetup }: { onOp
     api.getExtensions().then(setExt).catch(() => {});
   }, []);
 
-  useEffect(() => { refreshExt(); }, [refreshExt]);
-
-  const browserIcon = (
-    <MacSymbol>
-      <rect x="3" y="4" width="18" height="13" rx="2" />
-      <path d="M8 21h8" />
-      <path d="M12 17v4" />
-    </MacSymbol>
-  );
-
-  const desktopIcon = (
-    <MacSymbol>
-      <rect x="2" y="3" width="20" height="14" rx="2" />
-      <path d="M8 21h8" />
-      <path d="M12 17v4" />
-      <path d="M7 9h3" />
-      <path d="M7 12h5" />
-    </MacSymbol>
-  );
+  useEffect(() => { refreshExt(); }, [refreshExt, state]);
 
   const browserHasToken = ext?.browser.hasToken ?? false;
   const desktopEnabled = ext?.desktop.enabled ?? false;
@@ -529,8 +520,9 @@ export function Extensions({ onOpenPlaywrightSetup, onOpenDesktopSetup }: { onOp
       <div className="mb-4 text-sm leading-relaxed text-fg-4">{t('ext.hint')}</div>
       <div className="divide-y divide-edge">
         <SettingRow
-          icon={browserIcon}
+          icon={<BrandIcon brand="playwright" size={20} />}
           title={t('ext.browser')}
+          titleHref="https://playwright.dev/"
           description={t('ext.browserDesc')}
           meta={t('ext.browserExtMode')}
           status={!ext ? t('status.loading') : browserHasToken ? t('ext.tokenSet') : t('ext.tokenMissing')}
@@ -541,8 +533,9 @@ export function Extensions({ onOpenPlaywrightSetup, onOpenDesktopSetup }: { onOp
           onAction={onOpenPlaywrightSetup}
         />
         <SettingRow
-          icon={desktopIcon}
+          icon={<BrandIcon brand="appium" size={20} />}
           title={t('ext.desktop')}
+          titleHref="https://appium.io/"
           description={t('ext.desktopDesc')}
           meta={desktopEnabled && ext?.desktop.appiumUrl ? `Appium: ${ext.desktop.appiumUrl}` : undefined}
           status={!ext ? t('status.loading') : desktopStatus}
