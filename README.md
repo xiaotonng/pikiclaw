@@ -2,9 +2,9 @@
 
 # pikiclaw
 
-**Run Claude Code / Codex / Gemini on your own computer from Telegram or Feishu.**
+**Put the world's smartest AI agents in your pocket. Command local Claude & Gemini via best IM.**
 
-*把 IM 变成你电脑上的远程 Agent 控制台。*
+*让最好用的 IM 变成你电脑上的顶级 Agent 控制台*
 
 ```bash
 npx pikiclaw@latest
