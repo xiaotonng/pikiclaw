@@ -147,6 +147,9 @@ export interface SessionInfo {
   isCurrent?: boolean;
   model?: string;
   workdir?: string;
+  runState: 'running' | 'completed' | 'incomplete';
+  runDetail?: string | null;
+  runUpdatedAt?: string | null;
 }
 
 export interface SessionsPageResult {

@@ -490,6 +490,11 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
     const threadResult = threadResp.result;
     s.sessionId = threadResult.thread?.id ?? s.sessionId;
     s.model = threadResult.model ?? s.model;
+    if (s.sessionId) {
+      try { opts.onSessionId?.(s.sessionId); } catch (error: any) {
+        agentLog(`[codex-rpc] onSessionId error: ${error?.message || error}`);
+      }
+    }
     agentLog(`[codex-rpc] thread ready: id=${s.sessionId} model=${s.model}`);
 
     // turn/start
@@ -811,6 +816,9 @@ function getNativeCodexSessions(workdir: string): SessionInfo[] {
           createdAt: tsMatch?.[1] || stat.birthtime.toISOString(),
           title,
           running: Date.now() - Date.parse(updatedAt) < 10_000,
+          runState: Date.now() - Date.parse(updatedAt) < 10_000 ? 'running' : 'completed',
+          runDetail: null,
+          runUpdatedAt: updatedAt,
         });
       } catch { /* skip */ }
     }
@@ -905,7 +913,10 @@ function getCodexSessions(workdir: string, limit?: number): SessionListResult {
     model: record.model,
     createdAt: record.createdAt,
     title: record.title,
-    running: Date.now() - Date.parse(record.updatedAt) < 10_000,
+    running: record.runState === 'running',
+    runState: record.runState,
+    runDetail: record.runDetail,
+    runUpdatedAt: record.runUpdatedAt,
   }));
   const nativeSessions = getNativeCodexSessions(resolvedWorkdir);
 

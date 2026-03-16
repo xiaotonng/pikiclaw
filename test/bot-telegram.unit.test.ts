@@ -339,6 +339,9 @@ describe('TelegramBot status and session previews', () => {
           createdAt: new Date().toISOString(),
           title: 'history preview',
           running: false,
+          runState: 'incomplete',
+          runDetail: 'Timed out before completion.',
+          runUpdatedAt: new Date().toISOString(),
         }],
         error: null,
       });
@@ -356,7 +359,7 @@ describe('TelegramBot status and session previews', () => {
 
       expect(ctx.editReply).toHaveBeenCalledWith(
         ctx.messageId,
-        `<b>Session Switched</b>\n<code>${sessionId}</code>\n<i>Switched successfully</i>`,
+        `<b>Session Switched</b>\n<code>${sessionId}</code>\n<i>Status: unfinished · Timed out before completion.</i>`,
         { parseMode: 'HTML' },
       );
       expect(bot.chat(ctx.chatId).sessionId).toBe(sessionId);

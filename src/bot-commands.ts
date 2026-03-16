@@ -10,7 +10,7 @@
  */
 
 import path from 'node:path';
-import type { Bot, ChatId, Agent, SessionRuntime, ChatState, StreamResult } from './bot.js';
+import type { Bot, ChatId, Agent, SessionInfo, SessionRuntime, ChatState, StreamResult } from './bot.js';
 import { fmtTokens, fmtUptime, fmtBytes } from './bot.js';
 import { getProjectSkillPaths } from './code-agent.js';
 import { getDriver } from './agent-driver.js';
@@ -71,6 +71,8 @@ export interface SessionEntry {
   time: string;
   isCurrent: boolean;
   isRunning: boolean;
+  runState: 'running' | 'completed' | 'incomplete';
+  runDetail: string | null;
 }
 
 export interface SessionsPageData {
@@ -84,6 +86,35 @@ export interface SessionsPageData {
 export interface SessionTurnPreviewData {
   userText: string | null;
   assistantText: string | null;
+}
+
+export interface SessionRunSummary {
+  state: 'running' | 'completed' | 'incomplete';
+  shortLabel: string;
+  noticeDetail: string;
+}
+
+export function summarizeSessionRun(session: Pick<SessionInfo, 'running' | 'runState' | 'runDetail'>): SessionRunSummary {
+  if (session.running || session.runState === 'running') {
+    return {
+      state: 'running',
+      shortLabel: 'running',
+      noticeDetail: 'Status: running',
+    };
+  }
+  if (session.runState === 'incomplete') {
+    const detail = String(session.runDetail || '').trim();
+    return {
+      state: 'incomplete',
+      shortLabel: 'unfinished',
+      noticeDetail: detail ? `Status: unfinished · ${detail}` : 'Status: unfinished',
+    };
+  }
+  return {
+    state: 'completed',
+    shortLabel: 'done',
+    noticeDetail: 'Status: completed',
+  };
 }
 
 export async function getSessionsPageData(bot: Bot, chatId: ChatId, page: number, pageSize = 5): Promise<SessionsPageData> {
@@ -100,11 +131,24 @@ export async function getSessionsPageData(bot: Bot, chatId: ChatId, page: number
     const sessionKey = s.sessionId || '';
     if (!sessionKey) continue;
     const status = getSessionStatusForChat(bot, cs, s);
+    const runSummary = summarizeSessionRun({
+      running: status.isRunning,
+      runState: status.isRunning ? 'running' : s.runState,
+      runDetail: s.runDetail,
+    });
     const title = s.title ? s.title.replace(/\n/g, ' ').slice(0, 10) : sessionKey.slice(0, 10);
     const time = s.createdAt
       ? new Date(s.createdAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
       : '?';
-    entries.push({ key: sessionKey, title, time, isCurrent: status.isCurrent, isRunning: status.isRunning });
+    entries.push({
+      key: sessionKey,
+      title,
+      time: `${time} · ${runSummary.shortLabel}`,
+      isCurrent: status.isCurrent,
+      isRunning: status.isRunning,
+      runState: runSummary.state,
+      runDetail: s.runDetail,
+    });
   }
 
   return { agent: cs.agent, total, page: pg, totalPages, sessions: entries };

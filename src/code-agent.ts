@@ -98,6 +98,8 @@ export interface StreamOpts {
     meta?: StreamPreviewMeta,
     plan?: StreamPreviewPlan | null,
   ) => void;
+  /** Called when the agent reports the native session/thread ID before completion. */
+  onSessionId?: (sessionId: string) => void;
   /** Local file paths to attach (images, documents, etc.) */
   attachments?: string[];
   // codex
@@ -569,6 +571,9 @@ interface LocalSessionRecord {
   title: string | null;
   model: string | null;
   stagedFiles: string[];
+  runState: SessionRunState;
+  runDetail: string | null;
+  runUpdatedAt: string | null;
 }
 
 interface SessionIndexData {
@@ -588,6 +593,8 @@ interface SessionWorkspaceInfo {
   workspacePath: string;
   record: LocalSessionRecord;
 }
+
+export type SessionRunState = 'running' | 'completed' | 'incomplete';
 
 const PIKICLAW_DIR = '.pikiclaw';
 const PIKICLAW_SESSIONS_DIR = path.join(PIKICLAW_DIR, 'sessions');
@@ -615,6 +622,51 @@ export function isPendingSessionId(sessionId: string | null | undefined): boolea
   return typeof sessionId === 'string' && sessionId.startsWith('pending_');
 }
 
+function normalizeSessionRunState(rawState: unknown): SessionRunState {
+  const state = typeof rawState === 'string' ? rawState.trim().toLowerCase() : '';
+  if (state === 'completed' || state === 'incomplete') return state;
+  if (state === 'running') return 'incomplete';
+  return 'completed';
+}
+
+function normalizeSessionRunDetail(rawState: unknown, rawDetail: unknown): string | null {
+  const detail = typeof rawDetail === 'string' ? rawDetail.trim() : '';
+  if (detail) return shortValue(detail, 180);
+  const state = typeof rawState === 'string' ? rawState.trim().toLowerCase() : '';
+  if (state === 'running') return 'Last run stopped before completion.';
+  return null;
+}
+
+function normalizeSessionRunUpdatedAt(rawUpdatedAt: unknown, fallback: string): string {
+  return typeof rawUpdatedAt === 'string' && rawUpdatedAt.trim() ? rawUpdatedAt : fallback;
+}
+
+function setSessionRunState(record: LocalSessionRecord, runState: SessionRunState, runDetail: string | null, runUpdatedAt?: string) {
+  record.runState = runState;
+  record.runDetail = runDetail ? shortValue(runDetail, 180) : null;
+  record.runUpdatedAt = runUpdatedAt || new Date().toISOString();
+}
+
+function incompleteRunDetail(result: Pick<StreamResult, 'error' | 'stopReason' | 'message'>): string | null {
+  if (result.stopReason === 'interrupted') return 'Interrupted by user.';
+  if (result.stopReason === 'timeout') return 'Timed out before completion.';
+  if (result.stopReason === 'max_tokens') return 'Stopped before completion: max tokens reached.';
+  const error = normalizeErrorMessage(result.error);
+  if (error) return shortValue(error, 180);
+  const stopReason = normalizeErrorMessage(result.stopReason);
+  if (stopReason) return `Stopped before completion: ${shortValue(stopReason, 120)}`;
+  const message = firstNonEmptyLine(result.message || '');
+  return message ? shortValue(message, 180) : 'Last run did not complete.';
+}
+
+function applySessionRunResult(record: LocalSessionRecord, result: Pick<StreamResult, 'ok' | 'incomplete' | 'error' | 'stopReason' | 'message'>) {
+  if (result.ok && !result.incomplete) {
+    setSessionRunState(record, 'completed', null);
+    return;
+  }
+  setSessionRunState(record, 'incomplete', incompleteRunDetail(result));
+}
+
 function normalizeSessionRecord(raw: any, workdir: string): LocalSessionRecord | null {
   // Support both new format (sessionId) and legacy format (localSessionId + engineSessionId)
   const sessionId = typeof raw?.sessionId === 'string' ? raw.sessionId.trim()
@@ -634,6 +686,9 @@ function normalizeSessionRecord(raw: any, workdir: string): LocalSessionRecord |
     title: typeof raw?.title === 'string' && raw.title.trim() ? raw.title.trim() : null,
     model: typeof raw?.model === 'string' && raw.model.trim() ? raw.model.trim() : null,
     stagedFiles: Array.isArray(raw?.stagedFiles) ? dedupeStrings(raw.stagedFiles.filter((v: unknown) => typeof v === 'string')) : [],
+    runState: normalizeSessionRunState(raw?.runState),
+    runDetail: normalizeSessionRunDetail(raw?.runState, raw?.runDetail),
+    runUpdatedAt: normalizeSessionRunUpdatedAt(raw?.runUpdatedAt, typeof raw?.updatedAt === 'string' && raw.updatedAt.trim() ? raw.updatedAt : new Date().toISOString()),
   };
 }
 
@@ -654,6 +709,7 @@ function writeSessionMeta(record: LocalSessionRecord) {
     workspacePath: record.workspacePath,
     createdAt: record.createdAt, updatedAt: record.updatedAt,
     title: record.title, model: record.model, stagedFiles: record.stagedFiles,
+    runState: record.runState, runDetail: record.runDetail, runUpdatedAt: record.runUpdatedAt,
   });
 }
 
@@ -725,8 +781,27 @@ export function promoteSessionId(workdir: string, agent: Agent, pendingId: strin
   saveSessionRecord(resolvedWorkdir, record);
 }
 
+function syncManagedSessionIdentity(session: SessionWorkspaceInfo, workdir: string, nativeId: string): boolean {
+  const resolvedId = nativeId.trim();
+  if (!resolvedId || session.sessionId === resolvedId) return false;
+
+  const resolvedWorkdir = path.resolve(workdir);
+  const previousId = session.sessionId;
+  if (isPendingSessionId(previousId)) {
+    promoteSessionId(resolvedWorkdir, session.record.agent, previousId, resolvedId);
+  }
+
+  session.sessionId = resolvedId;
+  session.workspacePath = sessionWorkspacePath(resolvedWorkdir, session.record.agent, resolvedId);
+  session.record.sessionId = resolvedId;
+  session.record.workspacePath = session.workspacePath;
+  return true;
+}
+
 function summarizePromptTitle(prompt: string | null | undefined): string | null {
-  const text = String(prompt || '').replace(/\s+/g, ' ').trim();
+  const raw = String(prompt || '').replace(/\r\n?/g, '\n');
+  const text = firstNonEmptyLine(raw).replace(/\s+/g, ' ').trim()
+    || raw.replace(/\s+/g, ' ').trim();
   if (!text) return null;
   return text.length <= 120 ? text : `${text.slice(0, 117).trimEnd()}...`;
 }
@@ -776,6 +851,7 @@ function ensureSessionWorkspace(opts: EnsureSessionWorkspaceOpts): SessionWorksp
       workspacePath: sessionWorkspacePath(workdir, opts.agent, sessionId),
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       title: summarizePromptTitle(opts.title) || null, model: null, stagedFiles: [],
+      runState: 'completed', runDetail: null, runUpdatedAt: new Date().toISOString(),
     };
   }
   if (!record.title && opts.title) record.title = summarizePromptTitle(opts.title);
@@ -951,6 +1027,7 @@ function prepareStreamOpts(opts: StreamOpts): { prepared: StreamOpts; session: S
   const stagedFiles = [...session.record.stagedFiles];
   session.record.stagedFiles = [];
   if (!session.record.title) session.record.title = summarizePromptTitle(opts.prompt) || importedFiles[0] || null;
+  setSessionRunState(session.record, 'running', null);
   saveSessionRecord(opts.workdir, session.record);
 
   const attachmentPaths = attachmentRelPaths.map(relPath => path.join(session.workspacePath, relPath));
@@ -966,20 +1043,19 @@ function prepareStreamOpts(opts: StreamOpts): { prepared: StreamOpts; session: S
       ...opts,
       sessionId: effectiveSessionId,
       attachments: attachmentPaths.length ? attachmentPaths : undefined,
+      onSessionId: (nativeSessionId: string) => {
+        if (!syncManagedSessionIdentity(session, opts.workdir, nativeSessionId)) return;
+        saveSessionRecord(opts.workdir, session.record);
+      },
     },
   };
 }
 
 function finalizeStreamResult(result: StreamResult, workdir: string, prompt: string, session: SessionWorkspaceInfo): StreamResult {
-  // If the agent returned a native session ID and our session was pending, promote it
-  const pendingId = session.sessionId;
-  if (result.sessionId && isPendingSessionId(pendingId)) {
-    promoteSessionId(workdir, session.record.agent, pendingId, result.sessionId);
-    session.sessionId = result.sessionId;
-  }
-  session.record.sessionId = result.sessionId || session.record.sessionId;
+  if (result.sessionId) syncManagedSessionIdentity(session, workdir, result.sessionId);
   session.record.model = result.model || session.record.model;
   if (!session.record.title) session.record.title = summarizePromptTitle(prompt);
+  applySessionRunResult(session.record, result);
   saveSessionRecord(workdir, session.record);
   return { ...result, sessionId: session.sessionId, workspacePath: session.workspacePath };
 }
@@ -1033,6 +1109,32 @@ export async function doStream(opts: StreamOpts): Promise<StreamResult> {
     const driver = getDriver(prepared.agent);
     const result = await driver.doStream(prepared);
     return finalizeStreamResult(result, opts.workdir, opts.prompt, session);
+  } catch (error: any) {
+    const failedResult: StreamResult = {
+      ok: false,
+      message: normalizeErrorMessage(error) || 'Agent stream failed.',
+      thinking: null,
+      sessionId: session.sessionId,
+      workspacePath: session.workspacePath,
+      model: session.record.model,
+      thinkingEffort: prepared.thinkingEffort,
+      elapsedS: 0,
+      inputTokens: null,
+      outputTokens: null,
+      cachedInputTokens: null,
+      cacheCreationInputTokens: null,
+      contextWindow: null,
+      contextUsedTokens: null,
+      contextPercent: null,
+      codexCumulative: null,
+      error: normalizeErrorMessage(error) || 'Agent stream failed.',
+      stopReason: null,
+      incomplete: true,
+      activity: null,
+    };
+    applySessionRunResult(session.record, failedResult);
+    saveSessionRecord(opts.workdir, session.record);
+    throw error;
   } finally {
     if (bridge) {
       await bridge.stop().catch(() => {});
@@ -1054,6 +1156,9 @@ export interface SessionInfo {
   createdAt: string | null;
   title: string | null;
   running: boolean;
+  runState: SessionRunState;
+  runDetail: string | null;
+  runUpdatedAt: string | null;
 }
 
 export interface SessionListResult {

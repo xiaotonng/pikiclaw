@@ -14,6 +14,7 @@ import {
   getSessionTail,
   getUsage,
   labelFromWindowMinutes,
+  listPikiclawSessions,
   listModels,
   shutdownCodexServer,
   stageSessionFiles,
@@ -122,6 +123,18 @@ describe('stageSessionFiles', () => {
     expect(fs.existsSync(path.join(migrated.workspacePath, 'legacy.txt'))).toBe(true);
     expect(fs.existsSync(path.join(migratedDir, 'session.json'))).toBe(true);
     expect(fs.existsSync(legacyWorkspacePath)).toBe(false);
+  });
+
+  it('uses the first question line as the new session title prefix', () => {
+    const staged = stageSessionFiles({
+      agent: 'claude',
+      workdir: tmpDir,
+      files: [],
+      title: '第一行问题前缀\n第二行补充说明\n第三行细节',
+    });
+
+    const record = listPikiclawSessions(tmpDir, 'claude').find(entry => entry.sessionId === staged.sessionId);
+    expect(record?.title).toBe('第一行问题前缀');
   });
 });
 
@@ -821,9 +834,159 @@ exit 1`;
     expect(empty.ok).toBe(true);
     expect(empty.message).toBe('(no textual response)');
   });
+
+  it('exposes the native codex session id before the turn finishes', async () => {
+    const script = `#!/usr/bin/env node
+const readline = require('node:readline');
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+rl.on('line', (line) => {
+  if (!line.trim()) return;
+  const msg = JSON.parse(line);
+
+  if (msg.method === 'initialize') {
+    process.stdout.write(JSON.stringify({ id: msg.id, result: {} }) + '\\n');
+    return;
+  }
+
+  if (msg.method === 'thread/start') {
+    process.stdout.write(JSON.stringify({
+      id: msg.id,
+      result: { thread: { id: 'thread-early' }, model: msg.params.model || 'gpt-5.4' },
+    }) + '\\n');
+    return;
+  }
+
+  if (msg.method === 'turn/start') {
+    process.stdout.write(JSON.stringify({ id: msg.id, result: { turn: { id: 'turn-early' } } }) + '\\n');
+    setTimeout(() => {
+      process.stdout.write(JSON.stringify({
+        method: 'turn/started',
+        params: { threadId: 'thread-early', turn: { id: 'turn-early' } },
+      }) + '\\n');
+      process.stdout.write(JSON.stringify({
+        method: 'item/started',
+        params: { threadId: 'thread-early', item: { id: 'msg-early', type: 'agentMessage', phase: 'final_answer' } },
+      }) + '\\n');
+      process.stdout.write(JSON.stringify({
+        method: 'item/agentMessage/delta',
+        params: { threadId: 'thread-early', itemId: 'msg-early', delta: 'done' },
+      }) + '\\n');
+      process.stdout.write(JSON.stringify({
+        method: 'turn/completed',
+        params: { threadId: 'thread-early', turn: { id: 'turn-early', status: 'completed' } },
+      }) + '\\n');
+    }, 150);
+    return;
+  }
+
+  process.stdout.write(JSON.stringify({ id: msg.id, error: { message: 'unexpected method' } }) + '\\n');
+});`;
+    fs.writeFileSync(path.join(fakeBin, 'codex'), script, { mode: 0o755 });
+
+    let reportedSessionId: string | null = null;
+    const streamPromise = doCodexStream(baseOpts('codex', {
+      onSessionId: sessionId => { reportedSessionId = sessionId; },
+    }));
+
+    const deadline = Date.now() + 1500;
+    while (!reportedSessionId && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+
+    expect(reportedSessionId).toBe('thread-early');
+
+    const result = await streamPromise;
+    expect(result.ok).toBe(true);
+    expect(result.sessionId).toBe('thread-early');
+  });
 });
 
 describe('doStream and attachments', () => {
+  it('promotes codex sessions to native ids and keeps the native workspace path', async () => {
+    const script = `#!/usr/bin/env node
+const readline = require('node:readline');
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+rl.on('line', (line) => {
+  if (!line.trim()) return;
+  const msg = JSON.parse(line);
+
+  if (msg.method === 'initialize') {
+    process.stdout.write(JSON.stringify({ id: msg.id, result: {} }) + '\\n');
+    return;
+  }
+
+  if (msg.method === 'thread/start') {
+    process.stdout.write(JSON.stringify({
+      id: msg.id,
+      result: { thread: { id: 'thread-native' }, model: msg.params.model || 'gpt-5.4' },
+    }) + '\\n');
+    return;
+  }
+
+  if (msg.method === 'turn/start') {
+    process.stdout.write(JSON.stringify({ id: msg.id, result: { turn: { id: 'turn-native' } } }) + '\\n');
+    process.stdout.write(JSON.stringify({
+      method: 'turn/started',
+      params: { threadId: 'thread-native', turn: { id: 'turn-native' } },
+    }) + '\\n');
+    process.stdout.write(JSON.stringify({
+      method: 'item/started',
+      params: { threadId: 'thread-native', item: { id: 'msg-native', type: 'agentMessage', phase: 'final_answer' } },
+    }) + '\\n');
+    process.stdout.write(JSON.stringify({
+      method: 'item/agentMessage/delta',
+      params: { threadId: 'thread-native', itemId: 'msg-native', delta: 'done' },
+    }) + '\\n');
+    process.stdout.write(JSON.stringify({
+      method: 'turn/completed',
+      params: { threadId: 'thread-native', turn: { id: 'turn-native', status: 'completed' } },
+    }) + '\\n');
+    return;
+  }
+
+  process.stdout.write(JSON.stringify({ id: msg.id, error: { message: 'unexpected method' } }) + '\\n');
+});`;
+    fs.writeFileSync(path.join(fakeBin, 'codex'), script, { mode: 0o755 });
+
+    const result = await doStream(baseOpts('codex', { prompt: '给我讲故事' }));
+    expect(result.ok).toBe(true);
+    expect(result.sessionId).toBe('thread-native');
+    expect(result.workspacePath).toBe(path.join(tmpDir, '.pikiclaw', 'sessions', 'codex', 'thread-native', 'workspace'));
+
+    const record = listPikiclawSessions(tmpDir, 'codex').find(entry => entry.sessionId === 'thread-native');
+    expect(record?.title).toBe('给我讲故事');
+    expect(record?.workspacePath).toBe(path.join(tmpDir, '.pikiclaw', 'sessions', 'codex', 'thread-native', 'workspace'));
+  });
+
+  it('persists completed and incomplete run states in managed session records', async () => {
+    writeFakeScript('claude', [
+      { type: 'system', session_id: 'sess-status' },
+      { type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'done' } } },
+      { type: 'result', session_id: 'sess-status' },
+    ]);
+
+    const completed = await doStream(baseOpts('claude', { prompt: 'first pass' }));
+    expect(completed.ok).toBe(true);
+
+    let record = listPikiclawSessions(tmpDir, 'claude').find(entry => entry.sessionId === 'sess-status');
+    expect(record?.runState).toBe('completed');
+    expect(record?.runDetail).toBeNull();
+
+    const partialScript = `#!/bin/sh
+echo '${JSON.stringify({ type: 'system', session_id: 'sess-status' })}'
+echo '${JSON.stringify({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'partial answer' } } })}'
+echo "quota exceeded" >&2
+exit 1`;
+    fs.writeFileSync(path.join(fakeBin, 'claude'), partialScript, { mode: 0o755 });
+
+    const incomplete = await doStream(baseOpts('claude', { sessionId: 'sess-status', prompt: 'second pass' }));
+    expect(incomplete.ok).toBe(false);
+
+    record = listPikiclawSessions(tmpDir, 'claude').find(entry => entry.sessionId === 'sess-status');
+    expect(record?.runState).toBe('incomplete');
+    expect(record?.runDetail).toContain('quota exceeded');
+  });
+
   it('routes to claude, clears stale manifests, and uses stream-json attachments only when needed', async () => {
     writeFakeScript('claude', [
       { type: 'system', session_id: 's-unified' },

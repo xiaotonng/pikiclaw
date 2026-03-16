@@ -301,6 +301,9 @@ function getNativeGeminiSessions(workdir: string): SessionInfo[] {
         createdAt: data.startTime || null,
         title,
         running: data.lastUpdated ? Date.now() - Date.parse(data.lastUpdated) < 10_000 : false,
+        runState: data.lastUpdated && Date.now() - Date.parse(data.lastUpdated) < 10_000 ? 'running' : 'completed',
+        runDetail: null,
+        runUpdatedAt: data.lastUpdated || data.startTime || null,
       });
     } catch { /* skip */ }
   }
@@ -318,7 +321,10 @@ function getGeminiSessions(workdir: string, limit?: number): SessionListResult {
     model: record.model,
     createdAt: record.createdAt,
     title: record.title,
-    running: Date.now() - Date.parse(record.updatedAt) < 10_000,
+    running: record.runState === 'running',
+    runState: record.runState,
+    runDetail: record.runDetail,
+    runUpdatedAt: record.runUpdatedAt,
   }));
   const nativeSessions = getNativeGeminiSessions(resolvedWorkdir);
 

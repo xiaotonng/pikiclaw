@@ -3,7 +3,7 @@ import { useStore } from '../store';
 import { createT } from '../i18n';
 import { api } from '../api';
 import { Modal, ModalHeader, Button, Input, Label, Badge } from './ui';
-import { fmtTime, getAgentMeta } from '../utils';
+import { fmtTime, getAgentMeta, sessionDisplayDetail, sessionDisplayState } from '../utils';
 import type { SessionInfo, SessionTailMessage, DirEntry } from '../types';
 
 const PLAYWRIGHT_MCP_EXTENSION_URL = 'https://chromewebstore.google.com/detail/playwright-mcp-bridge/mmlmfjhmonkocbjadbfplnigmagldckm';
@@ -468,6 +468,8 @@ export function SessionDetailModal({ open, onClose, agent, sessionId, session }:
   }, [open, agent, sessionId, t]);
 
   const m = getAgentMeta(agent);
+  const displayState = session ? sessionDisplayState(session) : 'completed';
+  const displayDetail = session ? sessionDisplayDetail(session) : null;
 
   return (
     <Modal open={open} onClose={onClose} wide>
@@ -481,8 +483,16 @@ export function SessionDetailModal({ open, onClose, agent, sessionId, session }:
           <div className="text-fg-4">{t('modal.status')}</div>
           <div className="flex flex-wrap items-center gap-2">
             {session.isCurrent && <Badge variant="accent" className="!text-[10px]">{t('sessions.current')}</Badge>}
-            {session.running ? <Badge variant="ok" className="!text-[10px]">{t('status.running')}</Badge> : <Badge variant="muted" className="!text-[10px]">{t('modal.ended')}</Badge>}
+            {displayState === 'running' && <Badge variant="ok" className="!text-[10px]">{t('status.running')}</Badge>}
+            {displayState === 'incomplete' && <Badge variant="warn" className="!text-[10px]">{t('sessions.incomplete')}</Badge>}
+            {displayState === 'completed' && <Badge variant="muted" className="!text-[10px]">{t('sessions.completed')}</Badge>}
           </div>
+          {displayState === 'incomplete' && displayDetail && (
+            <>
+              <div className="text-fg-4">{t('sessions.lastIssue')}</div>
+              <div className="text-amber-200/80">{displayDetail}</div>
+            </>
+          )}
           <div className="text-fg-4">Session ID</div><div className="font-mono text-[10px] text-fg-5 truncate" title={sessionId}>{sessionId}</div>
           <div className="text-fg-4">{t('modal.workdir')}</div><div className="font-mono text-[10px] text-fg-5 truncate" title={session.workdir || ''}>{session.workdir || '—'}</div>
         </div>

@@ -248,6 +248,9 @@ function getNativeClaudeSessions(workdir: string): SessionInfo[] {
         createdAt: stat.birthtime.toISOString(),
         title,
         running: Date.now() - stat.mtimeMs < 10_000,
+        runState: Date.now() - stat.mtimeMs < 10_000 ? 'running' : 'completed',
+        runDetail: null,
+        runUpdatedAt: stat.mtime.toISOString(),
       });
     } catch { /* skip unreadable files */ }
   }
@@ -265,7 +268,10 @@ function getClaudeSessions(workdir: string, limit?: number): SessionListResult {
     model: record.model,
     createdAt: record.createdAt,
     title: record.title,
-    running: Date.now() - Date.parse(record.updatedAt) < 10_000,
+    running: record.runState === 'running',
+    runState: record.runState,
+    runDetail: record.runDetail,
+    runUpdatedAt: record.runUpdatedAt,
   }));
   const nativeSessions = getNativeClaudeSessions(resolvedWorkdir);
 

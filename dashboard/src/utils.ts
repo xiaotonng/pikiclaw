@@ -1,3 +1,5 @@
+import type { SessionInfo } from './types';
+
 export function fmtBytes(b: number): string {
   if (b < 1024) return b + 'B';
   if (b < 1048576) return (b / 1024).toFixed(0) + 'KB';
@@ -76,4 +78,16 @@ export const agentMeta: Record<string, AgentMeta> = {
 
 export function getAgentMeta(agent: string): AgentMeta {
   return agentMeta[agent] || { ...defaultMeta, label: agent };
+}
+
+export type SessionDisplayState = 'running' | 'completed' | 'incomplete';
+
+export function sessionDisplayState(session: Pick<SessionInfo, 'running' | 'runState'>): SessionDisplayState {
+  if (session.running || session.runState === 'running') return 'running';
+  return session.runState === 'incomplete' ? 'incomplete' : 'completed';
+}
+
+export function sessionDisplayDetail(session: Pick<SessionInfo, 'runDetail'>): string | null {
+  const detail = String(session.runDetail || '').trim();
+  return detail || null;
 }

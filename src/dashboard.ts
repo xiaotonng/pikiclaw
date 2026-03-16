@@ -168,6 +168,7 @@ function enrichSessionResultWithRuntimeStatus(result: SessionListResult, bot: Bo
       return {
         ...session,
         running: status.isRunning,
+        runState: status.isRunning ? 'running' : session.runState,
         isCurrent: status.isCurrent,
       };
     }),

@@ -1,10 +1,12 @@
 import type { Bot, ChatId, Agent, SessionRuntime } from './bot.js';
 import { normalizeAgent } from './bot.js';
+import { getSessionStatusForChat } from './session-status.js';
 import {
   getAgentsListData,
   getModelsListData,
   getSessionsPageData,
   getSkillsListData,
+  summarizeSessionRun,
   modelMatchesSelection,
   resolveSkillPrompt,
 } from './bot-commands.js';
@@ -288,13 +290,14 @@ export async function executeCommandAction(
 
       const runtime = bot.adoptExistingSessionForChat(chatId, session);
       const displayId = session.sessionId || action.sessionId;
+      const sessionStatus = getSessionStatusForChat(bot, chat, session);
       return {
         kind: 'notice',
         callbackText: `Switched: ${displayId.slice(0, 12)}`,
         notice: {
           title: 'Session Switched',
           value: displayId,
-          detail: 'Switched successfully',
+          detail: summarizeSessionRun({ ...session, running: sessionStatus.isRunning }).noticeDetail,
           valueMode: 'code',
         },
         session: runtime,

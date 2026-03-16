@@ -4,7 +4,7 @@ import { createT } from '../i18n';
 import { api } from '../api';
 import { Badge, Button, Card, Dot, SectionLabel } from './ui';
 import { BrandBadge } from './BrandIcon';
-import { cn, fmtTime, getAgentMeta } from '../utils';
+import { cn, fmtTime, getAgentMeta, sessionDisplayDetail, sessionDisplayState } from '../utils';
 import type { AgentInfo, SessionInfo, SessionsPageResult } from '../types';
 
 const PAGE_SIZE = 6;
@@ -28,7 +28,14 @@ function SessionCard({
   const sid = session.sessionId || '';
   const title = session.title || sid.slice(0, 16) || 'Session';
   const truncTitle = title.length > 28 ? title.slice(0, 28) + '...' : title;
-  const dotVariant = session.running ? 'ok' : session.isCurrent ? 'warn' : 'idle';
+  const displayState = sessionDisplayState(session);
+  const detail = sessionDisplayDetail(session);
+  const dotVariant = displayState === 'running' ? 'ok' : displayState === 'incomplete' || session.isCurrent ? 'warn' : 'idle';
+  const stateBadge = displayState === 'running'
+    ? <Badge variant="ok" className="!h-5 !px-2 !text-[10px]">{t('status.running')}</Badge>
+    : displayState === 'incomplete'
+      ? <Badge variant="warn" className="!h-5 !px-2 !text-[10px]">{t('sessions.incomplete')}</Badge>
+      : <Badge variant="muted" className="!h-5 !px-2 !text-[10px]">{t('sessions.completed')}</Badge>;
 
   return (
     <Card
@@ -45,8 +52,11 @@ function SessionCard({
         <span>{fmtTime(session.createdAt)}</span>
         {session.model && <span className="font-mono">{session.model}</span>}
         {session.isCurrent && <Badge variant="accent" className="!h-5 !px-2 !text-[10px]">{t('sessions.current')}</Badge>}
-        {session.running && <Badge variant="ok" className="!h-5 !px-2 !text-[10px]">{t('status.running')}</Badge>}
+        {stateBadge}
       </div>
+      {displayState === 'incomplete' && detail && (
+        <div className="mt-1 truncate text-[11px] text-amber-200/80">{detail}</div>
+      )}
       <div className="mt-1.5 truncate text-[11px] font-mono text-fg-6">{sid}</div>
     </Card>
   );
