@@ -757,9 +757,9 @@ describe('claude stream', () => {
       },
     }));
     expect(claudeFallback.ok).toBe(true);
-    expect(claudeFallback.contextWindow).toBe(200000);
-    expect(claudeFallback.contextPercent).toBe(13);
-    expect(claudePreviewPercents).toContain(13);
+    expect(claudeFallback.contextWindow).toBe(1000000);
+    expect(claudeFallback.contextPercent).toBe(2.6);
+    expect(claudePreviewPercents).toContain(2.6);
 
     writeFakeScript('claude', [
       { type: 'system', session_id: 's2' },
@@ -1093,9 +1093,7 @@ exit 0`;
       });
       expect(claudeModels.models.map(m => m.id)).toEqual([
         'claude-opus-4-6',
-        'claude-opus-4-6[1m]',
         'claude-sonnet-4-6',
-        'claude-sonnet-4-6[1m]',
         'claude-haiku-4-5-20251001',
       ]);
 

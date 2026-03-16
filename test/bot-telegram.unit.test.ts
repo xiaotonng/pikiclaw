@@ -284,7 +284,7 @@ describe('TelegramBot status and session previews', () => {
         agent: 'claude',
         models: [
           { id: 'claude-sonnet-4-6', alias: 'sonnet' },
-          { id: 'claude-opus-4-6[1m]', alias: 'opus-1m' },
+          { id: 'claude-opus-4-6', alias: 'opus' },
         ],
         sources: ['app-server model/list'],
         note: 'debug note should stay hidden while models exist',
@@ -297,7 +297,7 @@ describe('TelegramBot status and session previews', () => {
       expect(replies[0]?.text).toContain('Source: app-server model/list');
       expect(replies[0]?.text).toContain('debug note should stay hidden while models exist');
       expect(replies[0]?.opts?.keyboard?.inline_keyboard).toEqual([
-        [{ text: 'sonnet', callback_data: 'mod:claude-sonnet-4-6' }, { text: 'opus-1m', callback_data: 'mod:claude-opus-4-6[1m]' }],
+        [{ text: '● opus', callback_data: 'mod:claude-opus-4-6' }, { text: 'sonnet', callback_data: 'mod:claude-sonnet-4-6' }],
         [{ text: 'Low', callback_data: 'eff:low' }, { text: 'Medium', callback_data: 'eff:medium' }, { text: '● High', callback_data: 'eff:high' }],
       ]);
     }
@@ -383,10 +383,10 @@ describe('TelegramBot status and session previews', () => {
       );
 
       bot.chat(ctx.chatId).agent = 'claude';
-      await bot.handleCallback('mod:claude-opus-4-6[1m]', ctx as any);
+      await bot.handleCallback('mod:claude-sonnet-4-6', ctx as any);
       expect(ctx.editReply).toHaveBeenLastCalledWith(
         ctx.messageId,
-        '<b>Model</b>\n<code>claude-opus-4-6[1m]</code>\n<i>claude · session reset</i>',
+        '<b>Model</b>\n<code>claude-sonnet-4-6</code>\n<i>claude · session reset</i>',
         { parseMode: 'HTML' },
       );
     }

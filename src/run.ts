@@ -11,6 +11,7 @@
 import { ensureGitignore, formatThinkingForDisplay } from './bot.js';
 import { initializeProjectSkills, listAgents, listModels, listSkills, getUsage, doStream, getSessions, getSessionTail } from './code-agent.js';
 import type { Agent, StreamOpts } from './code-agent.js';
+import { getDriver } from './agent-driver.js';
 import { loadUserConfig, resolveUserWorkdir } from './user-config.js';
 import { VERSION } from './version.js';
 
@@ -52,6 +53,7 @@ Commands:
   codex-run       Run a single Codex prompt and print the result
   claude-status   Show Claude agent info and API usage
   codex-status    Show Codex agent info and API usage
+  gemini-status   Show Gemini agent info and API usage
   claude-models   List available Claude models
   codex-models    List available Codex models
   claude-sessions List recent Claude sessions for the workdir
@@ -122,6 +124,23 @@ async function main() {
       const mark = info.installed ? '\u2713' : '\u2717';
       process.stdout.write(`${mark} codex  ${info.version ?? 'not installed'}  ${info.path ?? ''}\n`);
       const usage = getUsage({ agent: 'codex' });
+      if (usage.error) {
+        process.stdout.write(`  ${usage.error}\n`);
+      } else {
+        for (const w of usage.windows) {
+          process.stdout.write(`  [${w.label}] ${w.usedPercent ?? '?'}% used  status=${w.status ?? 'n/a'}\n`);
+        }
+      }
+      break;
+    }
+    case 'gemini-status': {
+      const info = listAgents({ includeVersion: true }).agents.find(a => a.agent === 'gemini')!;
+      const mark = info.installed ? '\u2713' : '\u2717';
+      process.stdout.write(`${mark} gemini  ${info.version ?? 'not installed'}  ${info.path ?? ''}\n`);
+      const driver = getDriver('gemini');
+      const usage = driver.getUsageLive
+        ? await driver.getUsageLive({ agent: 'gemini', model: args.model })
+        : getUsage({ agent: 'gemini', model: args.model });
       if (usage.error) {
         process.stdout.write(`  ${usage.error}\n`);
       } else {

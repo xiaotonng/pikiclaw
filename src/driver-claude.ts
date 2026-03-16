@@ -19,7 +19,7 @@ import {
   IMAGE_EXTS, mimeForExt,
   listPikiclawSessions, findPikiclawSession, isPendingSessionId,
   readTailLines, stripInjectedPrompts,
-  roundPercent, toIsoFromEpochSeconds, modelFamily, emptyUsage, normalizeUsageStatus,
+  roundPercent, toIsoFromEpochSeconds, modelFamily, normalizeClaudeModelId, emptyUsage, normalizeUsageStatus,
 } from './code-agent.js';
 
 // ---------------------------------------------------------------------------
@@ -54,7 +54,8 @@ function buildClaudeMultimodalStdin(prompt: string, attachments: string[]): stri
 
 function claudeCmd(o: StreamOpts): string[] {
   const args = ['claude', '-p', '--verbose', '--output-format', 'stream-json', '--include-partial-messages'];
-  if (o.claudeModel) args.push('--model', o.claudeModel);
+  const model = normalizeClaudeModelId(o.claudeModel);
+  if (model) args.push('--model', model);
   if (o.claudePermissionMode) args.push('--permission-mode', o.claudePermissionMode);
   if (o.sessionId) args.push('--resume', o.sessionId);
   if (o.attachments?.length) {
@@ -69,11 +70,11 @@ function claudeCmd(o: StreamOpts): string[] {
 }
 
 function claudeContextWindowFromModel(model: unknown): number | null {
-  const id = typeof model === 'string' ? model.trim().toLowerCase() : '';
+  const id = normalizeClaudeModelId(model).toLowerCase();
   if (!id) return null;
-  if (id.endsWith('[1m]')) return 1_000_000;
-  if (id === 'opus' || id === 'sonnet' || id === 'haiku') return 200_000;
-  if (/^claude-(opus|sonnet|haiku)-/.test(id)) return 200_000;
+  if (id === 'haiku' || /^claude-haiku-/.test(id)) return 200_000;
+  if (id === 'opus' || id === 'sonnet') return 1_000_000;
+  if (/^claude-(opus|sonnet)-/.test(id)) return 1_000_000;
   return null;
 }
 
@@ -354,9 +355,7 @@ function getClaudeSessionTail(opts: SessionTailOpts): SessionTailResult {
 
 const CLAUDE_MODELS: ModelInfo[] = [
   { id: 'claude-opus-4-6', alias: 'opus' },
-  { id: 'claude-opus-4-6[1m]', alias: 'opus-1m' },
   { id: 'claude-sonnet-4-6', alias: 'sonnet' },
-  { id: 'claude-sonnet-4-6[1m]', alias: 'sonnet-1m' },
   { id: 'claude-haiku-4-5-20251001', alias: 'haiku' },
 ];
 

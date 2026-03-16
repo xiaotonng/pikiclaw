@@ -105,3 +105,53 @@ describe('Claude usage resolution', () => {
     }
   });
 });
+
+describe('Claude context fallback', () => {
+  const originalPath = process.env.PATH;
+
+  afterEach(() => {
+    if (originalPath == null) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+  });
+
+  it('uses 1M fallback for Opus and Sonnet base models', async () => {
+    const { doClaudeStream } = await import('../src/code-agent.ts');
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pikiclaw-claude-context-'));
+    const fakeBin = path.join(tmpDir, 'bin');
+    fs.mkdirSync(fakeBin, { recursive: true });
+    process.env.PATH = `${fakeBin}:${process.env.PATH}`;
+
+    const writeFakeScript = (jsonLines: object[]) => {
+      const payload = jsonLines.map(j => JSON.stringify(j)).join('\n');
+      const script = `#!/bin/sh\ncat <<'JSONL_EOF'\n${payload}\nJSONL_EOF\n`;
+      fs.writeFileSync(path.join(fakeBin, 'claude'), script, { mode: 0o755 });
+    };
+
+    const baseOpts = {
+      agent: 'claude' as const,
+      prompt: 'test prompt',
+      workdir: tmpDir,
+      timeout: 10,
+      sessionId: null,
+      model: null,
+      thinkingEffort: 'high' as const,
+      onText: () => {},
+    };
+
+    writeFakeScript([
+      { type: 'system', session_id: 's-ctx', model: 'claude-sonnet-4-6' },
+      {
+        type: 'stream_event',
+        event: {
+          type: 'message_start',
+          message: { usage: { input_tokens: 25_000, cache_read_input_tokens: 1_000, cache_creation_input_tokens: 0 } },
+        },
+      },
+      { type: 'result', session_id: 's-ctx', usage: { input_tokens: 25_000, cache_read_input_tokens: 1_000, output_tokens: 1 } },
+    ]);
+
+    const result = await doClaudeStream(baseOpts);
+    expect(result.contextWindow).toBe(1_000_000);
+    expect(result.contextPercent).toBe(2.6);
+  });
+});

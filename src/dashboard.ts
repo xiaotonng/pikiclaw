@@ -11,7 +11,7 @@ import os from 'node:os';
 import { exec, execFileSync, execSync, spawn, type ChildProcess } from 'node:child_process';
 import { collectSetupState, isSetupReady, type SetupState } from './onboarding.js';
 import { loadUserConfig, saveUserConfig, applyUserConfig, resolveUserWorkdir, setUserWorkdir, hasUserConfigFile, type UserConfig } from './user-config.js';
-import { listAgents, getSessionTail, getSessions, listModels, type AgentDetectOptions, type SessionInfo, type SessionListResult, type UsageResult } from './code-agent.js';
+import { listAgents, getSessionTail, getSessions, listModels, normalizeClaudeModelId, type AgentDetectOptions, type SessionInfo, type SessionListResult, type UsageResult } from './code-agent.js';
 import type { Agent } from './code-agent.js';
 import { getDriver } from './agent-driver.js';
 import type { Bot } from './bot.js';
@@ -659,7 +659,7 @@ export async function startDashboard(opts: DashboardOptions = {}): Promise<Dashb
 
   function configModel(config: Partial<UserConfig>, agent: Agent): string | undefined {
     switch (agent) {
-      case 'claude': return String(config.claudeModel || '').trim() || undefined;
+      case 'claude': return normalizeClaudeModelId(config.claudeModel || '') || undefined;
       case 'codex': return String(config.codexModel || '').trim() || undefined;
       case 'gemini': return String(config.geminiModel || '').trim() || undefined;
     }
@@ -705,7 +705,8 @@ export async function startDashboard(opts: DashboardOptions = {}): Promise<Dashb
 
   function getRuntimeModel(agent: Agent, config = loadUserConfig()): string {
     if (botRef) return botRef.modelForAgent(agent) || defaultModels[agent];
-    return String(runtimePrefs.models[agent] || configModel(config, agent) || modelEnv(agent) || defaultModels[agent]).trim();
+    const value = String(runtimePrefs.models[agent] || configModel(config, agent) || modelEnv(agent) || defaultModels[agent]).trim();
+    return agent === 'claude' ? normalizeClaudeModelId(value) : value;
   }
 
   function getRuntimeEffort(agent: Agent, config = loadUserConfig()): string | null {

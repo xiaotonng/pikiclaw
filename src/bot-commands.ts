@@ -12,7 +12,7 @@
 import path from 'node:path';
 import type { Bot, ChatId, Agent, SessionInfo, SessionRuntime, ChatState, StreamResult } from './bot.js';
 import { fmtTokens, fmtUptime, fmtBytes } from './bot.js';
-import { getProjectSkillPaths } from './code-agent.js';
+import { getProjectSkillPaths, normalizeClaudeModelId } from './code-agent.js';
 import { getDriver } from './agent-driver.js';
 import { buildWelcomeIntro, buildSkillCommandName, indexSkillsByCommand, SKILL_CMD_PREFIX } from './bot-menu.js';
 import { buildBotMenuState } from './bot-orchestration.js';
@@ -285,14 +285,10 @@ export interface ModelsListData {
 }
 
 function claudeModelSelectionKey(modelId: string | null | undefined): string | null {
-  const value = String(modelId || '').trim().toLowerCase();
+  const value = normalizeClaudeModelId(modelId).toLowerCase();
   if (!value) return null;
-  if (value === 'opus' || value === 'opus-1m' || value.startsWith('claude-opus-')) {
-    return value === 'opus-1m' || value.endsWith('[1m]') ? 'opus-1m' : 'opus';
-  }
-  if (value === 'sonnet' || value === 'sonnet-1m' || value.startsWith('claude-sonnet-')) {
-    return value === 'sonnet-1m' || value.endsWith('[1m]') ? 'sonnet-1m' : 'sonnet';
-  }
+  if (value === 'opus' || value.startsWith('claude-opus-')) return 'opus';
+  if (value === 'sonnet' || value.startsWith('claude-sonnet-')) return 'sonnet';
   if (value === 'haiku' || value.startsWith('claude-haiku-')) return 'haiku';
   return null;
 }

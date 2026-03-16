@@ -73,7 +73,7 @@ describe('bot-telegram render helpers', () => {
     expect(shortened.endsWith('project')).toBe(true);
     expect(compactCode('/Users/xiaoxiao/Desktop/work/pikiclaw/project', 24)).toContain('<code>');
     expect(buildCompactSelectionTitle('Agents', 'codex')).toBe('<b>Agents</b> · <code>codex</code>');
-    expect(buildCompactSelectionNotice('Model', 'claude-sonnet-4-6[1m]', 'claude · session reset')).toContain('<b>Model</b>');
+    expect(buildCompactSelectionNotice('Model', 'claude-sonnet-4-6', 'claude · session reset')).toContain('<b>Model</b>');
 
     // --- keeps longer activity visible when the preview has no body text ---
     const activity = [

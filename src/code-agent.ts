@@ -426,6 +426,10 @@ export function modelFamily(model: string | null | undefined): string | null {
   return null;
 }
 
+export function normalizeClaudeModelId(model: unknown): string {
+  return typeof model === 'string' ? model.trim() : '';
+}
+
 export function emptyUsage(agent: Agent, error: string): UsageResult {
   return { ok: false, agent, source: null, capturedAt: null, status: null, windows: [], error };
 }

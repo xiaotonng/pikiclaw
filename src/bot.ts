@@ -14,7 +14,7 @@ import {
   type Agent, type CodexCumulativeUsage, type StreamOpts, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type SessionInfo, type UsageResult,
   type CodexInteractionRequest,
   type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult,
-  type SkillInfo, type SkillListResult, type AgentDetectOptions, isPendingSessionId,
+  type SkillInfo, type SkillListResult, type AgentDetectOptions, isPendingSessionId, normalizeClaudeModelId,
 } from './code-agent.js';
 import { getDriver, hasDriver, allDriverIds } from './agent-driver.js';
 import { terminateProcessTree } from './process-control.js';
@@ -200,7 +200,7 @@ function buildMcpDeliveryPrompt(): string {
 
 function configModelValue(config: Record<string, any>, agent: Agent): string {
   switch (agent) {
-    case 'claude': return String(config.claudeModel || process.env.CLAUDE_MODEL || 'claude-opus-4-6').trim();
+    case 'claude': return normalizeClaudeModelId(config.claudeModel || process.env.CLAUDE_MODEL || 'claude-opus-4-6');
     case 'codex': return String(config.codexModel || process.env.CODEX_MODEL || 'gpt-5.4').trim();
     case 'gemini': return String(config.geminiModel || process.env.GEMINI_MODEL || 'gemini-3.1-pro-preview').trim();
   }
