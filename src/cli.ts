@@ -6,7 +6,7 @@
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { startAgentAutoUpdate } from './agent-auto-update.js';
-import { envBool } from './bot.js';
+import { envBool, DEFAULT_RUN_TIMEOUT_S } from './bot.js';
 import { TelegramBot } from './bot-telegram.js';
 import { hasConfiguredChannelToken, resolveConfiguredChannels } from './cli-channels.js';
 import { listAgents } from './code-agent.js';
@@ -253,7 +253,7 @@ Options:
   --full-access             Codex full-access + Claude bypassPermissions + Gemini yolo/no-sandbox  [default]
   --safe-mode               Use safer agent permission modes
   --allowed-ids <id,id>     Comma-separated chat/user ID whitelist
-  --timeout <seconds>       Max seconds per agent request  [default: 1800]
+  --timeout <seconds>       Max seconds per agent request  [default: ${DEFAULT_RUN_TIMEOUT_S}]
   --doctor                  Run setup checks and exit
   --setup                   Run the interactive setup wizard
   --no-daemon               Disable watchdog (auto-restart on crash is ON by default)

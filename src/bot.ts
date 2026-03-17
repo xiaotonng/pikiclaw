@@ -27,6 +27,7 @@ import {
 
 export { type Agent, type CodexCumulativeUsage, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type SessionInfo, type UsageResult, type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult, type SkillInfo, type SkillListResult };
 export type ChatId = number | string;
+export const DEFAULT_RUN_TIMEOUT_S = 7200;
 const MACOS_USER_ACTIVITY_PULSE_INTERVAL_MS = 20_000;
 const MACOS_USER_ACTIVITY_PULSE_TIMEOUT_S = 30;
 
@@ -550,7 +551,7 @@ export class Bot {
     };
 
     this.defaultAgent = normalizeAgent('codex');
-    this.runTimeout = envInt('PIKICLAW_TIMEOUT', 1800);
+    this.runTimeout = envInt('PIKICLAW_TIMEOUT', DEFAULT_RUN_TIMEOUT_S);
     this.allowedChatIds = parseAllowedChatIds(process.env.PIKICLAW_ALLOWED_IDS || '');
     this.refreshManagedConfig(getActiveUserConfig(), { initial: true });
     this.userConfigUnsubscribe = onUserConfigChange(config => this.refreshManagedConfig(config));

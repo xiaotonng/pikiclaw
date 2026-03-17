@@ -8,7 +8,7 @@
  *   npm run command -- codex-models
  */
 
-import { ensureGitignore, formatThinkingForDisplay } from './bot.js';
+import { ensureGitignore, formatThinkingForDisplay, DEFAULT_RUN_TIMEOUT_S } from './bot.js';
 import { initializeProjectSkills, listAgents, listModels, listSkills, getUsage, doStream, getSessions, getSessionTail } from './code-agent.js';
 import type { Agent, StreamOpts } from './code-agent.js';
 import { getDriver } from './agent-driver.js';
@@ -17,7 +17,7 @@ import { VERSION } from './version.js';
 
 function parseArgs(argv: string[]) {
   const args: Record<string, any> = {
-    command: null, model: null, workdir: null, prompt: null, timeout: 1800, help: false,
+    command: null, model: null, workdir: null, prompt: null, timeout: DEFAULT_RUN_TIMEOUT_S, help: false,
     session: null, n: 4,
   };
   const positional: string[] = [];
@@ -29,7 +29,7 @@ function parseArgs(argv: string[]) {
       case '-p': case '--prompt': args.prompt = it.next().value; break;
       case '-s': case '--session': args.session = it.next().value; break;
       case '-n': args.n = parseInt(it.next().value ?? '', 10) || 4; break;
-      case '--timeout': args.timeout = parseInt(it.next().value ?? '', 10) || 1800; break;
+      case '--timeout': args.timeout = parseInt(it.next().value ?? '', 10) || DEFAULT_RUN_TIMEOUT_S; break;
       case '-h': case '--help': args.help = true; break;
       default:
         if (arg.startsWith('-')) { process.stderr.write(`Unknown option: ${arg}\n`); process.exit(1); }
@@ -69,7 +69,7 @@ Options:
   -w, --workdir <dir>   Working directory  [default: current process cwd]
   -s, --session <id>    Session ID (for tail; omit to use latest session)
   -n <count>            Number of messages to show  [default: 4]
-  --timeout <seconds>   Max seconds per request  [default: 1800]
+  --timeout <seconds>   Max seconds per request  [default: ${DEFAULT_RUN_TIMEOUT_S}]
   -h, --help            Print this help
 
 Examples:
