@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { Agent } from './code-agent.js';
+import { USER_CONFIG_SYNC_DEFAULT_INTERVAL_MS } from './constants.js';
 
 export type ChannelName = 'telegram' | 'feishu' | 'whatsapp';
 
@@ -239,7 +240,7 @@ export function setUserWorkdir(workdir: string, options: { notify?: boolean } = 
 }
 
 export function startUserConfigSync(options: SyncUserConfigOptions = {}): () => void {
-  const intervalMs = Math.max(250, Math.round(options.intervalMs ?? 1_000));
+  const intervalMs = Math.max(250, Math.round(options.intervalMs ?? USER_CONFIG_SYNC_DEFAULT_INTERVAL_MS));
   if (options.overrides) userConfigSyncOverrides = { ...options.overrides };
 
   const syncNow = () => {

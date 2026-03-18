@@ -66,6 +66,7 @@ import {
   splitText,
   sleep,
 } from './channel-base.js';
+import { TELEGRAM_LIMITS } from './constants.js';
 
 // ---------------------------------------------------------------------------
 // Proxy support — automatically respects HTTPS_PROXY / HTTP_PROXY / NO_PROXY
@@ -137,8 +138,8 @@ interface ThreadedOpts {
   messageThreadId?: number;
 }
 
-const TG_MAX = 4096;
-const FILE_MAX_BYTES = 20 * 1024 * 1024; // 20MB max for file send/receive
+const TG_MAX = TELEGRAM_LIMITS.maxMessageLength;
+const FILE_MAX_BYTES = TELEGRAM_LIMITS.fileMaxBytes;
 const PHOTO_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp']);
 
 function previewText(value: string, max = 280): string {
@@ -330,7 +331,7 @@ class TelegramChannel extends Channel {
         if (attempt >= 10) throw e;
         this._log(`[connect] attempt ${attempt} failed: ${e.message ?? e} — retrying in ${delay / 1000}s`);
         await sleep(delay);
-        delay = Math.min(delay * 2, 60_000);
+        delay = Math.min(delay * 2, TELEGRAM_LIMITS.maxRetryDelay);
       }
     }
   }
@@ -366,7 +367,7 @@ class TelegramChannel extends Channel {
         this._log(`[poll] error: ${e.message ?? e} — retrying in ${backoff / 1000}s`);
         this._hError?.(e);
         await sleep(backoff);
-        backoff = Math.min(backoff * 2, 60_000);
+        backoff = Math.min(backoff * 2, TELEGRAM_LIMITS.maxRetryDelay);
       }
     }
   }

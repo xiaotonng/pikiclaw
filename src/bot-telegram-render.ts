@@ -1,4 +1,4 @@
-import type { Agent, StreamPreviewMeta, StreamPreviewPlan, StreamResult } from './bot.js';
+import type { Agent, StreamPreviewMeta, StreamResult } from './bot.js';
 import type { SkillsListData } from './bot-commands.js';
 import type { HumanLoopPromptState } from './human-loop.js';
 import type {
@@ -9,8 +9,6 @@ import type {
   CommandSelectionView,
 } from './bot-command-ui.js';
 import { encodeCommandAction } from './bot-command-ui.js';
-import { fmtUptime, formatThinkingForDisplay, thinkLabel } from './bot.js';
-import { formatActivityCommandSummary, parseActivitySummary, renderPlanForPreview, summarizeActivityForPreview } from './bot-streaming.js';
 import {
   currentHumanLoopQuestion,
   humanLoopAnsweredCount,
@@ -18,32 +16,16 @@ import {
   isHumanLoopQuestionAnswered,
   summarizeHumanLoopAnswer,
 } from './human-loop.js';
-
-export type FooterStatus = 'running' | 'done' | 'failed';
-
-export interface ProviderUsageSnapshot {
-  ok: boolean;
-  capturedAt: string | null;
-  status: string | null;
-  windows: Array<{
-    label: string;
-    usedPercent: number | null;
-    remainingPercent: number | null;
-    resetAfterSeconds: number | null;
-    status: string | null;
-  }>;
-  error: string | null;
-}
-
-export interface StreamPreviewRenderInput {
-  agent: Agent;
-  elapsedMs: number;
-  bodyText: string;
-  thinking: string;
-  activity: string;
-  meta?: StreamPreviewMeta | null;
-  plan?: StreamPreviewPlan | null;
-}
+import type { FooterStatus, ProviderUsageSnapshot, StreamPreviewRenderInput } from './bot-render-shared.js';
+import {
+  footerStatusSymbol,
+  formatFooterSummary,
+  trimActivityForPreview,
+  buildProviderUsageLines,
+  extractFinalReplyData,
+  extractStreamPreviewData,
+} from './bot-render-shared.js';
+export type { FooterStatus, ProviderUsageSnapshot, StreamPreviewRenderInput } from './bot-render-shared.js';
 
 export interface FinalReplyRender {
   fullHtml: string;
@@ -313,31 +295,6 @@ export function renderSkillsListHtml(d: SkillsListData): string {
   return lines.join('\n');
 }
 
-function fmtCompactUptime(ms: number): string {
-  return fmtUptime(ms).replace(/\s+/g, '');
-}
-
-function footerStatusSymbol(status: FooterStatus): string {
-  switch (status) {
-    case 'running': return '●';
-    case 'done': return '✓';
-    case 'failed': return '✗';
-  }
-}
-
-function formatFooterSummary(
-  agent: Agent,
-  elapsedMs: number,
-  meta?: StreamPreviewMeta | null,
-  contextPercent?: number | null,
-): string {
-  const parts: string[] = [agent];
-  const ctx = contextPercent ?? meta?.contextPercent ?? null;
-  if (ctx != null) parts.push(`${ctx}%`);
-  parts.push(fmtCompactUptime(Math.max(0, Math.round(elapsedMs))));
-  return parts.join(' · ');
-}
-
 export function formatPreviewFooterHtml(agent: Agent, elapsedMs: number, meta?: StreamPreviewMeta | null): string {
   return escapeHtml(`${footerStatusSymbol('running')} ${formatFooterSummary(agent, elapsedMs, meta)}`);
 }
@@ -346,65 +303,10 @@ function formatFinalFooterHtml(status: FooterStatus, agent: Agent, elapsedMs: nu
   return escapeHtml(`${footerStatusSymbol(status)} ${formatFooterSummary(agent, elapsedMs, null, contextPercent ?? null)}`);
 }
 
-function rawUsageLine(parts: Array<string | null | undefined>): string {
-  return parts.filter(part => !!part && String(part).trim()).join(' ');
-}
-
 export function formatProviderUsageLines(usage: ProviderUsageSnapshot): string[] {
-  const lines = ['', '<b>Provider Usage</b>'];
-
-  if (!usage.ok) {
-    lines.push(`  Unavailable: ${escapeHtml(usage.error || 'No recent usage data found.')}`);
-    return lines;
-  }
-
-  if (usage.capturedAt) {
-    const capturedAtMs = Date.parse(usage.capturedAt);
-    if (Number.isFinite(capturedAtMs)) {
-      lines.push(`  Updated: ${fmtUptime(Math.max(0, Date.now() - capturedAtMs))} ago`);
-    }
-  }
-
-  if (!usage.windows.length) {
-    lines.push(`  ${escapeHtml(usage.status ? `status=${usage.status}` : 'No window data')}`);
-    return lines;
-  }
-
-  for (const window of usage.windows) {
-    const details = rawUsageLine([
-      window.usedPercent != null ? `${window.usedPercent}% used` : null,
-      window.status ? `status=${window.status}` : null,
-      window.resetAfterSeconds != null ? `resetAfterSeconds=${window.resetAfterSeconds}` : null,
-    ]);
-    lines.push(`  ${escapeHtml(window.label)}: ${escapeHtml(details || 'No details')}`);
-  }
-
-  return lines;
-}
-
-function trimActivityForPreview(text: string, maxChars = 900): string {
-  if (text.length <= maxChars) return text;
-
-  const lines = text.split('\n').filter(line => line.trim());
-  if (lines.length <= 1) return text.slice(0, Math.max(0, maxChars - 3)).trimEnd() + '...';
-
-  const tailCount = Math.min(2, Math.max(1, lines.length - 1));
-  const tail = lines.slice(-tailCount);
-  const headCandidates = lines.slice(0, Math.max(0, lines.length - tailCount));
-  const reserved = tail.join('\n').length + 5;
-  const budget = Math.max(0, maxChars - reserved);
-  const head: string[] = [];
-  let used = 0;
-
-  for (const line of headCandidates) {
-    const extra = line.length + (head.length ? 1 : 0);
-    if (used + extra > budget) break;
-    head.push(line);
-    used += extra;
-  }
-
-  if (!head.length) return text.slice(0, Math.max(0, maxChars - 3)).trimEnd() + '...';
-  return [...head, '...', ...tail].join('\n');
+  return buildProviderUsageLines(usage).map(line =>
+    line.bold ? `<b>${escapeHtml(line.text)}</b>` : escapeHtml(line.text),
+  );
 }
 
 export function buildInitialPreviewHtml(agent: Agent, waiting = false): string {
@@ -414,33 +316,24 @@ export function buildInitialPreviewHtml(agent: Agent, waiting = false): string {
 }
 
 export function buildStreamPreviewHtml(input: StreamPreviewRenderInput): string {
-  const maxBody = 2400;
-  const display = input.bodyText.trim();
-  const rawThinking = input.thinking.trim();
-  const thinkDisplay = formatThinkingForDisplay(input.thinking, maxBody);
-  const planDisplay = renderPlanForPreview(input.plan ?? null);
-  const activityDisplay = summarizeActivityForPreview(input.activity);
-  const maxActivity = !display && !thinkDisplay && !planDisplay ? 2400 : 1400;
+  const data = extractStreamPreviewData(input);
   const parts: string[] = [];
-  const label = thinkLabel(input.agent);
 
-  if (planDisplay) {
-    parts.push(`<blockquote><b>Plan</b>\n${escapeHtml(planDisplay)}</blockquote>`);
+  if (data.planDisplay) {
+    parts.push(`<blockquote><b>Plan</b>\n${escapeHtml(data.planDisplay)}</blockquote>`);
   }
 
-  if (activityDisplay) {
-    parts.push(`<blockquote><b>Activity</b>\n${escapeHtml(trimActivityForPreview(activityDisplay, maxActivity))}</blockquote>`);
+  if (data.activityDisplay) {
+    parts.push(`<blockquote><b>Activity</b>\n${escapeHtml(trimActivityForPreview(data.activityDisplay, data.maxActivity))}</blockquote>`);
   }
 
-  if (thinkDisplay && !display) {
-    parts.push(`<blockquote><b>${escapeHtml(label)}</b>\n${escapeHtml(thinkDisplay)}</blockquote>`);
-  } else if (display) {
-    if (rawThinking) {
-      const thinkSnippet = formatThinkingForDisplay(input.thinking, 600);
-      parts.push(`<blockquote><b>${escapeHtml(label)}</b>\n${escapeHtml(thinkSnippet)}</blockquote>`);
+  if (data.thinkDisplay && !data.display) {
+    parts.push(`<blockquote><b>${escapeHtml(data.label)}</b>\n${escapeHtml(data.thinkDisplay)}</blockquote>`);
+  } else if (data.display) {
+    if (data.rawThinking) {
+      parts.push(`<blockquote><b>${escapeHtml(data.label)}</b>\n${escapeHtml(data.thinkSnippet)}</blockquote>`);
     }
-    const preview = display.length > maxBody ? '(...truncated)\n' + display.slice(-maxBody) : display;
-    parts.push(mdToTgHtml(preview));
+    parts.push(mdToTgHtml(data.preview));
   }
 
   parts.push(formatPreviewFooterHtml(input.agent, input.elapsedMs, input.meta ?? null));
@@ -448,49 +341,30 @@ export function buildStreamPreviewHtml(input: StreamPreviewRenderInput): string 
 }
 
 export function buildFinalReplyRender(agent: Agent, result: StreamResult): FinalReplyRender {
-  const footerStatus: FooterStatus = result.incomplete || !result.ok ? 'failed' : 'done';
-  const footerHtml = `\n\n${formatFinalFooterHtml(footerStatus, agent, result.elapsedS * 1000, result.contextPercent ?? null)}`;
+  const data = extractFinalReplyData(agent, result);
+  const footerHtml = `\n\n${formatFinalFooterHtml(data.footerStatus, agent, data.elapsedMs, result.contextPercent ?? null)}`;
 
   let activityHtml = '';
   let activityNoteHtml = '';
-  if (result.activity) {
-    const summary = parseActivitySummary(result.activity);
-    const narrative = summary.narrative.join('\n');
-    if (narrative) {
-      let display = narrative;
-      if (display.length > 1600) display = '...\n' + display.slice(-1600);
-      activityHtml = `<blockquote><b>Activity</b>\n${escapeHtml(display)}</blockquote>\n\n`;
-    }
-    const commandSummary = formatActivityCommandSummary(
-      summary.completedCommands,
-      summary.activeCommands,
-      summary.failedCommands,
-    );
-    if (commandSummary) activityNoteHtml = `<i>${escapeHtml(commandSummary)}</i>\n\n`;
+  if (data.activityNarrative) {
+    activityHtml = `<blockquote><b>Activity</b>\n${escapeHtml(data.activityNarrative)}</blockquote>\n\n`;
+  }
+  if (data.activityCommandSummary) {
+    activityNoteHtml = `<i>${escapeHtml(data.activityCommandSummary)}</i>\n\n`;
   }
 
   let thinkingHtml = '';
-  if (result.thinking) {
-    thinkingHtml = `<blockquote><b>${thinkLabel(agent)}</b>\n${escapeHtml(formatThinkingForDisplay(result.thinking, 1600))}</blockquote>\n\n`;
+  if (data.thinkingDisplay) {
+    thinkingHtml = `<blockquote><b>${escapeHtml(data.thinkLabel)}</b>\n${escapeHtml(data.thinkingDisplay)}</blockquote>\n\n`;
   }
 
   let statusHtml = '';
-  if (result.incomplete) {
-    const statusLines: string[] = [];
-    if (result.stopReason === 'max_tokens') statusLines.push('Output limit reached. Response may be truncated.');
-    if (result.stopReason === 'timeout') {
-      statusLines.push(`Timed out after ${fmtUptime(Math.max(0, Math.round(result.elapsedS * 1000)))} before the agent reported completion.`);
-    }
-    if (!result.ok) {
-      const detail = result.error?.trim();
-      if (detail && detail !== result.message.trim() && !statusLines.includes(detail)) statusLines.push(detail);
-      else if (result.stopReason !== 'timeout') statusLines.push('Agent exited before reporting completion.');
-    }
-    statusHtml = `<blockquote expandable><b>Incomplete Response</b>\n${statusLines.map(escapeHtml).join('\n')}</blockquote>\n\n`;
+  if (data.statusLines) {
+    statusHtml = `<blockquote expandable><b>Incomplete Response</b>\n${data.statusLines.map(escapeHtml).join('\n')}</blockquote>\n\n`;
   }
 
   const headerHtml = `${activityHtml}${activityNoteHtml}${statusHtml}${thinkingHtml}`;
-  const bodyHtml = mdToTgHtml(result.message);
+  const bodyHtml = mdToTgHtml(data.bodyMessage);
   return {
     fullHtml: `${headerHtml}${bodyHtml}${footerHtml}`,
     headerHtml,

@@ -1,7 +1,8 @@
 import type { Bot, ChatId, SessionRuntime } from './bot.js';
 import { buildDefaultMenuCommands } from './bot-menu.js';
+import { BOT_SHUTDOWN_FORCE_EXIT_MS as _BOT_SHUTDOWN_FORCE_EXIT_MS } from './constants.js';
 
-export const BOT_SHUTDOWN_FORCE_EXIT_MS = 3_000;
+export const BOT_SHUTDOWN_FORCE_EXIT_MS = _BOT_SHUTDOWN_FORCE_EXIT_MS;
 
 export interface BotMenuState {
   commands: ReturnType<typeof buildDefaultMenuCommands>;

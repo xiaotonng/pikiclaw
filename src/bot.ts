@@ -26,10 +26,12 @@ import {
 } from './human-loop.js';
 
 export { type Agent, type CodexCumulativeUsage, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type SessionInfo, type UsageResult, type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult, type SkillInfo, type SkillListResult };
+import { BOT_TIMEOUTS } from './constants.js';
+
 export type ChatId = number | string;
-export const DEFAULT_RUN_TIMEOUT_S = 7200;
-const MACOS_USER_ACTIVITY_PULSE_INTERVAL_MS = 20_000;
-const MACOS_USER_ACTIVITY_PULSE_TIMEOUT_S = 30;
+export const DEFAULT_RUN_TIMEOUT_S = BOT_TIMEOUTS.defaultRunTimeoutS;
+const MACOS_USER_ACTIVITY_PULSE_INTERVAL_MS = BOT_TIMEOUTS.macosUserActivityPulseInterval;
+const MACOS_USER_ACTIVITY_PULSE_TIMEOUT_S = BOT_TIMEOUTS.macosUserActivityPulseTimeoutS;
 
 // ---------------------------------------------------------------------------
 // Helpers

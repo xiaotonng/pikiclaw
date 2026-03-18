@@ -3,10 +3,15 @@
  * cli.ts — CLI entry point for pikiclaw.
  */
 
+// Mark this process as a Claude Code context so nested claude launches are blocked.
+// The spawn framework in code-agent.ts strips this before launching agent subprocesses.
+process.env.CLAUDECODE = '1';
+
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { startAgentAutoUpdate } from './agent-auto-update.js';
 import { envBool, DEFAULT_RUN_TIMEOUT_S } from './bot.js';
+import { DAEMON_TIMEOUTS } from './constants.js';
 import { TelegramBot } from './bot-telegram.js';
 import { hasConfiguredChannelToken, resolveConfiguredChannels } from './cli-channels.js';
 import { listAgents } from './code-agent.js';
@@ -33,9 +38,9 @@ import { VERSION } from './version.js';
 
 /* ── Daemon (watchdog) mode ─────────────────────────────────────────── */
 
-const DAEMON_RESTART_DELAY_MS = 3_000;
-const DAEMON_MAX_RESTART_DELAY_MS = 60_000;
-const DAEMON_RAPID_CRASH_WINDOW_MS = 10_000;
+const DAEMON_RESTART_DELAY_MS = DAEMON_TIMEOUTS.restartDelay;
+const DAEMON_MAX_RESTART_DELAY_MS = DAEMON_TIMEOUTS.maxRestartDelay;
+const DAEMON_RAPID_CRASH_WINDOW_MS = DAEMON_TIMEOUTS.rapidCrashWindow;
 
 function daemonLog(msg: string) {
   const ts = new Date().toTimeString().slice(0, 8);
@@ -172,66 +177,30 @@ function parseArgs(argv: string[]) {
   return args;
 }
 
-export async function main() {
-  // ── MCP server mode: launched by agent CLI via --mcp-config ──
+/* ── Shared helpers ────────────────────────────────────────────────── */
+
+function processLog(message: string) {
+  const ts = new Date().toTimeString().slice(0, 8);
+  process.stdout.write(`[pikiclaw ${ts}] ${message}\n`);
+}
+
+const listStartupAgents = () => listAgents().agents;
+const listVerboseAgents = () => listAgents({ includeVersion: true }).agents;
+
+/* ── Phase: early exits (MCP serve, --version, --help) ────────────── */
+
+/** If launched as an MCP stdio server, run that and exit. */
+async function handleMcpServeMode(): Promise<boolean> {
   if (process.argv.includes('--mcp-serve')) {
     await import('./mcp-session-server.js');
-    return;
+    return true;
   }
+  return false;
+}
 
-  const args = parseArgs(process.argv.slice(2));
-  let userConfig = loadUserConfig();
-
-  if (args.version) { process.stdout.write(`pikiclaw ${VERSION}\n`); process.exit(0); }
-
-  // Fresh CLI launch (not a daemon-managed child): persist the current working
-  // directory (or explicit -w) into setting.json so the bot session — and any
-  // subsequent daemon-managed restarts — starts in the right place.
-  if (!process.env.PIKICLAW_DAEMON_CHILD) {
-    const cliWorkdir = path.resolve(args.workdir || '.');
-    if (userConfig.workdir !== cliWorkdir) {
-      updateUserConfig({ workdir: cliWorkdir });
-      userConfig = loadUserConfig();
-    }
-  }
-
-  // Daemon mode (default): become a watchdog that supervises the real bot process.
-  // The child is spawned via `npx pikiclaw@latest` so restarts always pull latest code.
-  // Use --no-daemon to disable.
-  if (args.daemon && !process.env.PIKICLAW_DAEMON_CHILD) {
-    await runDaemon(process.argv.slice(2));
-  }
-
-  const processLog = (message: string) => {
-    const ts = new Date().toTimeString().slice(0, 8);
-    process.stdout.write(`[pikiclaw ${ts}] ${message}\n`);
-  };
-  const onSigusr2 = () => {
-    processLog('SIGUSR2 received, restarting...');
-    void requestProcessRestart({ log: processLog });
-  };
-  process.on('SIGUSR2', onSigusr2);
-  process.once('exit', () => {
-    process.off('SIGUSR2', onSigusr2);
-  });
-
-  const configOverrides: Partial<UserConfig> = {};
-  if (args.agent) configOverrides.defaultAgent = args.agent;
-  // Apply config early so managed env vars are populated from setting.json.
-  applyUserConfig({ ...userConfig, ...configOverrides }, undefined, { overwrite: true, clearMissing: true });
-
-  const effectiveConfig = () => ({ ...userConfig, ...configOverrides });
-
-  // Resolve channels from config / auto-detect from tokens
-  let channels = resolveConfiguredChannels({
-    config: effectiveConfig(),
-    tokenOverride: args.token,
-  });
-  // Primary channel used for setup wizard / doctor checks (feishu preferred)
-  let channel: ChannelName = channels[0] || 'feishu';
-  const tokenProvided = channels.length > 0 && hasConfiguredChannelToken(effectiveConfig(), channel, args.token);
-  if (args.help) {
-    process.stdout.write(
+/** Print help text and exit. */
+function printHelp(): never {
+  process.stdout.write(
 `pikiclaw v${VERSION} — Run local coding agents through IM.
 
 Run a bot that forwards IM messages to a local AI coding agent
@@ -310,74 +279,145 @@ Notes:
 Prerequisites: Node.js >= 18, and at least one agent CLI installed (claude or codex).
 Docs: https://github.com/xiaotonng/pikiclaw
 `);
-    process.exit(0);
-  }
+  process.exit(0);
+}
 
-  const listStartupAgents = () => listAgents().agents;
-  const listVerboseAgents = () => listAgents({ includeVersion: true }).agents;
+/* ── Phase: workdir persistence & daemon handoff ──────────────────── */
+
+/**
+ * For a fresh CLI launch (not a daemon-managed child), persist the working
+ * directory into setting.json so restarts start in the right place.
+ */
+function persistWorkdir(args: Record<string, any>, userConfig: Partial<UserConfig>): Partial<UserConfig> {
+  if (!process.env.PIKICLAW_DAEMON_CHILD) {
+    const cliWorkdir = path.resolve(args.workdir || '.');
+    if (userConfig.workdir !== cliWorkdir) {
+      updateUserConfig({ workdir: cliWorkdir });
+      return loadUserConfig();
+    }
+  }
+  return userConfig;
+}
+
+/**
+ * If daemon mode is active and we are the top-level process, become the
+ * watchdog. This function never returns in daemon mode.
+ */
+async function enterDaemonIfNeeded(args: Record<string, any>): Promise<void> {
+  if (args.daemon && !process.env.PIKICLAW_DAEMON_CHILD) {
+    await runDaemon(process.argv.slice(2));
+  }
+}
+
+/** Install SIGUSR2 restart handler and clean it up on exit. */
+function installRestartSignalHandler(): void {
+  const onSigusr2 = () => {
+    processLog('SIGUSR2 received, restarting...');
+    void requestProcessRestart({ log: processLog });
+  };
+  process.on('SIGUSR2', onSigusr2);
+  process.once('exit', () => {
+    process.off('SIGUSR2', onSigusr2);
+  });
+}
+
+/* ── Phase: doctor check ──────────────────────────────────────────── */
+
+/** Run setup diagnostics and exit (--doctor). */
+function runDoctorCheck(channel: ChannelName, tokenProvided: boolean): never {
   const setupState = collectSetupState({
-    agents: args.doctor ? listVerboseAgents() : listStartupAgents(),
+    agents: listVerboseAgents(),
     channel,
     tokenProvided,
   });
-  const canPromptInteractively = !!(process.stdin.isTTY && process.stdout.isTTY);
+  const guide = buildSetupGuide(setupState, VERSION, { doctor: true });
+  const ready = isSetupReady(setupState);
+  if (ready) process.stdout.write(`${guide}\nSetup looks ready.\n`);
+  else process.stderr.write(guide);
+  process.exit(ready ? 0 : 1);
+}
 
-  // ── Doctor mode: quick check and exit ──
-  if (args.doctor) {
-    const guide = buildSetupGuide(setupState, VERSION, { doctor: true });
-    const ready = isSetupReady(setupState);
-    if (ready) process.stdout.write(`${guide}\nSetup looks ready.\n`);
-    else process.stderr.write(guide);
-    process.exit(ready ? 0 : 1);
+/* ── Phase: setup (dashboard / wizard / guide) ────────────────────── */
+
+/**
+ * Poll the dashboard until the user completes configuration.
+ * Mutates `ctx` in place with freshly resolved channels.
+ */
+async function awaitDashboardConfig(
+  dashboard: DashboardServer,
+  ctx: { userConfig: Partial<UserConfig>; configOverrides: Partial<UserConfig>; args: Record<string, any> },
+): Promise<{ channels: ChannelName[]; channel: ChannelName }> {
+  const ts = new Date().toTimeString().slice(0, 8);
+  process.stdout.write(`[pikiclaw ${ts}] waiting for configuration via dashboard...\n`);
+  process.stdout.write(`[pikiclaw ${ts}] configure at ${dashboard.url}; startup will continue automatically once ready.\n`);
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    await new Promise(resolve => setTimeout(resolve, DAEMON_TIMEOUTS.configPollInterval));
+    ctx.userConfig = loadUserConfig();
+    const channels = resolveConfiguredChannels({
+      config: { ...ctx.userConfig, ...ctx.configOverrides },
+      tokenOverride: ctx.args.token,
+    });
+    const channel: ChannelName = channels[0] || 'feishu';
+
+    const nextSetupState = collectSetupState({
+      agents: listStartupAgents(),
+      channel,
+      tokenProvided: channels.length > 0 && hasConfiguredChannelToken({ ...ctx.userConfig, ...ctx.configOverrides }, channel, ctx.args.token),
+    });
+    const nextNeedsSetup = channels.length === 0
+      || !hasReadyAgent(nextSetupState);
+    if (!nextNeedsSetup) {
+      const resumeTs = new Date().toTimeString().slice(0, 8);
+      process.stdout.write(`[pikiclaw ${resumeTs}] configuration detected, starting bot channels...\n`);
+      return { channels, channel };
+    }
   }
+}
 
-  // ── Dashboard mode (default) ──
-  // If config is incomplete or first-time: open dashboard for configuration.
-  // If config is ready: open dashboard + start bot channels.
+/**
+ * Run the setup phase: dashboard wait-loop, terminal wizard, or guide printout.
+ * Returns the dashboard instance (if started) and possibly-updated userConfig.
+ */
+async function runSetupPhase(
+  args: Record<string, any>,
+  userConfig: Partial<UserConfig>,
+  configOverrides: Partial<UserConfig>,
+  channels: ChannelName[],
+  channel: ChannelName,
+  tokenProvided: boolean,
+): Promise<{
+  dashboard: DashboardServer | null;
+  userConfig: Partial<UserConfig>;
+  channels: ChannelName[];
+  channel: ChannelName;
+}> {
+  const setupState = collectSetupState({
+    agents: listStartupAgents(),
+    channel,
+    tokenProvided,
+  });
+
   const useDashboard = !args.noDashboard && !args.setup;
   let dashboard: DashboardServer | null = null;
-
-  const noChannelsDetected = channels.length === 0;
-  const needsSetup = noChannelsDetected || !tokenProvided || !hasReadyAgent(setupState);
+  const needsSetup = channels.length === 0 || !tokenProvided || !hasReadyAgent(setupState);
 
   if (useDashboard) {
-    // Start dashboard — always. If config is incomplete, it serves as the setup UI.
     dashboard = await startDashboard({
       port: args.dashboardPort || 3939,
       open: true,
     });
 
     if (needsSetup) {
-      // Dashboard is showing the config page. Wait until configuration becomes ready,
-      // then continue startup without requiring a manual restart.
-      const ts = new Date().toTimeString().slice(0, 8);
-      process.stdout.write(`[pikiclaw ${ts}] waiting for configuration via dashboard...\n`);
-      process.stdout.write(`[pikiclaw ${ts}] configure at ${dashboard.url}; startup will continue automatically once ready.\n`);
-
-      while (true) {
-        await new Promise(resolve => setTimeout(resolve, 1_000));
-        userConfig = loadUserConfig();
-        channels = resolveConfiguredChannels({
-          config: { ...userConfig, ...configOverrides },
-          tokenOverride: args.token,
-        });
-        channel = channels[0] || 'feishu';
-
-        const nextSetupState = collectSetupState({
-          agents: listStartupAgents(),
-          channel,
-          tokenProvided: channels.length > 0 && hasConfiguredChannelToken({ ...userConfig, ...configOverrides }, channel, args.token),
-        });
-        const nextNeedsSetup = channels.length === 0
-          || !hasReadyAgent(nextSetupState);
-        if (!nextNeedsSetup) break;
-      }
-
-      const resumeTs = new Date().toTimeString().slice(0, 8);
-      process.stdout.write(`[pikiclaw ${resumeTs}] configuration detected, starting bot channels...\n`);
+      const ctx = { userConfig, configOverrides, args };
+      const resolved = await awaitDashboardConfig(dashboard, ctx);
+      userConfig = ctx.userConfig;
+      channels = resolved.channels;
+      channel = resolved.channel;
     }
   } else if (args.setup) {
-    // Explicit --setup: use the terminal-based wizard
+    const canPromptInteractively = !!(process.stdin.isTTY && process.stdout.isTTY);
     if (!canPromptInteractively) {
       process.stderr.write('--setup requires an interactive terminal.\n');
       process.exit(1);
@@ -393,18 +433,32 @@ Docs: https://github.com/xiaotonng/pikiclaw
     if (!wizard.completed) process.exit(1);
     userConfig = loadUserConfig();
   } else if (needsSetup) {
-    // --no-dashboard and needs setup: show guide and exit
     process.stdout.write(buildSetupGuide(setupState, VERSION));
     process.exit(0);
   }
 
-  // Re-resolve channels after wizard/dashboard may have changed configuration.
-  channels = resolveConfiguredChannels({
-    config: effectiveConfig(),
+  return { dashboard, userConfig, channels, channel };
+}
+
+/* ── Phase: post-setup validation ─────────────────────────────────── */
+
+/**
+ * Re-resolve channels after setup phase and validate that we have at least
+ * one working channel with a ready agent. Exits on failure.
+ */
+function validatePostSetupChannels(
+  configOverrides: Partial<UserConfig>,
+  userConfig: Partial<UserConfig>,
+  args: Record<string, any>,
+): { channels: ChannelName[]; channel: ChannelName } {
+  const effectiveConfig = { ...userConfig, ...configOverrides };
+  const channels = resolveConfiguredChannels({
+    config: effectiveConfig,
     tokenOverride: args.token,
   });
-  channel = channels[0] || 'feishu';
+  const channel: ChannelName = channels[0] || 'feishu';
   const refreshedTokenProvided = channels.length > 0;
+
   if (!refreshedTokenProvided) {
     const refreshedSetupState = collectSetupState({
       agents: listStartupAgents(),
@@ -425,7 +479,24 @@ Docs: https://github.com/xiaotonng/pikiclaw
     process.exit(1);
   }
 
+  return { channels, channel };
+}
+
+/* ── Phase: runtime config & env setup ────────────────────────────── */
+
+/**
+ * Build the final runtime config, apply token/model/permission overrides to
+ * the environment, start config file sync, and kick off agent auto-update.
+ */
+function applyRuntimeConfig(
+  args: Record<string, any>,
+  userConfig: Partial<UserConfig>,
+  configOverrides: Partial<UserConfig>,
+  channel: ChannelName,
+): Partial<UserConfig> {
   const runtimeConfig: Partial<UserConfig> = { ...userConfig, ...configOverrides };
+
+  // Inject CLI token into channel-specific config fields.
   if (args.token) {
     if (channel === 'telegram') runtimeConfig.telegramBotToken = args.token;
     else if (channel === 'feishu') {
@@ -436,11 +507,14 @@ Docs: https://github.com/xiaotonng/pikiclaw
   }
   if (args.allowedIds && channel === 'telegram') runtimeConfig.telegramAllowedChatIds = args.allowedIds;
   applyUserConfig(runtimeConfig, undefined, { overwrite: true, clearMissing: true });
+
   startAgentAutoUpdate({
     config: runtimeConfig,
     agents: listAgents({ includeVersion: true, refresh: true }).agents,
     log: processLog,
   });
+
+  // Model override: route to the correct agent env var.
   if (args.model) {
     const ag = args.agent || runtimeConfig.defaultAgent || 'codex';
     if (ag === 'codex') process.env.CODEX_MODEL = args.model;
@@ -448,6 +522,8 @@ Docs: https://github.com/xiaotonng/pikiclaw
     else process.env.CLAUDE_MODEL = args.model;
   }
   if (args.timeout != null) process.env.PIKICLAW_TIMEOUT = String(args.timeout);
+
+  // Permission mode: safe vs full-access.
   if (args.safeMode) {
     process.env.CODEX_FULL_ACCESS = 'false';
     process.env.CLAUDE_PERMISSION_MODE = 'default';
@@ -459,21 +535,28 @@ Docs: https://github.com/xiaotonng/pikiclaw
     process.env.GEMINI_APPROVAL_MODE = 'yolo';
     process.env.GEMINI_SANDBOX = 'false';
   }
+
+  // Live-reload config file sync.
   const stopUserConfigSync = startUserConfigSync({
     overrides: runtimeConfig,
-    log: message => {
-      const ts = new Date().toTimeString().slice(0, 8);
-      process.stdout.write(`[pikiclaw ${ts}] ${message}\n`);
-    },
+    log: message => processLog(message),
   });
   process.once('exit', stopUserConfigSync);
 
-  // dispatch to channel-specific bot(s) — launch all channels concurrently
+  return runtimeConfig;
+}
+
+/* ── Phase: channel launch ────────────────────────────────────────── */
+
+/** Start bot(s) for each configured channel, attaching to dashboard if present. */
+async function launchChannels(
+  channels: ChannelName[],
+  dashboard: DashboardServer | null,
+): Promise<void> {
   async function launchChannel(ch: ChannelName): Promise<void> {
     switch (ch) {
       case 'telegram': {
         const bot = new TelegramBot();
-        // Attach bot to dashboard for runtime monitoring
         if (dashboard) dashboard.attachBot(bot);
         await bot.run();
         break;
@@ -494,10 +577,59 @@ Docs: https://github.com/xiaotonng/pikiclaw
   if (channels.length === 1) {
     await launchChannel(channels[0]);
   } else {
-    const ts = new Date().toTimeString().slice(0, 8);
-    process.stdout.write(`[pikiclaw ${ts}] launching channels: ${channels.join(', ')}\n`);
+    processLog(`launching channels: ${channels.join(', ')}`);
     await Promise.all(channels.map(ch => launchChannel(ch)));
   }
+}
+
+/* ── main() ───────────────────────────────────────────────────────── */
+
+export async function main() {
+  if (await handleMcpServeMode()) return;
+
+  const args = parseArgs(process.argv.slice(2));
+  let userConfig = loadUserConfig();
+
+  if (args.version) { process.stdout.write(`pikiclaw ${VERSION}\n`); process.exit(0); }
+  if (args.help) printHelp();
+
+  // Persist workdir for fresh (non-daemon-child) launches.
+  userConfig = persistWorkdir(args, userConfig);
+
+  // Daemon mode: become watchdog (never returns in daemon mode).
+  await enterDaemonIfNeeded(args);
+
+  // Child / no-daemon process: install restart signal handler.
+  installRestartSignalHandler();
+
+  // Apply config overrides from CLI args.
+  const configOverrides: Partial<UserConfig> = {};
+  if (args.agent) configOverrides.defaultAgent = args.agent;
+  applyUserConfig({ ...userConfig, ...configOverrides }, undefined, { overwrite: true, clearMissing: true });
+
+  // Resolve initial channels.
+  const effectiveConfig = () => ({ ...userConfig, ...configOverrides });
+  let channels = resolveConfiguredChannels({ config: effectiveConfig(), tokenOverride: args.token });
+  let channel: ChannelName = channels[0] || 'feishu';
+  const tokenProvided = channels.length > 0 && hasConfiguredChannelToken(effectiveConfig(), channel, args.token);
+
+  // Doctor mode: check and exit.
+  if (args.doctor) runDoctorCheck(channel, tokenProvided);
+
+  // Setup phase: dashboard, wizard, or guide.
+  let dashboard: DashboardServer | null;
+  ({ dashboard, userConfig, channels, channel } = await runSetupPhase(
+    args, userConfig, configOverrides, channels, channel, tokenProvided,
+  ));
+
+  // Validate channels are ready after setup.
+  ({ channels, channel } = validatePostSetupChannels(configOverrides, userConfig, args));
+
+  // Apply runtime config, env overrides, and start config sync.
+  applyRuntimeConfig(args, userConfig, configOverrides, channel);
+
+  // Launch bot channel(s).
+  await launchChannels(channels, dashboard);
 }
 
 main().catch(err => { console.error(err); process.exit(1); });

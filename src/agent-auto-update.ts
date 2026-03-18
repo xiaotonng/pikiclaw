@@ -5,9 +5,10 @@ import { spawn } from 'node:child_process';
 import type { AgentInfo } from './code-agent.js';
 import { getAgentLabel, getAgentPackage } from './agent-npm.js';
 import type { UserConfig } from './user-config.js';
+import { AGENT_UPDATE_TIMEOUTS } from './constants.js';
 
-const AGENT_UPDATE_LOCK_STALE_MS = 60 * 60_000;
-const AGENT_UPDATE_COMMAND_TIMEOUT_MS = 15 * 60_000;
+const AGENT_UPDATE_LOCK_STALE_MS = AGENT_UPDATE_TIMEOUTS.lockStale;
+const AGENT_UPDATE_COMMAND_TIMEOUT_MS = AGENT_UPDATE_TIMEOUTS.commandTimeout;
 
 type AgentUpdateStrategy =
   | { kind: 'npm'; pkg: string }
@@ -106,12 +107,12 @@ async function runCommand(
 }
 
 async function getNpmGlobalPrefix(): Promise<string | null> {
-  const result = await runCommand('npm', ['prefix', '-g'], { timeoutMs: 10_000 });
+  const result = await runCommand('npm', ['prefix', '-g'], { timeoutMs: AGENT_UPDATE_TIMEOUTS.npmPrefix });
   return result.ok ? result.stdout.trim().split('\n')[0] || null : null;
 }
 
 async function getLatestPackageVersion(pkg: string): Promise<string | null> {
-  const result = await runCommand('npm', ['view', pkg, 'version', '--json'], { timeoutMs: 20_000 });
+  const result = await runCommand('npm', ['view', pkg, 'version', '--json'], { timeoutMs: AGENT_UPDATE_TIMEOUTS.npmView });
   if (!result.ok) return null;
   const raw = result.stdout.trim();
   if (!raw) return null;

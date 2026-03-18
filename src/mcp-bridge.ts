@@ -18,6 +18,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { loadUserConfig } from './user-config.js';
+import { MCP_TIMEOUTS, MCP_ARTIFACT_MAX_BYTES } from './constants.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -243,8 +244,8 @@ function buildGeminiMcpConfig(servers: RegisteredMcpServer[]) {
 // Bridge implementation
 // ---------------------------------------------------------------------------
 
-const ARTIFACT_MAX_BYTES = 20 * 1024 * 1024;
-const SEND_FILE_TIMEOUT_MS = 60_000; // 60s timeout for sendFile callback
+const ARTIFACT_MAX_BYTES = MCP_ARTIFACT_MAX_BYTES;
+const SEND_FILE_TIMEOUT_MS = MCP_TIMEOUTS.sendFile;
 const PHOTO_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp']);
 
 function isPhotoFile(filePath: string): boolean {
@@ -372,7 +373,7 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
     // Timeout for receiving the request body
     const bodyTimer = setTimeout(() => {
       req.destroy(new Error('request body timeout'));
-    }, 10_000);
+    }, MCP_TIMEOUTS.requestBody);
 
     req.on('end', async () => {
       clearTimeout(bodyTimer);
@@ -450,8 +451,8 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
   });
 
   // Set server-level timeouts to prevent hanging connections
-  server.requestTimeout = 90_000;   // 90s max for entire request lifecycle
-  server.headersTimeout = 10_000;   // 10s to receive headers
+  server.requestTimeout = MCP_TIMEOUTS.serverRequest;
+  server.headersTimeout = MCP_TIMEOUTS.serverHeaders;
 
   await new Promise<void>((resolve, reject) => {
     server.on('error', reject);
@@ -486,11 +487,11 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
       for (const [k, v] of Object.entries(server.env || {})) codexArgs.push('--env', `${k}=${v}`);
       codexArgs.push('--', server.command, ...server.args);
       try {
-        execFileSync('codex', codexArgs, { stdio: 'pipe', timeout: 10_000 });
+        execFileSync('codex', codexArgs, { stdio: 'pipe', timeout: MCP_TIMEOUTS.codexMcpAdd });
         codexRegisteredNames.push(server.name);
       } catch {
-        try { execFileSync('codex', ['mcp', 'remove', server.name], { stdio: 'pipe', timeout: 5_000 }); } catch {}
-        execFileSync('codex', codexArgs, { stdio: 'pipe', timeout: 10_000 });
+        try { execFileSync('codex', ['mcp', 'remove', server.name], { stdio: 'pipe', timeout: MCP_TIMEOUTS.codexMcpRemove }); } catch {}
+        execFileSync('codex', codexArgs, { stdio: 'pipe', timeout: MCP_TIMEOUTS.codexMcpAdd });
         codexRegisteredNames.push(server.name);
       }
     }
@@ -516,7 +517,7 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
     stop: async () => {
       await new Promise<void>(resolve => server.close(() => resolve()));
       for (const name of [...codexRegisteredNames].reverse()) {
-        try { execFileSync('codex', ['mcp', 'remove', name], { stdio: 'pipe', timeout: 5_000 }); } catch {}
+        try { execFileSync('codex', ['mcp', 'remove', name], { stdio: 'pipe', timeout: MCP_TIMEOUTS.codexMcpRemove }); } catch {}
       }
       if (configPath) {
         try { fs.rmSync(configPath, { force: true }); } catch {}

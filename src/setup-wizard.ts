@@ -3,6 +3,7 @@ import { createInterface } from 'node:readline/promises';
 import type { Agent, AgentInfo } from './code-agent.js';
 import { buildSetupGuide, collectSetupState, type SetupState } from './onboarding.js';
 import { getUserConfigPath, saveUserConfig } from './user-config.js';
+import { VALIDATION_TIMEOUTS } from './constants.js';
 
 type Channel = 'telegram' | 'feishu' | 'whatsapp';
 
@@ -120,7 +121,7 @@ export async function validateTelegramToken(token: string): Promise<TelegramToke
   try {
     const resp = await fetch(`https://api.telegram.org/bot${value}/getMe`, {
       method: 'POST',
-      signal: AbortSignal.timeout(8_000),
+      signal: AbortSignal.timeout(VALIDATION_TIMEOUTS.telegramToken),
     });
     const raw = await resp.text();
     let parsed: any = null;

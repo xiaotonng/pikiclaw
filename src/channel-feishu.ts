@@ -22,6 +22,7 @@ import {
   sleep,
 } from './channel-base.js';
 import { adaptMarkdownForFeishu } from './bot-feishu-render.js';
+import { FEISHU_LIMITS } from './constants.js';
 
 export { FeishuChannel };
 export type FeishuCardActionItem = lark.InteractiveCardActionItem;
@@ -107,10 +108,10 @@ export interface FeishuOpts {
   apiTimeout?: number;
 }
 
-const FEISHU_CARD_MAX = 28_000; // card markdown budget (card JSON limit ~30KB)
-const FILE_MAX_BYTES = 20 * 1024 * 1024; // 20MB max for file send/receive
+const FEISHU_CARD_MAX = FEISHU_LIMITS.cardMax;
+const FILE_MAX_BYTES = FEISHU_LIMITS.fileMaxBytes;
 const PHOTO_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif']);
-const FEISHU_WS_START_RETRY_MAX_DELAY_MS = 60_000;
+const FEISHU_WS_START_RETRY_MAX_DELAY_MS = FEISHU_LIMITS.wsStartRetryMaxDelay;
 
 function describeError(err: unknown): string {
   if (!(err instanceof Error)) return String(err ?? 'unknown error');
@@ -415,7 +416,7 @@ class FeishuChannel extends Channel {
   async listen(): Promise<void> {
     this.running = true;
 
-    let retryDelayMs = 3_000;
+    let retryDelayMs = FEISHU_LIMITS.wsStartRetryInitialDelay;
     while (this.running) {
       const sdkDomain = this.domain.includes('larksuite.com')
         ? lark.Domain.Lark

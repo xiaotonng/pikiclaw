@@ -26,12 +26,17 @@ import {
   usageWindowFromRateLimit, parseJsonTail, emptyUsage,
   Q,
 } from './code-agent.js';
+import {
+  CODEX_APPSERVER_SPAWN_TIMEOUT_MS as _CODEX_APPSERVER_SPAWN_TIMEOUT_MS,
+  CODEX_STREAM_HARD_KILL_GRACE_MS,
+  SESSION_RUNNING_THRESHOLD_MS,
+} from './constants.js';
 
 // ---------------------------------------------------------------------------
 // App-server JSON-RPC client
 // ---------------------------------------------------------------------------
 
-const CODEX_APPSERVER_SPAWN_TIMEOUT_MS = 15_000;
+const CODEX_APPSERVER_SPAWN_TIMEOUT_MS = _CODEX_APPSERVER_SPAWN_TIMEOUT_MS;
 
 type RpcCallback = (msg: any) => void;
 type NotificationHandler = (method: string, params: any) => void;
@@ -407,6 +412,264 @@ export function buildCodexTurnInput(prompt: string, attachments: string[]): any[
 }
 
 // ---------------------------------------------------------------------------
+// Stream state
+// ---------------------------------------------------------------------------
+
+interface CodexStreamState {
+  sessionId: string | null;
+  text: string;
+  thinking: string;
+  activity: string;
+  msgs: string[];
+  thinkParts: string[];
+  model: string | null;
+  thinkingEffort: string;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cachedInputTokens: number | null;
+  cacheCreationInputTokens: number | null;
+  contextWindow: number | null;
+  contextUsedTokens: number | null;
+  codexCumulative: CodexCumulativeUsage | null;
+  turnId: string | null;
+  turnStatus: string | null;
+  turnError: string | null;
+  messagePhases: Map<string, string>;
+  commentaryByItem: Map<string, string>;
+  activeCommands: Map<string, string>;
+  activeToolCalls: Map<string, CodexActiveToolCall>;
+  recentNarrative: string[];
+  recentFailures: string[];
+  completedCommands: number;
+  plan: StreamPreviewPlan | null;
+}
+
+function createCodexStreamState(opts: StreamOpts): CodexStreamState {
+  return {
+    sessionId: opts.sessionId,
+    text: '', thinking: '', activity: '', msgs: [], thinkParts: [],
+    model: opts.model, thinkingEffort: opts.thinkingEffort,
+    inputTokens: null, outputTokens: null,
+    cachedInputTokens: null, cacheCreationInputTokens: null,
+    contextWindow: null, contextUsedTokens: null,
+    codexCumulative: null,
+    turnId: null, turnStatus: null, turnError: null,
+    messagePhases: new Map(),
+    commentaryByItem: new Map(),
+    activeCommands: new Map(),
+    activeToolCalls: new Map(),
+    recentNarrative: [], recentFailures: [],
+    completedCommands: 0,
+    plan: null,
+  };
+}
+
+function codexErrorResult(
+  error: string, start: number,
+  sessionId: string | null, model: string | null, thinkingEffort: string,
+): StreamResult {
+  return {
+    ok: false, message: error, thinking: null,
+    sessionId, workspacePath: null,
+    model, thinkingEffort,
+    elapsedS: (Date.now() - start) / 1000, inputTokens: null, outputTokens: null,
+    cachedInputTokens: null, cacheCreationInputTokens: null, contextWindow: null,
+    contextUsedTokens: null, contextPercent: null, error,
+    codexCumulative: null, stopReason: null, incomplete: true, activity: null,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Stream notification handler (extracted from doCodexStream)
+// ---------------------------------------------------------------------------
+
+function handleCodexNotification(
+  method: string, params: any,
+  s: CodexStreamState, opts: StreamOpts,
+  deadline: number,
+  emit: () => void,
+  hardTimer: ReturnType<typeof setTimeout>,
+  settleTurnDone: (() => void) | null,
+): void {
+  if (Date.now() > deadline) return;
+  if (params.threadId !== s.sessionId) {
+    // Only turn/started and model/rerouted are checked below; all others already filter on threadId.
+    if (method !== 'turn/started' && method !== 'model/rerouted') return;
+    if (params.threadId !== s.sessionId) return;
+  }
+
+  switch (method) {
+    case 'item/started':
+      handleItemStarted(params.item || {}, s, emit);
+      return;
+    case 'item/agentMessage/delta':
+      handleAgentMessageDelta(params, s, emit);
+      return;
+    case 'item/reasoning/textDelta':
+    case 'item/reasoning/summaryTextDelta':
+      s.thinking += params.delta || '';
+      emit();
+      return;
+    case 'item/completed':
+      handleItemCompleted(params.item || {}, s, emit);
+      return;
+    case 'thread/tokenUsage/updated':
+      applyCodexTokenUsage(s, params.tokenUsage, opts.codexPrevCumulative);
+      emit();
+      return;
+    case 'turn/plan/updated':
+      handleTurnPlanUpdated(params, s, emit);
+      return;
+    case 'serverRequest/resolved': {
+      const requestId = String(params.requestId || '');
+      if (requestId) pushRecentActivity(s.recentNarrative, 'Human input resolved');
+      emit();
+      return;
+    }
+    case 'turn/completed': {
+      const turn = params.turn || {};
+      applyCodexTokenUsage(s, params.tokenUsage || turn.tokenUsage || turn.usage, opts.codexPrevCumulative);
+      s.turnStatus = turn.status ?? null;
+      if (turn.error) s.turnError = turn.error.message || turn.error.code || JSON.stringify(turn.error);
+      s.turnId = turn.id ?? s.turnId;
+      clearTimeout(hardTimer);
+      settleTurnDone?.();
+      return;
+    }
+    case 'turn/started':
+      s.turnId = params.turn?.id ?? null;
+      return;
+    case 'model/rerouted':
+      s.model = params.model ?? s.model;
+      return;
+  }
+}
+
+function handleItemStarted(item: any, s: CodexStreamState, emit: () => void): void {
+  if (item.type === 'agentMessage' && item.id) {
+    const phase = item.phase || 'final_answer';
+    s.messagePhases.set(item.id, phase);
+    if (phase !== 'final_answer') { s.commentaryByItem.set(item.id, item.text || ''); emit(); }
+  }
+  if (item.type === 'commandExecution' && item.id && item.command) {
+    s.activeCommands.set(item.id, item.command);
+    emit();
+  }
+  if (item.id && isCodexToolCallItem(item)) {
+    const toolCall = summarizeCodexToolCall(item);
+    if (toolCall) { s.activeToolCalls.set(item.id, toolCall); emit(); }
+  }
+}
+
+function handleAgentMessageDelta(params: any, s: CodexStreamState, emit: () => void): void {
+  const delta = params.delta || '';
+  const phase = params.itemId ? (s.messagePhases.get(params.itemId) || 'final_answer') : 'final_answer';
+  if (phase === 'final_answer') {
+    s.text += delta;
+  } else if (params.itemId) {
+    const prev = s.commentaryByItem.get(params.itemId) || '';
+    s.commentaryByItem.set(params.itemId, prev + delta);
+  }
+  emit();
+}
+
+function handleItemCompleted(item: any, s: CodexStreamState, emit: () => void): void {
+  if (item.type === 'agentMessage' && item.id) {
+    handleCompletedAgentMessage(item, s, emit);
+  }
+  if (item.type === 'reasoning') {
+    const parts = [...(item.summary || []), ...(item.content || [])];
+    const text = parts.join('\n').trim();
+    if (text) { s.thinkParts.push(text); emit(); }
+  }
+  if (item.type === 'commandExecution' && item.id) {
+    handleCompletedCommand(item, s, emit);
+  }
+  if (item.id && isCodexToolCallItem(item)) {
+    handleCompletedToolCall(item, s, emit);
+  }
+  if (item.type === 'fileChange') {
+    pushRecentActivity(s.recentNarrative, summarizeCodexFileChange(item));
+    emit();
+  }
+}
+
+function handleCompletedAgentMessage(item: any, s: CodexStreamState, emit: () => void): void {
+  const phase = item.phase || s.messagePhases.get(item.id) || 'final_answer';
+  if (phase === 'final_answer') {
+    if (item.text?.trim()) s.msgs.push(item.text.trim());
+  } else {
+    const commentary = item.text?.trim() || s.commentaryByItem.get(item.id)?.trim() || '';
+    if (commentary) pushRecentActivity(s.recentNarrative, commentary);
+    s.commentaryByItem.delete(item.id);
+    emit();
+  }
+  s.messagePhases.delete(item.id);
+}
+
+function handleCompletedCommand(item: any, s: CodexStreamState, emit: () => void): void {
+  const cmd = item.command || s.activeCommands.get(item.id) || '';
+  s.activeCommands.delete(item.id);
+  if (cmd) {
+    const exitCode = typeof item.exitCode === 'number' ? item.exitCode : null;
+    if (exitCode != null && exitCode !== 0) pushRecentActivity(s.recentFailures, `Command failed (${exitCode}): ${cmd}`, 4);
+    else s.completedCommands++;
+  }
+  emit();
+}
+
+function handleCompletedToolCall(item: any, s: CodexStreamState, emit: () => void): void {
+  const toolCall = s.activeToolCalls.get(item.id) || summarizeCodexToolCall(item);
+  s.activeToolCalls.delete(item.id);
+  if (toolCall) {
+    if (isCodexToolCallFailure(item)) pushRecentActivity(s.recentFailures, `${toolCall.summary} failed`, 4);
+    else if (toolCall.kind !== 'apply_patch') pushRecentActivity(s.recentNarrative, `${toolCall.summary} done`);
+  }
+  emit();
+}
+
+function handleTurnPlanUpdated(params: any, s: CodexStreamState, emit: () => void): void {
+  const rawPlan = Array.isArray(params.plan) ? params.plan : [];
+  s.plan = {
+    explanation: typeof params.explanation === 'string' ? params.explanation : null,
+    steps: rawPlan
+      .map((entry: any) => ({
+        step: typeof entry?.step === 'string' ? entry.step : '',
+        status: entry?.status === 'completed' || entry?.status === 'pending' || entry?.status === 'inProgress' ? entry.status : 'pending',
+      }))
+      .filter((entry: StreamPreviewPlanStep) => entry.step.trim()),
+  };
+  emit();
+}
+
+// ---------------------------------------------------------------------------
+// Stream request handler (extracted from doCodexStream)
+// ---------------------------------------------------------------------------
+
+async function handleCodexRequest(
+  method: string, params: any, requestId: string,
+  s: CodexStreamState, opts: StreamOpts,
+  emit: () => void,
+): Promise<Record<string, any>> {
+  const interaction = buildCodexInteractionRequest(method, params, requestId);
+  if (!interaction) return defaultCodexServerRequestResponse(method);
+
+  pushRecentActivity(s.recentNarrative, interaction.kind === 'requestUserInput' ? 'Waiting for user input' : 'Waiting for approval');
+  emit();
+
+  try {
+    if (opts.onCodexInteractionRequest) {
+      const response = await opts.onCodexInteractionRequest(interaction);
+      return response ?? defaultCodexInteractionResponse(interaction);
+    }
+  } catch (error: any) {
+    pushRecentActivity(s.recentFailures, `Human input failed: ${shortValue(error?.message || error, 120)}`, 4);
+    emit();
+  }
+  return defaultCodexInteractionResponse(interaction);
+}
+
+// ---------------------------------------------------------------------------
 // Stream via app-server
 // ---------------------------------------------------------------------------
 
@@ -428,34 +691,10 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
     }
 
     if (!(await srv.ensureRunning(config))) {
-      return {
-        ok: false, message: 'Failed to start codex app-server.', thinking: null,
-        sessionId: opts.sessionId, workspacePath: null,
-        model: opts.model, thinkingEffort: opts.thinkingEffort,
-        elapsedS: (Date.now() - start) / 1000, inputTokens: null, outputTokens: null,
-        cachedInputTokens: null, cacheCreationInputTokens: null, contextWindow: null,
-        contextUsedTokens: null, contextPercent: null, error: 'Failed to start codex app-server.',
-        codexCumulative: null, stopReason: null, incomplete: true, activity: null,
-      };
+      return codexErrorResult('Failed to start codex app-server.', start, opts.sessionId, opts.model, opts.thinkingEffort);
     }
 
-    const s = {
-      sessionId: opts.sessionId as string | null,
-      text: '', thinking: '', activity: '', msgs: [] as string[], thinkParts: [] as string[],
-      model: opts.model as string | null, thinkingEffort: opts.thinkingEffort,
-      inputTokens: null as number | null, outputTokens: null as number | null,
-      cachedInputTokens: null as number | null, cacheCreationInputTokens: null as number | null,
-      contextWindow: null as number | null, contextUsedTokens: null as number | null,
-      codexCumulative: null as CodexCumulativeUsage | null,
-      turnId: null as string | null, turnStatus: null as string | null, turnError: null as string | null,
-      messagePhases: new Map<string, string>(),
-      commentaryByItem: new Map<string, string>(),
-      activeCommands: new Map<string, string>(),
-      activeToolCalls: new Map<string, CodexActiveToolCall>(),
-      recentNarrative: [] as string[], recentFailures: [] as string[],
-      completedCommands: 0,
-      plan: null as StreamPreviewPlan | null,
-    };
+    const s = createCodexStreamState(opts);
 
     // thread/start or thread/resume
     let threadResp: any;
@@ -477,15 +716,7 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
     if (threadResp.error) {
       const errMsg = threadResp.error.message || 'thread/start failed';
       agentLog(`[codex-rpc] thread error: ${errMsg}`);
-      return {
-        ok: false, message: errMsg, thinking: null,
-        sessionId: opts.sessionId, workspacePath: null,
-        model: opts.model, thinkingEffort: opts.thinkingEffort,
-        elapsedS: (Date.now() - start) / 1000, inputTokens: null, outputTokens: null,
-        cachedInputTokens: null, cacheCreationInputTokens: null, contextWindow: null,
-        contextUsedTokens: null, contextPercent: null, error: errMsg,
-        codexCumulative: null, stopReason: null, incomplete: true, activity: null,
-      };
+      return codexErrorResult(errMsg, start, opts.sessionId, opts.model, opts.thinkingEffort);
     }
 
     const threadResult = threadResp.result;
@@ -500,6 +731,7 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
 
     // turn/start
     const input = buildCodexTurnInput(opts.prompt, opts.attachments || []);
+    const deadline = start + opts.timeout * 1000;
 
     const turnDone = new Promise<void>((resolve) => {
       let settled = false;
@@ -509,148 +741,26 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
         settleTurnDone = null;
         resolve();
       };
-      const deadline = start + opts.timeout * 1000;
       const hardTimer = setTimeout(() => {
         timedOut = true;
         agentLog(`[codex-rpc] timeout: interrupting turn`);
         if (s.turnId && s.sessionId) srv.call('turn/interrupt', { threadId: s.sessionId, turnId: s.turnId }).catch(() => {});
         settleTurnDone?.();
-      }, opts.timeout * 1000 + 5_000);
+      }, opts.timeout * 1000 + CODEX_STREAM_HARD_KILL_GRACE_MS);
 
       const emit = () => {
         s.activity = buildCodexActivityPreview(s);
         opts.onText(s.text, s.thinking, s.activity, buildStreamPreviewMeta(s), s.plan);
       };
 
-      const handleNotification = (method: string, params: any) => {
-        if (Date.now() > deadline) return;
-
-        if (method === 'item/started' && params.threadId === s.sessionId) {
-          const item = params.item || {};
-          if (item.type === 'agentMessage' && item.id) {
-            const phase = item.phase || 'final_answer';
-            s.messagePhases.set(item.id, phase);
-            if (phase !== 'final_answer') { s.commentaryByItem.set(item.id, item.text || ''); emit(); }
-          }
-          if (item.type === 'commandExecution' && item.id && item.command) { s.activeCommands.set(item.id, item.command); emit(); }
-          if (item.id && isCodexToolCallItem(item)) {
-            const toolCall = summarizeCodexToolCall(item);
-            if (toolCall) { s.activeToolCalls.set(item.id, toolCall); emit(); }
-          }
-        }
-
-        if (method === 'item/agentMessage/delta' && params.threadId === s.sessionId) {
-          const delta = params.delta || '';
-          const phase = params.itemId ? (s.messagePhases.get(params.itemId) || 'final_answer') : 'final_answer';
-          if (phase === 'final_answer') s.text += delta;
-          else if (params.itemId) {
-            const prev = s.commentaryByItem.get(params.itemId) || '';
-            s.commentaryByItem.set(params.itemId, prev + delta);
-          }
-          emit();
-        }
-
-        if ((method === 'item/reasoning/textDelta' || method === 'item/reasoning/summaryTextDelta') && params.threadId === s.sessionId) {
-          s.thinking += params.delta || '';
-          emit();
-        }
-
-        if (method === 'item/completed' && params.threadId === s.sessionId) {
-          const item = params.item || {};
-          if (item.type === 'agentMessage' && item.id) {
-            const phase = item.phase || s.messagePhases.get(item.id) || 'final_answer';
-            if (phase === 'final_answer') { if (item.text?.trim()) s.msgs.push(item.text.trim()); }
-            else {
-              const commentary = item.text?.trim() || s.commentaryByItem.get(item.id)?.trim() || '';
-              if (commentary) pushRecentActivity(s.recentNarrative, commentary);
-              s.commentaryByItem.delete(item.id);
-              emit();
-            }
-            s.messagePhases.delete(item.id);
-          }
-          if (item.type === 'reasoning') {
-            const parts = [...(item.summary || []), ...(item.content || [])];
-            const text = parts.join('\n').trim();
-            if (text) { s.thinkParts.push(text); emit(); }
-          }
-          if (item.type === 'commandExecution' && item.id) {
-            const cmd = item.command || s.activeCommands.get(item.id) || '';
-            s.activeCommands.delete(item.id);
-            if (cmd) {
-              const exitCode = typeof item.exitCode === 'number' ? item.exitCode : null;
-              if (exitCode != null && exitCode !== 0) pushRecentActivity(s.recentFailures, `Command failed (${exitCode}): ${cmd}`, 4);
-              else s.completedCommands++;
-            }
-            emit();
-          }
-          if (item.id && isCodexToolCallItem(item)) {
-            const toolCall = s.activeToolCalls.get(item.id) || summarizeCodexToolCall(item);
-            s.activeToolCalls.delete(item.id);
-            if (toolCall) {
-              if (isCodexToolCallFailure(item)) pushRecentActivity(s.recentFailures, `${toolCall.summary} failed`, 4);
-              else if (toolCall.kind !== 'apply_patch') pushRecentActivity(s.recentNarrative, `${toolCall.summary} done`);
-            }
-            emit();
-          }
-          if (item.type === 'fileChange') { pushRecentActivity(s.recentNarrative, summarizeCodexFileChange(item)); emit(); }
-        }
-
-        if (method === 'thread/tokenUsage/updated' && params.threadId === s.sessionId) {
-          applyCodexTokenUsage(s, params.tokenUsage, opts.codexPrevCumulative);
-          emit();
-        }
-
-        if (method === 'turn/plan/updated' && params.threadId === s.sessionId) {
-          const rawPlan = Array.isArray(params.plan) ? params.plan : [];
-          s.plan = {
-            explanation: typeof params.explanation === 'string' ? params.explanation : null,
-            steps: rawPlan
-              .map((entry: any) => ({
-                step: typeof entry?.step === 'string' ? entry.step : '',
-                status: entry?.status === 'completed' || entry?.status === 'pending' || entry?.status === 'inProgress' ? entry.status : 'pending',
-              }))
-              .filter((entry: StreamPreviewPlanStep) => entry.step.trim()),
-          };
-          emit();
-        }
-
-        if (method === 'serverRequest/resolved' && params.threadId === s.sessionId) {
-          const requestId = String(params.requestId || '');
-          if (requestId) pushRecentActivity(s.recentNarrative, 'Human input resolved');
-          emit();
-        }
-
-        if (method === 'turn/completed' && params.threadId === s.sessionId) {
-          const turn = params.turn || {};
-          applyCodexTokenUsage(s, params.tokenUsage || turn.tokenUsage || turn.usage, opts.codexPrevCumulative);
-          s.turnStatus = turn.status ?? null;
-          if (turn.error) s.turnError = turn.error.message || turn.error.code || JSON.stringify(turn.error);
-          s.turnId = turn.id ?? s.turnId;
-          clearTimeout(hardTimer);
-          settleTurnDone?.();
-        }
-
-        if (method === 'turn/started' && params.threadId === s.sessionId) s.turnId = params.turn?.id ?? null;
-        if (method === 'model/rerouted' && params.threadId === s.sessionId) s.model = params.model ?? s.model;
-      };
-      unsubscribeNotifications = srv.onNotification(handleNotification);
-      unsubscribeRequests = srv.onRequest(async (method, params, requestId) => {
-        const interaction = buildCodexInteractionRequest(method, params, requestId);
-        if (!interaction) return defaultCodexServerRequestResponse(method);
-        pushRecentActivity(s.recentNarrative, interaction.kind === 'requestUserInput' ? 'Waiting for user input' : 'Waiting for approval');
-        emit();
-        try {
-          if (opts.onCodexInteractionRequest) {
-            const response = await opts.onCodexInteractionRequest(interaction);
-            return response ?? defaultCodexInteractionResponse(interaction);
-          }
-        } catch (error: any) {
-          pushRecentActivity(s.recentFailures, `Human input failed: ${shortValue(error?.message || error, 120)}`, 4);
-          emit();
-        }
-        return defaultCodexInteractionResponse(interaction);
+      unsubscribeNotifications = srv.onNotification((method, params) => {
+        handleCodexNotification(method, params, s, opts, deadline, emit, hardTimer, settleTurnDone);
+      });
+      unsubscribeRequests = srv.onRequest((method, params, requestId) => {
+        return handleCodexRequest(method, params, requestId, s, opts, emit);
       });
     });
+
     const abortStream = () => {
       if (interrupted) return;
       interrupted = true;
@@ -690,15 +800,7 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
       unsubscribeRequests();
       const errMsg = turnResp.error.message || 'turn/start failed';
       agentLog(`[codex-rpc] turn/start error: ${errMsg}`);
-      return {
-        ok: false, message: errMsg, thinking: null,
-        sessionId: s.sessionId, workspacePath: null,
-        model: s.model, thinkingEffort: s.thinkingEffort,
-        elapsedS: (Date.now() - start) / 1000, inputTokens: null, outputTokens: null,
-        cachedInputTokens: null, cacheCreationInputTokens: null, contextWindow: null,
-        contextUsedTokens: null, contextPercent: null, error: errMsg,
-        codexCumulative: null, stopReason: null, incomplete: true, activity: null,
-      };
+      return codexErrorResult(errMsg, start, s.sessionId, s.model, s.thinkingEffort);
     }
     s.turnId = turnResp.result?.turn?.id ?? null;
 
@@ -816,8 +918,8 @@ function getNativeCodexSessions(workdir: string): SessionInfo[] {
           model: null,
           createdAt: tsMatch?.[1] || stat.birthtime.toISOString(),
           title,
-          running: Date.now() - Date.parse(updatedAt) < 10_000,
-          runState: Date.now() - Date.parse(updatedAt) < 10_000 ? 'running' : 'completed',
+          running: Date.now() - Date.parse(updatedAt) < SESSION_RUNNING_THRESHOLD_MS,
+          runState: Date.now() - Date.parse(updatedAt) < SESSION_RUNNING_THRESHOLD_MS ? 'running' : 'completed',
           runDetail: null,
           runUpdatedAt: updatedAt,
         });

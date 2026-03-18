@@ -22,6 +22,7 @@ import {
   readTailLines, stripInjectedPrompts,
   roundPercent, toIsoFromEpochSeconds, modelFamily, normalizeClaudeModelId, emptyUsage, normalizeUsageStatus,
 } from './code-agent.js';
+import { SESSION_RUNNING_THRESHOLD_MS } from './constants.js';
 
 // ---------------------------------------------------------------------------
 // Multimodal stdin
@@ -249,8 +250,8 @@ function getNativeClaudeSessions(workdir: string): SessionInfo[] {
         model,
         createdAt: stat.birthtime.toISOString(),
         title,
-        running: Date.now() - stat.mtimeMs < 10_000,
-        runState: Date.now() - stat.mtimeMs < 10_000 ? 'running' : 'completed',
+        running: Date.now() - stat.mtimeMs < SESSION_RUNNING_THRESHOLD_MS,
+        runState: Date.now() - stat.mtimeMs < SESSION_RUNNING_THRESHOLD_MS ? 'running' : 'completed',
         runDetail: null,
         runUpdatedAt: stat.mtime.toISOString(),
       });

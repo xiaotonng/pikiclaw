@@ -2,6 +2,7 @@ import * as lark from '@larksuiteoapi/node-sdk';
 import { validateTelegramToken, type TelegramBotIdentity } from './setup-wizard.js';
 import type { ChannelSetupState } from './onboarding.js';
 import type { UserConfig } from './user-config.js';
+import { VALIDATION_TIMEOUTS } from './constants.js';
 
 export interface TelegramConfigCheckResult {
   state: ChannelSetupState;
@@ -23,7 +24,7 @@ interface FeishuValidationOptions {
   timeoutMs?: number;
 }
 
-const DEFAULT_FEISHU_VALIDATION_TIMEOUT_MS = 15_000;
+const DEFAULT_FEISHU_VALIDATION_TIMEOUT_MS = VALIDATION_TIMEOUTS.feishuDefault;
 
 function feishuValidationLog(appId: string, message: string): void {
   const ts = new Date().toISOString().slice(11, 19);
@@ -269,7 +270,7 @@ export async function validateFeishuConfig(
           method: 'GET',
           headers: { Authorization: `Bearer ${parsed.tenant_access_token}` },
         }).then(r => r.json()),
-        5_000,
+        VALIDATION_TIMEOUTS.feishuBotInfo,
         'Feishu bot info',
       );
       if (botResp?.bot?.app_name) {

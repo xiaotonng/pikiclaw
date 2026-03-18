@@ -78,6 +78,7 @@ import { FeishuChannel, type FeishuContext, type FeishuCallbackContext, type Fei
 import { splitText, supportsChannelCapability } from './channel-base.js';
 import { getActiveUserConfig } from './user-config.js';
 import { VERSION } from './version.js';
+import { FEISHU_BOT_CARD_MAX } from './constants.js';
 
 type ShutdownSignal = 'SIGINT' | 'SIGTERM';
 
@@ -756,7 +757,7 @@ export class FeishuBot extends Bot {
     const rendered = buildFinalReplyRender(agent, result);
     const messageIds: string[] = [];
 
-    const MAX_CARD = 25_000;
+    const MAX_CARD = FEISHU_BOT_CARD_MAX;
     if (rendered.fullText.length <= MAX_CARD) {
       // Fits in one card — edit the placeholder
       if (placeholderId) {

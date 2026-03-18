@@ -9,6 +9,7 @@ import { registerDriver, type AgentDriver } from './agent-driver.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
+import { GEMINI_USAGE_TIMEOUTS, SESSION_RUNNING_THRESHOLD_MS } from './constants.js';
 import {
   type AgentInfo, type StreamOpts, type StreamResult,
   type SessionListResult, type SessionInfo, type SessionTailOpts, type SessionTailResult,
@@ -345,8 +346,8 @@ function getNativeGeminiSessionsFromFiles(workdir: string): SessionInfo[] {
         model: null,
         createdAt: data.startTime || null,
         title,
-        running: data.lastUpdated ? Date.now() - Date.parse(data.lastUpdated) < 10_000 : false,
-        runState: data.lastUpdated && Date.now() - Date.parse(data.lastUpdated) < 10_000 ? 'running' : 'completed',
+        running: data.lastUpdated ? Date.now() - Date.parse(data.lastUpdated) < SESSION_RUNNING_THRESHOLD_MS : false,
+        runState: data.lastUpdated && Date.now() - Date.parse(data.lastUpdated) < SESSION_RUNNING_THRESHOLD_MS ? 'running' : 'completed',
         runDetail: null,
         runUpdatedAt: data.lastUpdated || data.startTime || null,
       });
@@ -429,7 +430,7 @@ const GEMINI_MODELS = [
 // Usage
 // ---------------------------------------------------------------------------
 
-const GEMINI_USAGE_TIMEOUT_MS = 5_000;
+const GEMINI_USAGE_TIMEOUT_MS = GEMINI_USAGE_TIMEOUTS.request;
 const GEMINI_USAGE_URL = 'https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota';
 let lastGeminiUsage: UsageResult | null = null;
 
@@ -565,7 +566,7 @@ async function getGeminiUsageLive(): Promise<UsageResult> {
   try {
     const raw = execSync(
       `curl -sS --max-time ${Math.ceil(GEMINI_USAGE_TIMEOUT_MS / 1000)} -w '\\n%{http_code}' -H ${Q(`Authorization: Bearer ${token}`)} -H 'Content-Type: application/json' -d '{}' ${Q(GEMINI_USAGE_URL)}`,
-      { encoding: 'utf-8', timeout: GEMINI_USAGE_TIMEOUT_MS + 3_000 },
+      { encoding: 'utf-8', timeout: GEMINI_USAGE_TIMEOUT_MS + GEMINI_USAGE_TIMEOUTS.execSyncBuffer },
     );
     const trimmed = raw.trimEnd();
     const sep = trimmed.lastIndexOf('\n');

@@ -5,7 +5,7 @@
  * Also provides a LivePreviewRenderer for streaming output.
  */
 
-import type { Agent, StreamResult, StreamPreviewMeta } from './bot.js';
+import type { Agent, StreamResult } from './bot.js';
 import type { HumanLoopPromptState } from './human-loop.js';
 import type {
   CommandActionButton,
@@ -15,13 +15,19 @@ import type {
   CommandSelectionView,
 } from './bot-command-ui.js';
 import { encodeCommandAction } from './bot-command-ui.js';
-import { fmtUptime, fmtTokens, fmtBytes, formatThinkingForDisplay, thinkLabel } from './bot.js';
+import { fmtUptime, fmtTokens, fmtBytes } from './bot.js';
 import type { StartData, SessionsPageData, AgentsListData, ModelsListData, SkillsListData, StatusData, HostData } from './bot-commands.js';
 import { summarizePromptForStatus } from './bot-commands.js';
-import { formatProviderUsageLines } from './bot-telegram-render.js';
 import type { LivePreviewRenderer } from './bot-telegram-live-preview.js';
-import type { StreamPreviewRenderInput } from './bot-telegram-render.js';
-import { formatActivityCommandSummary, parseActivitySummary, renderPlanForPreview, summarizeActivityForPreview } from './bot-streaming.js';
+import type { StreamPreviewRenderInput } from './bot-render-shared.js';
+import {
+  footerStatusSymbol,
+  formatFooterSummary,
+  trimActivityForPreview,
+  buildProviderUsageLines,
+  extractFinalReplyData,
+  extractStreamPreviewData,
+} from './bot-render-shared.js';
 import {
   currentHumanLoopQuestion,
   humanLoopAnsweredCount,
@@ -37,60 +43,12 @@ import { listSubdirs } from './bot.js';
 // Helpers
 // ---------------------------------------------------------------------------
 
-function fmtCompactUptime(ms: number): string {
-  return fmtUptime(ms).replace(/\s+/g, '');
-}
-
-type FooterStatus = 'running' | 'done' | 'failed';
-
-function footerStatusSymbol(status: FooterStatus): string {
-  switch (status) {
-    case 'running': return '●';
-    case 'done': return '✓';
-    case 'failed': return '✗';
-  }
-}
-
-function formatFooterSummary(
-  agent: Agent,
-  elapsedMs: number,
-  meta?: StreamPreviewMeta | null,
-  contextPercent?: number | null,
-): string {
-  const parts: string[] = [agent];
-  const ctx = contextPercent ?? meta?.contextPercent ?? null;
-  if (ctx != null) parts.push(`${ctx}%`);
-  parts.push(fmtCompactUptime(Math.max(0, Math.round(elapsedMs))));
-  return parts.join(' · ');
-}
-
-function formatPreviewFooter(agent: Agent, elapsedMs: number, meta?: StreamPreviewMeta | null): string {
+function formatPreviewFooter(agent: Agent, elapsedMs: number, meta?: import('./bot.js').StreamPreviewMeta | null): string {
   return `${footerStatusSymbol('running')} ${formatFooterSummary(agent, elapsedMs, meta)}`;
 }
 
-function formatFinalFooter(status: FooterStatus, agent: Agent, elapsedMs: number, contextPercent?: number | null): string {
+function formatFinalFooter(status: import('./bot-render-shared.js').FooterStatus, agent: Agent, elapsedMs: number, contextPercent?: number | null): string {
   return `${footerStatusSymbol(status)} ${formatFooterSummary(agent, elapsedMs, null, contextPercent ?? null)}`;
-}
-
-function trimActivityForPreview(text: string, maxChars = 900): string {
-  if (text.length <= maxChars) return text;
-  const lines = text.split('\n').filter(l => l.trim());
-  if (lines.length <= 1) return text.slice(0, Math.max(0, maxChars - 3)).trimEnd() + '...';
-  const tailCount = Math.min(2, Math.max(1, lines.length - 1));
-  const tail = lines.slice(-tailCount);
-  const headCandidates = lines.slice(0, Math.max(0, lines.length - tailCount));
-  const reserved = tail.join('\n').length + 5;
-  const budget = Math.max(0, maxChars - reserved);
-  const head: string[] = [];
-  let used = 0;
-  for (const line of headCandidates) {
-    const extra = line.length + (head.length ? 1 : 0);
-    if (used + extra > budget) break;
-    head.push(line);
-    used += extra;
-  }
-  if (!head.length) return text.slice(0, Math.max(0, maxChars - 3)).trimEnd() + '...';
-  return [...head, '...', ...tail].join('\n');
 }
 
 function truncateLabel(label: string, maxChars = 24): string {
@@ -248,33 +206,24 @@ export function buildInitialPreviewMarkdown(agent: Agent, model?: string | null,
 }
 
 function buildPreviewMarkdown(input: StreamPreviewRenderInput, options?: { includeFooter?: boolean }): string {
-  const maxBody = 2400;
-  const display = input.bodyText.trim();
-  const rawThinking = input.thinking.trim();
-  const thinkDisplay = formatThinkingForDisplay(input.thinking, maxBody);
-  const planDisplay = renderPlanForPreview(input.plan ?? null);
-  const activityDisplay = summarizeActivityForPreview(input.activity);
-  const maxActivity = !display && !thinkDisplay && !planDisplay ? 2400 : 1400;
+  const data = extractStreamPreviewData(input);
   const parts: string[] = [];
-  const label = thinkLabel(input.agent);
 
-  if (planDisplay) {
-    parts.push(`**Plan**\n${planDisplay}`);
+  if (data.planDisplay) {
+    parts.push(`**Plan**\n${data.planDisplay}`);
   }
 
-  if (activityDisplay) {
-    parts.push(`**Activity**\n${trimActivityForPreview(activityDisplay, maxActivity)}`);
+  if (data.activityDisplay) {
+    parts.push(`**Activity**\n${trimActivityForPreview(data.activityDisplay, data.maxActivity)}`);
   }
 
-  if (thinkDisplay && !display) {
-    parts.push(`**${label}**\n${thinkDisplay}`);
-  } else if (display) {
-    if (rawThinking) {
-      const thinkSnippet = formatThinkingForDisplay(input.thinking, 600);
-      parts.push(`**${label}**\n${thinkSnippet}`);
+  if (data.thinkDisplay && !data.display) {
+    parts.push(`**${data.label}**\n${data.thinkDisplay}`);
+  } else if (data.display) {
+    if (data.rawThinking) {
+      parts.push(`**${data.label}**\n${data.thinkSnippet}`);
     }
-    const preview = display.length > maxBody ? '(...truncated)\n' + display.slice(-maxBody) : display;
-    parts.push(preview);
+    parts.push(data.preview);
   }
 
   if (options?.includeFooter !== false) {
@@ -315,49 +264,30 @@ export interface FeishuFinalReplyRender {
 }
 
 export function buildFinalReplyRender(agent: Agent, result: StreamResult): FeishuFinalReplyRender {
-  const footerStatus: FooterStatus = result.incomplete || !result.ok ? 'failed' : 'done';
-  const footerText = `\n\n${formatFinalFooter(footerStatus, agent, result.elapsedS * 1000, result.contextPercent ?? null)}`;
+  const data = extractFinalReplyData(agent, result);
+  const footerText = `\n\n${formatFinalFooter(data.footerStatus, agent, data.elapsedMs, result.contextPercent ?? null)}`;
 
   let activityText = '';
   let activityNoteText = '';
-  if (result.activity) {
-    const summary = parseActivitySummary(result.activity);
-    const narrative = summary.narrative.join('\n');
-    if (narrative) {
-      let display = narrative;
-      if (display.length > 1600) display = '...\n' + display.slice(-1600);
-      activityText = `**Activity**\n${display}\n\n`;
-    }
-    const commandSummary = formatActivityCommandSummary(
-      summary.completedCommands,
-      summary.activeCommands,
-      summary.failedCommands,
-    );
-    if (commandSummary) activityNoteText = `*${commandSummary}*\n\n`;
+  if (data.activityNarrative) {
+    activityText = `**Activity**\n${data.activityNarrative}\n\n`;
+  }
+  if (data.activityCommandSummary) {
+    activityNoteText = `*${data.activityCommandSummary}*\n\n`;
   }
 
   let thinkingText = '';
-  if (result.thinking) {
-    thinkingText = `**${thinkLabel(agent)}**\n${formatThinkingForDisplay(result.thinking, 1600)}\n\n`;
+  if (data.thinkingDisplay) {
+    thinkingText = `**${data.thinkLabel}**\n${data.thinkingDisplay}\n\n`;
   }
 
   let statusText = '';
-  if (result.incomplete) {
-    const statusLines: string[] = [];
-    if (result.stopReason === 'max_tokens') statusLines.push('Output limit reached. Response may be truncated.');
-    if (result.stopReason === 'timeout') {
-      statusLines.push(`Timed out after ${fmtUptime(Math.max(0, Math.round(result.elapsedS * 1000)))} before the agent reported completion.`);
-    }
-    if (!result.ok) {
-      const detail = result.error?.trim();
-      if (detail && detail !== result.message.trim() && !statusLines.includes(detail)) statusLines.push(detail);
-      else if (result.stopReason !== 'timeout') statusLines.push('Agent exited before reporting completion.');
-    }
-    statusText = `**⚠ Incomplete Response**\n${statusLines.join('\n')}\n\n`;
+  if (data.statusLines) {
+    statusText = `**⚠ Incomplete Response**\n${data.statusLines.join('\n')}\n\n`;
   }
 
   const headerText = `${activityText}${activityNoteText}${statusText}${thinkingText}`;
-  const bodyText = result.message;
+  const bodyText = data.bodyMessage;
   return {
     fullText: `${headerText}${bodyText}${footerText}`,
     headerText,
@@ -541,12 +471,11 @@ export function renderStatus(d: StatusData): string {
     lines.push(`**Running:** ${fmtUptime(Date.now() - d.running.startedAt)} - ${summarizePromptForStatus(d.running.prompt)}`);
   }
   // Provider usage
-  const usageLines = formatProviderUsageLines(d.usage);
+  const usageLines = buildProviderUsageLines(d.usage);
   if (usageLines.length > 1) {
     lines.push('');
-    // Strip HTML tags from usage lines (they're HTML-formatted)
     for (const line of usageLines) {
-      lines.push(line.replace(/<\/?[^>]+>/g, '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>'));
+      lines.push(line.text);
     }
   }
   lines.push('', '**Bot Usage**', `  Turns: ${d.stats.totalTurns}`);

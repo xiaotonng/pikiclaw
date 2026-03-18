@@ -11,6 +11,7 @@ mkdir -p "${DEV_DIR}"
 : > "${LOG_FILE}"
 
 export PIKICLAW_CONFIG="${DEV_DIR}/setting.json"
+unset CLAUDECODE
 
 {
   npm run build:dashboard

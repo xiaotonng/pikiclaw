@@ -12,6 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { getDriver, allDrivers, shutdownAllDrivers, hasDriver } from './agent-driver.js';
 import { terminateProcessTree } from './process-control.js';
+import { AGENT_DETECT_TIMEOUTS, AGENT_STREAM_HARD_KILL_GRACE_MS } from './constants.js';
 export { type AgentDriver, registerDriver, getDriver, allDrivers, allDriverIds, hasDriver, shutdownAllDrivers } from './agent-driver.js';
 
 // Load all drivers (side-effect: each calls registerDriver)
@@ -162,9 +163,9 @@ export interface StreamResult {
 
 export const Q = (a: string) => /[^a-zA-Z0-9_./:=@-]/.test(a) ? `'${a.replace(/'/g, "'\\''")}'` : a;
 
-const AGENT_DETECT_TTL_MS = 1_000;
-const AGENT_VERSION_TTL_MS = 5 * 60_000;
-const AGENT_VERSION_TIMEOUT_MS = 900;
+const AGENT_DETECT_TTL_MS = AGENT_DETECT_TIMEOUTS.detectTtl;
+const AGENT_VERSION_TTL_MS = AGENT_DETECT_TIMEOUTS.versionTtl;
+const AGENT_VERSION_TIMEOUT_MS = AGENT_DETECT_TIMEOUTS.versionCommand;
 
 interface AgentDetectCacheEntry {
   detectedAt: number;
@@ -951,9 +952,11 @@ export async function run(cmd: string[], opts: StreamOpts, parseLine: (ev: any, 
   agentLog(`[spawn] timeout: ${opts.timeout}s session: ${opts.sessionId || '(new)'}`);
   agentLog(`[spawn] prompt (stdin): "${opts.prompt.slice(0, 300)}${opts.prompt.length > 300 ? '…' : ''}"`);
 
+  const spawnEnv = { ...process.env, ...(opts.extraEnv || {}) };
+  delete spawnEnv.CLAUDECODE;
   const proc = spawn(shellCmd, {
     cwd: opts.workdir,
-    env: { ...process.env, ...(opts.extraEnv || {}) },
+    env: spawnEnv,
     stdio: ['pipe', 'pipe', 'pipe'],
     shell: true,
     detached: process.platform !== 'win32',
@@ -1002,7 +1005,7 @@ export async function run(cmd: string[], opts: StreamOpts, parseLine: (ev: any, 
     timedOut = true; s.stopReason = 'timeout';
     agentLog(`[timeout] hard deadline reached (${opts.timeout}s), killing process tree pid=${proc.pid}`);
     terminateProcessTree(proc, { signal: 'SIGTERM', forceSignal: 'SIGKILL', forceAfterMs: 5000 });
-  }, opts.timeout * 1000 + 10_000);
+  }, opts.timeout * 1000 + AGENT_STREAM_HARD_KILL_GRACE_MS);
 
   const [procOk, code] = await new Promise<[boolean, number | null]>(resolve => {
     proc.on('close', code => { clearTimeout(hardTimer); agentLog(`[exit] code=${code} lines_parsed=${lineCount}`); resolve([code === 0, code]); });

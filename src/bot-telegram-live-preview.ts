@@ -1,10 +1,11 @@
 import type { Agent, ChatId, StreamPreviewMeta, StreamPreviewPlan } from './bot.js';
 import { hasPreviewMeta, samePreviewMeta, samePreviewPlan } from './bot-streaming.js';
-import type { StreamPreviewRenderInput } from './bot-telegram-render.js';
+import type { StreamPreviewRenderInput } from './bot-render-shared.js';
+import { STREAM_PREVIEW_TIMEOUTS } from './constants.js';
 
-const STREAM_PREVIEW_HEARTBEAT_MS = 5_000;
-const STREAM_TYPING_HEARTBEAT_MS = 4_000;
-const STREAM_STALLED_NOTICE_MS = 15_000;
+const STREAM_PREVIEW_HEARTBEAT_MS = STREAM_PREVIEW_TIMEOUTS.heartbeat;
+const STREAM_TYPING_HEARTBEAT_MS = STREAM_PREVIEW_TIMEOUTS.typing;
+const STREAM_STALLED_NOTICE_MS = STREAM_PREVIEW_TIMEOUTS.stalledNotice;
 
 // ---------------------------------------------------------------------------
 // Channel-agnostic interfaces
