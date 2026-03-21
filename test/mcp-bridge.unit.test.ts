@@ -1,11 +1,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { getManagedBrowserProfileDir } from '../src/browser-profile.ts';
 import {
   buildGuiSetupHints,
   buildSupplementalMcpServers,
   resolveGuiIntegrationConfig,
   resolveMcpServerCommand,
+  resolvePlaywrightMcpProxyCommand,
   resolveSendFilePath,
 } from '../src/mcp-bridge.ts';
 import { makeTmpDir } from './support/env.ts';
@@ -80,15 +82,13 @@ describe('resolveSendFilePath', () => {
 });
 
 describe('resolveGuiIntegrationConfig', () => {
-  it('defaults browser automation to visible extension mode when not configured', () => {
+  it('defaults browser automation to disabled managed-profile mode', () => {
     const gui = resolveGuiIntegrationConfig({} as any, {});
 
     expect(gui).toEqual({
-      browserEnabled: true,
+      browserEnabled: false,
+      browserProfileDir: getManagedBrowserProfileDir(),
       browserHeadless: false,
-      browserIsolated: false,
-      browserUseExtension: true,
-      browserExtensionToken: '',
       desktopEnabled: process.platform === 'darwin',
       desktopAppiumUrl: 'http://127.0.0.1:4723',
     });
@@ -96,62 +96,41 @@ describe('resolveGuiIntegrationConfig', () => {
 
   it('prefers env overrides over user config defaults', () => {
     const config = {
-      browserGuiEnabled: true,
-      browserGuiHeadless: false,
-      browserGuiIsolated: false,
+      browserEnabled: false,
       desktopGuiEnabled: false,
       desktopAppiumUrl: 'http://config-appium:4723',
     };
     const gui = resolveGuiIntegrationConfig(config as any, {
-      PIKICLAW_BROWSER_GUI: 'false',
+      PIKICLAW_BROWSER_ENABLED: 'true',
       PIKICLAW_BROWSER_HEADLESS: 'true',
-      PIKICLAW_BROWSER_ISOLATED: 'true',
-      PIKICLAW_BROWSER_USE_EXTENSION: 'true',
-      PLAYWRIGHT_MCP_EXTENSION_TOKEN: 'token-from-env',
       PIKICLAW_DESKTOP_GUI: 'true',
       PIKICLAW_DESKTOP_APPIUM_URL: 'http://env-appium:4723',
     });
 
     expect(gui).toEqual({
-      browserEnabled: false,
+      browserEnabled: true,
+      browserProfileDir: getManagedBrowserProfileDir(),
       browserHeadless: true,
-      browserIsolated: true,
-      browserUseExtension: true,
-      browserExtensionToken: 'token-from-env',
       desktopEnabled: true,
       desktopAppiumUrl: 'http://env-appium:4723',
     });
   });
+
+  it('keeps the legacy browser-use-profile env var as a compatibility alias', () => {
+    const gui = resolveGuiIntegrationConfig({} as any, {
+      PIKICLAW_BROWSER_USE_PROFILE: 'true',
+    });
+
+    expect(gui.browserEnabled).toBe(true);
+  });
 });
 
 describe('buildSupplementalMcpServers', () => {
-  it('adds Playwright MCP with the expected flags', () => {
+  it('does not add Playwright MCP when browser automation is disabled', () => {
     const servers = buildSupplementalMcpServers({
-      browserEnabled: true,
-      browserHeadless: true,
-      browserIsolated: true,
-      browserUseExtension: false,
-      browserExtensionToken: '',
-      desktopEnabled: true,
-      desktopAppiumUrl: 'http://127.0.0.1:4723',
-    });
-
-    expect(servers).toEqual([
-      {
-        name: 'pikiclaw-browser',
-        command: 'npx',
-        args: ['-y', '@playwright/mcp@latest', '--headless', '--isolated'],
-      },
-    ]);
-  });
-
-  it('skips browser integration in extension mode when no token is configured', () => {
-    const servers = buildSupplementalMcpServers({
-      browserEnabled: true,
+      browserEnabled: false,
+      browserProfileDir: getManagedBrowserProfileDir(),
       browserHeadless: false,
-      browserIsolated: false,
-      browserUseExtension: true,
-      browserExtensionToken: '',
       desktopEnabled: true,
       desktopAppiumUrl: 'http://127.0.0.1:4723',
     });
@@ -159,13 +138,12 @@ describe('buildSupplementalMcpServers', () => {
     expect(servers).toEqual([]);
   });
 
-  it('uses extension mode to connect to the existing Chrome profile when configured', () => {
+  it('adds Playwright MCP with the managed browser profile args when enabled', () => {
+    const expected = resolvePlaywrightMcpProxyCommand();
     const servers = buildSupplementalMcpServers({
       browserEnabled: true,
+      browserProfileDir: getManagedBrowserProfileDir(),
       browserHeadless: false,
-      browserIsolated: false,
-      browserUseExtension: true,
-      browserExtensionToken: 'token-from-config',
       desktopEnabled: true,
       desktopAppiumUrl: 'http://127.0.0.1:4723',
     });
@@ -173,43 +151,69 @@ describe('buildSupplementalMcpServers', () => {
     expect(servers).toEqual([
       {
         name: 'pikiclaw-browser',
-        command: 'npx',
-        args: ['-y', '@playwright/mcp@latest', '--extension'],
-        env: { PLAYWRIGHT_MCP_EXTENSION_TOKEN: 'token-from-config' },
+        command: expected.command,
+        args: expected.args,
+        env: {
+          PIKICLAW_PLAYWRIGHT_PROFILE_DIR: getManagedBrowserProfileDir(),
+          PIKICLAW_PLAYWRIGHT_HEADLESS: 'false',
+        },
+      },
+    ]);
+  });
+
+  it('passes through the managed browser CDP endpoint when reusing an existing process', () => {
+    const profileDir = path.join('/tmp', 'pikiclaw', 'browser', 'chrome-profile');
+    const expected = resolvePlaywrightMcpProxyCommand();
+    const servers = buildSupplementalMcpServers({
+      browserEnabled: true,
+      browserProfileDir: profileDir,
+      browserHeadless: true,
+      desktopEnabled: true,
+      desktopAppiumUrl: 'http://127.0.0.1:4723',
+    }, {
+      cdpEndpoint: 'http://127.0.0.1:39222',
+    });
+
+    expect(servers).toEqual([
+      {
+        name: 'pikiclaw-browser',
+        command: expected.command,
+        args: expected.args,
+        env: {
+          PIKICLAW_PLAYWRIGHT_PROFILE_DIR: profileDir,
+          PIKICLAW_PLAYWRIGHT_HEADLESS: 'true',
+          PIKICLAW_PLAYWRIGHT_CDP_ENDPOINT: 'http://127.0.0.1:39222',
+        },
       },
     ]);
   });
 });
 
 describe('buildGuiSetupHints', () => {
-  it('tells users to install the Playwright extension when extension mode is enabled', () => {
+  it('returns no browser hints when browser automation is disabled', () => {
     const hints = buildGuiSetupHints({
-      browserEnabled: true,
+      browserEnabled: false,
+      browserProfileDir: getManagedBrowserProfileDir(),
       browserHeadless: false,
-      browserIsolated: false,
-      browserUseExtension: true,
-      browserExtensionToken: '',
-      desktopEnabled: true,
-      desktopAppiumUrl: 'http://127.0.0.1:4723',
-    });
-
-    expect(hints).toEqual([
-      'browser extension mode enabled; install Playwright MCP Bridge in the current Chrome profile first: https://chromewebstore.google.com/detail/playwright-mcp-bridge/mmlmfjhmonkocbjadbfplnigmagldckm',
-      'after installing the extension, open its UI to copy PLAYWRIGHT_MCP_EXTENSION_TOKEN if you want to skip the browser approval prompt',
-    ]);
-  });
-
-  it('stays quiet when browser automation does not use extension mode', () => {
-    const hints = buildGuiSetupHints({
-      browserEnabled: true,
-      browserHeadless: false,
-      browserIsolated: false,
-      browserUseExtension: false,
-      browserExtensionToken: '',
       desktopEnabled: true,
       desktopAppiumUrl: 'http://127.0.0.1:4723',
     });
 
     expect(hints).toEqual([]);
+  });
+
+  it('explains the dedicated managed browser profile mode', () => {
+    const profileDir = path.join('/tmp', 'pikiclaw', 'browser', 'chrome-profile');
+    const hints = buildGuiSetupHints({
+      browserEnabled: true,
+      browserProfileDir: profileDir,
+      browserHeadless: true,
+      desktopEnabled: true,
+      desktopAppiumUrl: 'http://127.0.0.1:4723',
+    });
+
+    expect(hints).toEqual([
+      `managed browser profile mode enabled; runtime sessions reuse ${profileDir}; configured MCP browser mode=headless. This mode keeps automation isolated from your everyday browser. If the managed browser is already open, pikiclaw will try to attach to it first. When using browser_tabs, use action="new" to open a tab, not "create".`,
+    ]);
   });
 });

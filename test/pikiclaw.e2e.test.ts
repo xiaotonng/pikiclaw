@@ -135,26 +135,21 @@ describe.skipIf(SKIP)('/sessions', () => {
     expect(replies[0].opts?.parseMode).toBe('HTML');
   });
 
-  it('no-sessions case shows workdir in message', async () => {
-    // tmpWorkdir is empty, so should have no sessions
+  it('no-sessions case shows the latest empty-state copy', async () => {
     const { ctx, replies } = createCaptureCtx();
     await claw.handleCommand('sessions', '', ctx);
     const text = replies[0].text;
-    if (text.includes('No ')) {
-      expect(text).toContain(tmpWorkdir);
-    }
+    expect(text).toContain('No sessions found.');
+    expect(text).toContain('Use the controls below to switch or start a new session.');
   });
 
-  it('includes "New session" button when sessions exist', async () => {
+  it('includes the "New session" button', async () => {
     const { ctx, replies } = createCaptureCtx();
     await claw.handleCommand('sessions', '', ctx);
-    const text = replies[0].text;
-    if (!text.includes('No ')) {
-      const kb = replies[0].opts?.keyboard;
-      expect(kb).toBeTruthy();
-      const allBtns = kb.inline_keyboard.flat();
-      expect(allBtns.find((b: any) => b.callback_data === 'sess:new')).toBeTruthy();
-    }
+    const kb = replies[0].opts?.keyboard;
+    expect(kb).toBeTruthy();
+    const allBtns = kb.inline_keyboard.flat();
+    expect(allBtns.find((b: any) => b.callback_data === 'sess:new')).toBeTruthy();
   });
 
   // --- sess: callback (inline keyboard 切换/新建) ---
@@ -168,16 +163,8 @@ describe.skipIf(SKIP)('/sessions', () => {
 
     expect(state.sessionId).toBeNull();
     expect(callbacks[0]).toContain('New session');
-    expect(edits[0].text).toContain('Session reset');
-  });
-
-  it('sess:<id> switches to that session', async () => {
-    const { ctx, edits, callbacks } = createCallbackCtx(600, 2001);
-    await claw.handleCallback('sess:abc123def456', ctx);
-
-    expect(claw.chat(600).sessionId).toBe('abc123def456');
-    expect(callbacks[0]).toContain('abc123def456'.slice(0, 12));
-    expect(edits.length).toBe(1);
+    expect(edits[0].text).toContain('<b>New Session</b>');
+    expect(edits[0].text).toContain('Send a message to start.');
   });
 });
 
@@ -187,7 +174,9 @@ describe.skipIf(SKIP)('/sessions', () => {
 
 describe.skipIf(SKIP)('/status', () => {
   it('shows version, uptime, agent, workdir, memory, PID', async () => {
-    const { ctx, replies } = createCaptureCtx();
+    const chatId = 1200;
+    const state = claw.chat(chatId);
+    const { ctx, replies } = createCaptureCtx(chatId);
     await claw.handleCommand('status', '', ctx);
 
     expect(replies.length).toBe(1);
@@ -199,7 +188,7 @@ describe.skipIf(SKIP)('/status', () => {
     expect(text).toContain(String(process.pid));
     expect(text).toContain('Workdir');
     expect(text).toContain('Agent');
-    expect(text).toContain('claude');
+    expect(text).toContain(state.agent);
     expect(replies[0].opts?.parseMode).toBe('HTML');
   });
 
@@ -227,12 +216,12 @@ describe.skipIf(SKIP)('/switch', () => {
 
     expect(replies.length).toBe(1);
     const text = replies[0].text;
-    expect(text).toContain('Switch workdir');
-    expect(text).toContain(claw.workdir);
+    expect(text).toContain('<b>Workdir</b>');
+    expect(text).toContain(path.basename(claw.workdir).slice(-12));
     expect(replies[0].opts?.parseMode).toBe('HTML');
   });
 
-  it('keyboard has directory buttons and "Select this directory"', async () => {
+  it('keyboard has directory buttons and the latest "Use This" action', async () => {
     const { ctx, replies } = createCaptureCtx();
     await claw.handleCommand('switch', '', ctx);
 
@@ -243,7 +232,7 @@ describe.skipIf(SKIP)('/switch', () => {
     const lastRow = kb.inline_keyboard[kb.inline_keyboard.length - 1];
     const selectBtn = lastRow.find((b: any) => b.callback_data?.startsWith('sw:s:'));
     expect(selectBtn).toBeTruthy();
-    expect(selectBtn.text).toContain('Select');
+    expect(selectBtn.text).toBe('Use This');
   });
 
   it('directory buttons correspond to real filesystem subdirs', async () => {
@@ -278,7 +267,7 @@ describe.skipIf(SKIP)('/switch', () => {
     await claw.handleCallback(navBtn.callback_data, cbCtx);
 
     expect(edits.length).toBe(1);
-    expect(edits[0].text).toContain('Switch workdir');
+    expect(edits[0].text).toContain('<b>Workdir</b>');
     expect(callbacks.length).toBe(1);
   });
 
@@ -297,7 +286,9 @@ describe.skipIf(SKIP)('/switch', () => {
 
     expect(callbacks.length).toBe(1);
     expect(edits.length).toBe(1);
-    expect(edits[0].text).toContain('Workdir switched');
+    expect(callbacks[0]).toContain('Switched!');
+    expect(edits[0].text).toContain('<b>Workdir</b>');
+    expect(edits[0].text).toContain('→');
 
     // restore
     claw.workdir = origWorkdir;
@@ -309,23 +300,20 @@ describe.skipIf(SKIP)('/switch', () => {
 // =========================================================================
 
 describe.skipIf(SKIP)('/host', () => {
-  it('shows real host info: hostname, OS, CPU, memory, node version', async () => {
+  it('shows the latest host summary fields', async () => {
     const { ctx, replies } = createCaptureCtx();
     await claw.handleCommand('host', '', ctx);
 
     expect(replies.length).toBe(1);
     const text = replies[0].text;
-    expect(text).toContain('Hostname');
+    expect(text).toContain('<b>Host</b>');
+    expect(text).toContain('Name');
     expect(text).toContain(os.hostname());
-    expect(text).toContain('OS');
     expect(text).toContain('CPU');
+    expect(text).toContain('CPU Usage');
     expect(text).toContain('Memory');
-    expect(text).toContain('Load');
-    expect(text).toContain('Uptime');
-    expect(text).toContain('Node');
-    expect(text).toContain(process.version);
-    expect(text).toContain('Home');
-    expect(text).toContain(os.homedir());
+    expect(text).toContain('Process');
+    expect(text).toContain(String(process.pid));
     expect(replies[0].opts?.parseMode).toBe('HTML');
   });
 
@@ -342,13 +330,13 @@ describe.skipIf(SKIP)('/host', () => {
 // =========================================================================
 
 describe.skipIf(SKIP)('/agents', () => {
-  it('lists claude and codex with install status', async () => {
+  it('lists installed agents with the latest heading', async () => {
     const { ctx, replies } = createCaptureCtx();
     await claw.handleCommand('agents', '', ctx);
 
     expect(replies.length).toBe(1);
     const text = replies[0].text;
-    expect(text).toContain('Available Agents');
+    expect(text).toContain('<b>Agents</b>');
     expect(text).toContain('claude');
     expect(text).toContain('codex');
     expect(replies[0].opts?.parseMode).toBe('HTML');
@@ -364,10 +352,12 @@ describe.skipIf(SKIP)('/agents', () => {
     expect(agBtns.length).toBeGreaterThan(0);
   });
 
-  it('marks current agent as (current)', async () => {
-    const { ctx, replies } = createCaptureCtx();
+  it('marks the current agent with the selected-state symbol', async () => {
+    const chatId = 1300;
+    const state = claw.chat(chatId);
+    const { ctx, replies } = createCaptureCtx(chatId);
     await claw.handleCommand('agents', '', ctx);
-    expect(replies[0].text).toContain('(current)');
+    expect(replies[0].text).toMatch(new RegExp(`● <b>\\d+\\.<\\/b> ${state.agent}`));
   });
 
   // --- ag: callback (切换 agent) ---

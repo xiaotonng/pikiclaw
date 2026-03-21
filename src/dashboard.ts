@@ -43,6 +43,8 @@ export interface DashboardServer {
   attachBot(bot: Bot): void;
 }
 
+const DASHBOARD_PORT_RETRY_LIMIT = 10;
+
 /**
  * Shared context passed to route handlers so they can access
  * server-level state without closing over the startDashboard() scope.
@@ -391,15 +393,42 @@ export async function startDashboard(opts: DashboardOptions = {}): Promise<Dashb
   });
 
   return new Promise<DashboardServer>((resolve, reject) => {
-    server.on('error', (err: NodeJS.ErrnoException) => {
-      if (err.code === 'EADDRINUSE') server.listen(preferredPort + 1, onListening);
-      else reject(err);
-    });
+    let nextPort = preferredPort;
+    let settled = false;
+
+    const fail = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      server.off('error', onError);
+      server.off('listening', onListening);
+      reject(err);
+    };
+
+    const onError = (err: NodeJS.ErrnoException) => {
+      if (settled) return;
+      if (err.code === 'EADDRINUSE') {
+        if (nextPort >= preferredPort + DASHBOARD_PORT_RETRY_LIMIT) {
+          fail(new Error(`Dashboard ports ${preferredPort}-${preferredPort + DASHBOARD_PORT_RETRY_LIMIT} are already in use.`));
+          return;
+        }
+        nextPort += 1;
+        server.listen(nextPort);
+        return;
+      }
+      fail(err);
+    };
+
+    server.on('error', onError);
     server.on('close', () => {
       unregisterProcessRuntime();
     });
+    server.on('listening', onListening);
 
     function onListening() {
+      if (settled) return;
+      settled = true;
+      server.off('error', onError);
+      server.off('listening', onListening);
       const addr = server.address();
       const actualPort = typeof addr === 'object' && addr ? addr.port : preferredPort;
       const dashUrl = `http://localhost:${actualPort}`;
@@ -437,6 +466,6 @@ export async function startDashboard(opts: DashboardOptions = {}): Promise<Dashb
       });
     }
 
-    server.listen(preferredPort, onListening);
+    server.listen(preferredPort);
   });
 }

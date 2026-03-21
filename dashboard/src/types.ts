@@ -107,6 +107,8 @@ export interface UserConfig {
   feishuAppId?: string;
   feishuAppSecret?: string;
   channels?: string[];
+  browserEnabled?: boolean;
+  browserHeadless?: boolean;
 }
 
 export interface AppState {
@@ -168,17 +170,34 @@ export interface SessionTailMessage {
   text: string;
 }
 
-export interface ExtensionStatus {
-  browser: {
-    hasToken: boolean;
-    token: string;
-  };
+export type BrowserProfileStatus = 'disabled' | 'ready' | 'needs_setup' | 'chrome_missing';
+
+export interface BrowserStatus {
+  status: BrowserProfileStatus;
+  enabled: boolean;
+  headlessMode: 'headless' | 'headed';
+  chromeInstalled: boolean;
+  profileCreated: boolean;
+  running: boolean;
+  pid: number | null;
+  profileDir: string;
+  detail?: string | null;
+}
+
+export interface BrowserStatusResponse {
+  browser: BrowserStatus;
   desktop: {
     enabled: boolean;
     installed: boolean;
     running: boolean;
     appiumUrl: string;
   };
+}
+
+export interface BrowserSetupResponse {
+  ok: boolean;
+  browser: BrowserStatus;
+  error?: string;
 }
 
 export interface DirEntry {

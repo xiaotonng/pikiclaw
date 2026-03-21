@@ -17,6 +17,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import {
+  getManagedBrowserProfileDir,
+  prepareManagedBrowserForAutomation,
+} from './browser-profile.js';
 import { loadUserConfig } from './user-config.js';
 import { MCP_TIMEOUTS, MCP_ARTIFACT_MAX_BYTES } from './constants.js';
 
@@ -91,28 +95,31 @@ interface RegisteredMcpServer {
 
 export interface GuiIntegrationConfig {
   browserEnabled: boolean;
+  browserProfileDir: string;
   browserHeadless: boolean;
-  browserIsolated: boolean;
-  browserUseExtension: boolean;
-  browserExtensionToken: string;
   desktopEnabled: boolean;
   desktopAppiumUrl: string;
 }
 
-const PLAYWRIGHT_MCP_EXTENSION_URL = 'https://chromewebstore.google.com/detail/playwright-mcp-bridge/mmlmfjhmonkocbjadbfplnigmagldckm';
+interface BrowserRegistrationRuntime {
+  cdpEndpoint?: string | null;
+}
 
 function sanitizeExecArgv(execArgv: string[]): string[] {
   return execArgv.filter(arg => !/^--inspect(?:-brk)?(?:=.*)?$/.test(arg));
 }
 
-function resolveCurrentProcessCommand(runtime: McpServerRuntimeInfo): { command: string; args: string[] } | null {
+function resolveCurrentCliCommand(
+  runtime: McpServerRuntimeInfo,
+  extraArgs: string[],
+): { command: string; args: string[] } | null {
   const entryScript = runtime.argv[1] ? path.resolve(runtime.argv[1]) : '';
   const base = path.basename(entryScript).toLowerCase();
   if (!entryScript || !fs.existsSync(entryScript)) return null;
   if (base !== 'cli.js' && base !== 'cli.ts') return null;
   return {
     command: runtime.execPath,
-    args: [...sanitizeExecArgv(runtime.execArgv), entryScript, '--mcp-serve'],
+    args: [...sanitizeExecArgv(runtime.execArgv), entryScript, ...extraArgs],
   };
 }
 
@@ -122,7 +129,7 @@ export function resolveMcpServerCommand(runtime: McpServerRuntimeInfo = {
   argv: process.argv,
   moduleUrl: import.meta.url,
 }): { command: string; args: string[] } {
-  const currentProcess = resolveCurrentProcessCommand(runtime);
+  const currentProcess = resolveCurrentCliCommand(runtime, ['--mcp-serve']);
   if (currentProcess) return currentProcess;
 
   // Try to find the compiled JS file in the same directory as this module
@@ -138,6 +145,27 @@ export function resolveMcpServerCommand(runtime: McpServerRuntimeInfo = {
   }
   // Last resort: assume pikiclaw is in PATH
   return { command: 'pikiclaw', args: ['--mcp-serve'] };
+}
+
+export function resolvePlaywrightMcpProxyCommand(runtime: McpServerRuntimeInfo = {
+  execPath: process.execPath,
+  execArgv: process.execArgv,
+  argv: process.argv,
+  moduleUrl: import.meta.url,
+}): { command: string; args: string[] } {
+  const currentProcess = resolveCurrentCliCommand(runtime, ['--playwright-mcp-proxy']);
+  if (currentProcess) return currentProcess;
+
+  const thisDir = path.dirname(fileURLToPath(runtime.moduleUrl));
+  const proxyScript = path.join(thisDir, 'mcp-playwright-proxy.js');
+  if (fs.existsSync(proxyScript)) {
+    return { command: 'node', args: [proxyScript] };
+  }
+  const cliScript = path.join(thisDir, 'cli.js');
+  if (fs.existsSync(cliScript)) {
+    return { command: 'node', args: [cliScript, '--playwright-mcp-proxy'] };
+  }
+  return { command: 'pikiclaw', args: ['--playwright-mcp-proxy'] };
 }
 
 function parseOptionalBool(value: unknown): boolean | null {
@@ -161,59 +189,45 @@ export function resolveGuiIntegrationConfig(
   config = loadUserConfig(),
   env: Record<string, string | undefined> = process.env,
 ): GuiIntegrationConfig {
+  const browserEnabled = boolFromConfigEnv(
+    typeof config.browserEnabled === 'boolean' ? config.browserEnabled : (config as Record<string, unknown>).browserUseProfile,
+    env.PIKICLAW_BROWSER_ENABLED ?? env.PIKICLAW_BROWSER_USE_PROFILE,
+    false,
+  );
   return {
-    browserEnabled: boolFromConfigEnv(config.browserGuiEnabled, env.PIKICLAW_BROWSER_GUI, true),
-    browserHeadless: boolFromConfigEnv(config.browserGuiHeadless, env.PIKICLAW_BROWSER_HEADLESS, false),
-    browserIsolated: boolFromConfigEnv(config.browserGuiIsolated, env.PIKICLAW_BROWSER_ISOLATED, false),
-    browserUseExtension: boolFromConfigEnv(config.browserGuiUseExtension, env.PIKICLAW_BROWSER_USE_EXTENSION, true),
-    browserExtensionToken: String(env.PLAYWRIGHT_MCP_EXTENSION_TOKEN || config.browserGuiExtensionToken || '').trim(),
+    browserEnabled,
+    browserProfileDir: getManagedBrowserProfileDir(),
+    browserHeadless: boolFromConfigEnv(config.browserHeadless, env.PIKICLAW_BROWSER_HEADLESS, false),
     desktopEnabled: boolFromConfigEnv(config.desktopGuiEnabled, env.PIKICLAW_DESKTOP_GUI, process.platform === 'darwin'),
     desktopAppiumUrl: String(env.PIKICLAW_DESKTOP_APPIUM_URL || config.desktopAppiumUrl || 'http://127.0.0.1:4723').trim() || 'http://127.0.0.1:4723',
   };
 }
 
-export function buildSupplementalMcpServers(gui: GuiIntegrationConfig = resolveGuiIntegrationConfig()): RegisteredMcpServer[] {
-  const servers: RegisteredMcpServer[] = [];
-  if (gui.browserEnabled) {
-    // In extension mode, skip browser integration if no token is configured —
-    // without a token, each connection requires a manual browser authorization
-    // click that remote users cannot perform.
-    if (gui.browserUseExtension && !gui.browserExtensionToken) {
-      // Silently skip — the dashboard Extensions section will show "Token required".
-    } else {
-      const args = ['-y', '@playwright/mcp@latest'];
-      if (gui.browserUseExtension) {
-        args.push('--extension');
-      } else {
-        if (gui.browserHeadless) args.push('--headless');
-        if (gui.browserIsolated) args.push('--isolated');
-      }
-      servers.push({
-        name: 'pikiclaw-browser',
-        command: 'npx',
-        args,
-        env: gui.browserUseExtension && gui.browserExtensionToken
-          ? { PLAYWRIGHT_MCP_EXTENSION_TOKEN: gui.browserExtensionToken }
-          : undefined,
-      });
-    }
-  }
-  return servers;
+export function buildSupplementalMcpServers(
+  gui: GuiIntegrationConfig = resolveGuiIntegrationConfig(),
+  runtime: BrowserRegistrationRuntime = {},
+): RegisteredMcpServer[] {
+  if (!gui.browserEnabled) return [];
+  const profileDir = gui.browserProfileDir || getManagedBrowserProfileDir();
+  const browserServer = resolvePlaywrightMcpProxyCommand();
+  const cdpEndpoint = runtime.cdpEndpoint || '';
+  return [{
+    name: 'pikiclaw-browser',
+    command: browserServer.command,
+    args: browserServer.args,
+    env: {
+      PIKICLAW_PLAYWRIGHT_PROFILE_DIR: profileDir,
+      PIKICLAW_PLAYWRIGHT_HEADLESS: String(gui.browserHeadless),
+      ...(cdpEndpoint ? { PIKICLAW_PLAYWRIGHT_CDP_ENDPOINT: cdpEndpoint } : {}),
+    },
+  }];
 }
 
 export function buildGuiSetupHints(gui: GuiIntegrationConfig = resolveGuiIntegrationConfig()): string[] {
-  const hints: string[] = [];
-  if (!gui.browserEnabled || !gui.browserUseExtension) return hints;
-
-  hints.push(
-    `browser extension mode enabled; install Playwright MCP Bridge in the current Chrome profile first: ${PLAYWRIGHT_MCP_EXTENSION_URL}`,
-  );
-  if (!gui.browserExtensionToken) {
-    hints.push(
-      'after installing the extension, open its UI to copy PLAYWRIGHT_MCP_EXTENSION_TOKEN if you want to skip the browser approval prompt',
-    );
-  }
-  return hints;
+  if (!gui.browserEnabled) return [];
+  return [
+    `managed browser profile mode enabled; runtime sessions reuse ${gui.browserProfileDir || getManagedBrowserProfileDir()}; configured MCP browser mode=${gui.browserHeadless ? 'headless' : 'headed'}. This mode keeps automation isolated from your everyday browser. If the managed browser is already open, pikiclaw will try to attach to it first. When using browser_tabs, use action="new" to open a tab, not "create".`,
+  ];
 }
 
 function buildClaudeMcpConfig(servers: RegisteredMcpServer[]) {
@@ -352,7 +366,23 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
   const { sessionDir, workspacePath, stagedFiles, sendFile } = opts;
   let hadActivity = false;
   const gui = resolveGuiIntegrationConfig();
-  for (const hint of buildGuiSetupHints(gui)) opts.onLog?.(hint);
+  const browserRuntime: BrowserRegistrationRuntime = {};
+  if (gui.browserEnabled) {
+    const preparedBrowser = await prepareManagedBrowserForAutomation(
+      gui.browserProfileDir || getManagedBrowserProfileDir(),
+      { headless: gui.browserHeadless },
+    );
+    if (preparedBrowser.connectionMode === 'attach' && preparedBrowser.cdpEndpoint) {
+      opts.onLog?.(`reusing managed browser process via CDP at ${preparedBrowser.cdpEndpoint}.`);
+    } else if (preparedBrowser.closedPids.length) {
+      opts.onLog?.(
+        `closed managed browser setup process${preparedBrowser.closedPids.length > 1 ? 'es' : ''} (${preparedBrowser.closedPids.join(', ')}) before starting browser automation.`,
+      );
+    }
+    browserRuntime.cdpEndpoint = preparedBrowser.cdpEndpoint;
+    opts.onLog?.(`browser MCP registration mode=${preparedBrowser.connectionMode === 'attach' ? 'attach' : (gui.browserHeadless ? 'headless' : 'launch')}.`);
+    for (const hint of buildGuiSetupHints(gui)) opts.onLog?.(hint);
+  }
 
   // Build allowed roots: workspace + workdir + /tmp
   const allowedRoots = [workspacePath];
@@ -473,7 +503,7 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
   };
   const servers: RegisteredMcpServer[] = [
     { name: 'pikiclaw', command, args, env: envVars },
-    ...buildSupplementalMcpServers(gui),
+    ...buildSupplementalMcpServers(gui, browserRuntime),
   ];
 
   let configPath = '';

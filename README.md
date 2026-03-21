@@ -98,10 +98,6 @@ npx pikiclaw@latest
 
 <img src="docs/promo-dashboard-config.png" alt="Config" width="700">
 
-**插件中心** — 浏览器操控、桌面自动化
-
-<img src="docs/promo-dashboard-extensions.png" alt="Extensions" width="700">
-
 **会话管理** — 按 Agent 分组的会话泳道
 
 <img src="docs/promo-dashboard-sessions.png" alt="Sessions" width="700">
@@ -162,7 +158,7 @@ npx pikiclaw@latest --doctor
 
 可选 GUI 能力：
 
-- 浏览器自动化：通过 `@playwright/mcp` 补充接入，默认支持 Chrome extension mode，也可切到 headless / isolated 模式
+- 浏览器自动化：通过 `@playwright/mcp` 管理一个专用的持久化 Chrome profile；第一次使用时在这个自动化浏览器里登录需要的网站，后续任务会复用同一个 profile
 - macOS 桌面自动化：通过 Appium Mac2 提供 `desktop_open_app`、`desktop_snapshot`、`desktop_click`、`desktop_type`、`desktop_screenshot` 等工具
 
 ---
@@ -196,16 +192,12 @@ npx pikiclaw@latest --doctor
 ## Config And Setup Notes
 
 - 持久化配置在 `~/.pikiclaw/setting.json`
-- Dashboard 是主配置入口，环境变量仍然可用
-- 浏览器 GUI 相关常用变量：
-  - `PIKICLAW_BROWSER_GUI`
-  - `PIKICLAW_BROWSER_USE_EXTENSION`
-  - `PIKICLAW_BROWSER_HEADLESS`
-  - `PIKICLAW_BROWSER_ISOLATED`
-  - `PLAYWRIGHT_MCP_EXTENSION_TOKEN`
+- Dashboard 是主配置入口，其他运行时配置仍然可用
 - 桌面 GUI 相关常用变量：
   - `PIKICLAW_DESKTOP_GUI`
   - `PIKICLAW_DESKTOP_APPIUM_URL`
+
+浏览器自动化由 dashboard 和本地运行时共同管理，会自动创建并复用专用的 Chrome profile 目录。你只需要在这个专用浏览器里登录需要自动化的网站账号一次。
 
 如果要启用 macOS 桌面自动化，需要先准备 Appium Mac2：
 

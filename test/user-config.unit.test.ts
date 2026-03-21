@@ -8,6 +8,10 @@ async function loadModule() {
   return import('../src/user-config.ts');
 }
 
+async function loadBrowserProfileModule() {
+  return import('../src/browser-profile.ts');
+}
+
 beforeEach(() => {
   vi.resetModules();
   process.env = { ...ORIGINAL_ENV };
@@ -39,6 +43,15 @@ describe('user config path resolution', () => {
 
     expect(mod.getUserConfigPath()).toBe(
       path.join(os.homedir(), '.pikiclaw', 'setting.json'),
+    );
+  });
+
+  it('keeps the managed browser profile outside the dev config directory', async () => {
+    process.env.PIKICLAW_CONFIG = path.join(os.homedir(), '.pikiclaw', 'dev', 'setting.json');
+    const mod = await loadBrowserProfileModule();
+
+    expect(mod.getManagedBrowserProfileDir()).toBe(
+      path.join(os.homedir(), '.pikiclaw', 'browser', 'chrome-profile'),
     );
   });
 });

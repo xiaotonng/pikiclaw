@@ -156,7 +156,7 @@ function desktopUnsupported(): ToolResult {
 function desktopSetupHint(message: string): ToolResult {
   return toolResult(
     `${message}\n` +
-    'Enable desktop automation in the pikiclaw dashboard (Extensions > Desktop Automation > Setup).\n' +
+    'Enable desktop automation in the pikiclaw dashboard (Automation > Desktop Automation > Setup).\n' +
     'Also ensure Accessibility permission is granted to the terminal app running pikiclaw.',
     true,
   );

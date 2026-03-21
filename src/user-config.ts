@@ -23,11 +23,8 @@ export interface UserConfig {
   telegramAllowedChatIds?: string;
   feishuAppId?: string;
   feishuAppSecret?: string;
-  browserGuiEnabled?: boolean;
-  browserGuiHeadless?: boolean;
-  browserGuiIsolated?: boolean;
-  browserGuiUseExtension?: boolean;
-  browserGuiExtensionToken?: string;
+  browserEnabled?: boolean;
+  browserHeadless?: boolean;
   desktopGuiEnabled?: boolean;
   desktopAppiumUrl?: string;
 }
@@ -94,11 +91,24 @@ function loadJsonFile(filePath: string): Partial<UserConfig> {
 }
 
 function normalizeUserConfig(config: Partial<UserConfig>): Partial<UserConfig> {
-  const next = { ...config };
+  const next: Record<string, unknown> = { ...config };
   const workdir = typeof next.workdir === 'string' && next.workdir.trim() ? next.workdir.trim() : '';
   if (workdir) next.workdir = resolveUserWorkdir({ workdir });
   else delete next.workdir;
-  return next;
+  if (typeof next.browserEnabled !== 'boolean' && typeof next.browserUseProfile === 'boolean') {
+    next.browserEnabled = next.browserUseProfile;
+  }
+  if (typeof next.browserHeadless !== 'boolean' && typeof next.browserGuiHeadless === 'boolean') {
+    next.browserHeadless = next.browserGuiHeadless;
+  }
+  delete next.browserUseProfile;
+  delete next.browserCdpEndpoint;
+  delete next.browserGuiEnabled;
+  delete next.browserGuiHeadless;
+  delete next.browserGuiIsolated;
+  delete next.browserGuiUseExtension;
+  delete next.browserGuiExtensionToken;
+  return next as Partial<UserConfig>;
 }
 
 export function loadUserConfig(): Partial<UserConfig> {

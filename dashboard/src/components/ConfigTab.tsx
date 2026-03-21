@@ -7,7 +7,7 @@ import { Badge, Button, Card, Dot, Label, Modal, ModalHeader, SectionLabel, Sele
 import { BrandBadge, BrandIcon } from './BrandIcon';
 import { cn, getAgentMeta } from '../utils';
 import { formatUsageSummary, usageBadgeText, usageTone } from '../usage';
-import type { AgentRuntimeStatus, AgentStatusResponse, ExtensionStatus, PermissionStatus } from '../types';
+import type { AgentRuntimeStatus, AgentStatusResponse, BrowserStatusResponse, PermissionStatus } from '../types';
 
 const effortOptions: Record<string, string[]> = {
   claude: ['low', 'medium', 'high'],
@@ -479,31 +479,64 @@ function SystemPermissions() {
   );
 }
 
-export function Extensions({ onOpenPlaywrightSetup, onOpenDesktopSetup }: { onOpenPlaywrightSetup: () => void; onOpenDesktopSetup: () => void }) {
+function BrowserGlyph() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="3.5" y="4" width="17" height="14.5" rx="3" />
+      <path d="M3.5 8.5h17" />
+      <circle cx="7" cy="6.3" r="0.8" fill="currentColor" stroke="none" />
+      <circle cx="9.8" cy="6.3" r="0.8" fill="currentColor" stroke="none" />
+      <circle cx="12.6" cy="6.3" r="0.8" fill="currentColor" stroke="none" />
+      <path d="M8 12.5h8" />
+      <path d="M8 15h5.5" />
+    </svg>
+  );
+}
+
+export function Automation({ onOpenBrowserSetup, onOpenDesktopSetup }: { onOpenBrowserSetup: () => void; onOpenDesktopSetup: () => void }) {
   const { state, toast, locale } = useStore();
   const t = createT(locale);
-  const [ext, setExt] = useState<ExtensionStatus | null>(null);
+  const [status, setStatus] = useState<BrowserStatusResponse | null>(null);
   const [disabling, setDisabling] = useState(false);
 
-  const refreshExt = useCallback(() => {
-    api.getExtensions().then(setExt).catch(() => {});
+  const refreshBrowser = useCallback(() => {
+    api.getBrowser().then(setStatus).catch(() => {});
   }, []);
 
-  useEffect(() => { refreshExt(); }, [refreshExt, state]);
+  useEffect(() => { refreshBrowser(); }, [refreshBrowser, state]);
 
-  const browserHasToken = ext?.browser.hasToken ?? false;
-  const desktopEnabled = ext?.desktop.enabled ?? false;
-  const desktopRunning = ext?.desktop.running ?? false;
+  const browser = status?.browser;
+  const desktopEnabled = status?.desktop.enabled ?? false;
+  const desktopRunning = status?.desktop.running ?? false;
+  const browserEnabled = browser?.enabled ?? false;
 
   const desktopStatus = desktopRunning
     ? t('ext.running')
     : desktopEnabled
       ? t('ext.enabled')
-      : ext?.desktop.installed === false
+      : status?.desktop.installed === false
         ? t('ext.notInstalled')
         : t('ext.disabled');
 
   const desktopStatusVariant = desktopRunning ? 'ok' as const : desktopEnabled ? 'accent' as const : 'muted' as const;
+  const browserStatusLabel = !status
+    ? t('status.loading')
+    : !browserEnabled
+      ? t('ext.disabled')
+      : browser?.status === 'ready'
+        ? t('ext.browserReady')
+        : browser?.chromeInstalled
+          ? t('ext.chromeInstalled')
+          : t('ext.needsSetup');
+  const browserStatusVariant = !status
+    ? 'muted' as const
+    : !browserEnabled
+      ? 'muted' as const
+      : browser?.status === 'ready'
+        ? 'ok' as const
+        : browser?.chromeInstalled
+          ? 'warn' as const
+          : 'err' as const;
 
   const handleDesktopDisable = async () => {
     setDisabling(true);
@@ -511,7 +544,7 @@ export function Extensions({ onOpenPlaywrightSetup, onOpenDesktopSetup }: { onOp
       const r = await api.desktopToggle(false);
       if (r.ok) {
         toast(t('ext.desktopStopped'));
-        refreshExt();
+        refreshBrowser();
       } else {
         toast(r.error || t('ext.desktopInstallFailed'), false);
       }
@@ -527,31 +560,32 @@ export function Extensions({ onOpenPlaywrightSetup, onOpenDesktopSetup }: { onOp
       <div className="mb-4 text-sm leading-relaxed text-fg-4">{t('ext.hint')}</div>
       <div className="divide-y divide-edge">
         <SettingRow
-          icon={<BrandIcon brand="playwright" size={20} />}
+          icon={<BrowserGlyph />}
           title={t('ext.browser')}
-          titleHref="https://playwright.dev/"
-          description={t('ext.browserDesc')}
-          meta={t('ext.browserExtMode')}
-          status={!ext ? t('status.loading') : browserHasToken ? t('ext.tokenSet') : t('ext.tokenMissing')}
-          statusVariant={!ext ? 'muted' : browserHasToken ? 'ok' : 'warn'}
-          loading={!ext}
+          description={browserEnabled ? t('ext.browserDescEnabled') : t('ext.browserDescDisabled')}
+          meta={browser?.profileDir
+            ? `${t('ext.profileDir')}: ${browser.profileDir}`
+            : t('ext.browserProfileMode')}
+          status={browserStatusLabel}
+          statusVariant={browserStatusVariant}
+          loading={!status}
           actionLabel={t('ext.setup')}
-          actionDisabled={!ext}
-          onAction={onOpenPlaywrightSetup}
+          actionDisabled={!status}
+          onAction={onOpenBrowserSetup}
         />
         <SettingRow
           icon={<BrandIcon brand="appium" size={20} />}
           title={t('ext.desktop')}
           titleHref="https://appium.io/"
           description={t('ext.desktopDesc')}
-          meta={desktopEnabled && ext?.desktop.appiumUrl ? `Appium: ${ext.desktop.appiumUrl}` : undefined}
-          status={!ext ? t('status.loading') : desktopStatus}
-          statusVariant={!ext ? 'muted' : desktopStatusVariant}
-          loading={!ext}
+          meta={desktopEnabled && status?.desktop.appiumUrl ? `Appium: ${status.desktop.appiumUrl}` : undefined}
+          status={!status ? t('status.loading') : desktopStatus}
+          statusVariant={!status ? 'muted' : desktopStatusVariant}
+          loading={!status}
           actionLabel={desktopEnabled
             ? (disabling ? t('ext.disabling') : t('ext.disable'))
             : t('ext.setup')}
-          actionDisabled={!ext || disabling}
+          actionDisabled={!status || disabling}
           onAction={desktopEnabled ? handleDesktopDisable : onOpenDesktopSetup}
         />
       </div>

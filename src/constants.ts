@@ -5,6 +5,8 @@
  * bucket it needs.
  */
 
+import path from 'node:path';
+
 // ---------------------------------------------------------------------------
 // MCP bridge
 // ---------------------------------------------------------------------------
@@ -50,11 +52,24 @@ export const DASHBOARD_TIMEOUTS = {
   appiumReachable: 3_000,
   /** Delay between Appium server startup polls. */
   appiumStartPoll: 1_000,
-  /** Timeout for the Playwright MCP extension validation spawn. */
-  extensionValidationSpawn: 12_000,
-  /** Grace period to let Playwright MCP server prove it stays alive. */
-  extensionValidationAlive: 5_000,
 };
+
+// ---------------------------------------------------------------------------
+// Browser automation
+// ---------------------------------------------------------------------------
+
+/**
+ * Stable relative path for the managed Chrome profile under the home directory.
+ * Keep this outside config-specific directories so `npm run dev` and the main
+ * runtime share the same browser login state.
+ */
+export const MANAGED_BROWSER_PROFILE_SUBPATH = path.join('.pikiclaw', 'browser', 'chrome-profile');
+
+/** Base Playwright MCP args for the managed browser integration. */
+export const PLAYWRIGHT_MCP_PACKAGE_NAME = '@playwright/mcp';
+export const PLAYWRIGHT_MCP_PACKAGE_VERSION = '0.0.68';
+export const PLAYWRIGHT_MCP_PACKAGE_SPEC = `${PLAYWRIGHT_MCP_PACKAGE_NAME}@${PLAYWRIGHT_MCP_PACKAGE_VERSION}`;
+export const PLAYWRIGHT_MCP_BROWSER_ARGS = ['--browser', 'chrome'] as const;
 
 /** Dashboard session pagination limits. */
 export const DASHBOARD_PAGINATION = {

@@ -17,6 +17,7 @@ import {
   type SkillInfo, type SkillListResult, type AgentDetectOptions, isPendingSessionId, normalizeClaudeModelId,
 } from './code-agent.js';
 import { getDriver, hasDriver, allDriverIds } from './agent-driver.js';
+import { resolveGuiIntegrationConfig } from './mcp-bridge.js';
 import { terminateProcessTree } from './process-control.js';
 import { VERSION } from './version.js';
 import {
@@ -198,6 +199,24 @@ function buildMcpDeliveryPrompt(): string {
   return [
     '[Artifact Return]',
     'This is an IM conversation, so pay attention to the IM tools.',
+  ].join('\n');
+}
+
+function buildBrowserAutomationPrompt(browserEnabled: boolean): string {
+  if (!browserEnabled) {
+    return [
+      '[Browser Automation]',
+      'Managed browser automation is disabled by default for this session.',
+      process.platform === 'darwin'
+        ? 'On macOS, operate your main browser directly with native commands such as open, osascript, and screencapture when needed.'
+        : 'Use native OS or browser commands directly when browser automation is not enabled.',
+    ].join('\n');
+  }
+  return [
+    '[Browser Automation]',
+    'A Playwright MCP browser server is already configured to use the local Chrome channel with a persistent profile.',
+    'Do not call browser_install unless a browser tool explicitly reports that Chrome or the browser is missing.',
+    'If you need a new tab, use browser_tabs with action="new".',
   ].join('\n');
 }
 
@@ -1145,11 +1164,15 @@ export class Bot {
     const resolvedModel = cs.modelId || this.modelForAgent(cs.agent);
     const agentConfig = this.agentConfigs[cs.agent] || {};
     const extraArgs: string[] = agentConfig.extraArgs || [];
+    const browserEnabled = resolveGuiIntegrationConfig(getActiveUserConfig()).browserEnabled;
     this.log(`[runStream] agent=${cs.agent} session=${cs.sessionId || '(new)'} workdir=${this.workdir} timeout=${this.runTimeout}s attachments=${attachments.length}`);
     this.log(`[runStream] ${cs.agent} config: model=${resolvedModel} extraArgs=[${extraArgs.join(' ')}]`);
     const isFirstTurnOfSession = !cs.sessionId || isPendingSessionId(cs.sessionId);
+    const mcpSystemPrompt = mcpSendFile
+      ? appendExtraPrompt(buildMcpDeliveryPrompt(), buildBrowserAutomationPrompt(browserEnabled))
+      : '';
     const effectiveSystemPrompt = isFirstTurnOfSession
-      ? (mcpSendFile ? appendExtraPrompt(systemPrompt, buildMcpDeliveryPrompt()) : systemPrompt)
+      ? appendExtraPrompt(systemPrompt, mcpSystemPrompt)
       : undefined;
     const opts: StreamOpts = {
       agent: cs.agent, prompt, workdir: this.workdir, timeout: this.runTimeout,

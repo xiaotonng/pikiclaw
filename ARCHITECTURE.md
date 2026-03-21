@@ -204,7 +204,7 @@ Registered by `mcp-session-server.ts`:
   - `desktop_screenshot`
   - `desktop_close_session`
 
-Supplemental browser automation can also be registered from `mcp-bridge.ts` via `@playwright/mcp`, separate from the built-in session MCP server.
+Supplemental browser automation can also be registered from `mcp-bridge.ts` via `@playwright/mcp`, using a pikiclaw-managed persistent Chrome profile so the same automation browser state can be reused across runs.
 
 ## Adding a New Agent
 

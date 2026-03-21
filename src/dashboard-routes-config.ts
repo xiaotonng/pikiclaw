@@ -2,7 +2,7 @@
  * dashboard-routes-config.ts — Config and channel-related API routes for the dashboard.
  *
  * Handles: /api/state, /api/config, /api/validate-*, /api/open-preferences,
- * /api/restart, /api/switch-workdir, /api/extensions, /api/save-extension-token,
+ * /api/restart, /api/switch-workdir, /api/browser, /api/browser/setup,
  * /api/desktop-install, /api/desktop-toggle, /api/ls-dir, /api/host, /api/permissions
  */
 
@@ -10,12 +10,14 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { spawn } from 'node:child_process';
-import { DASHBOARD_TIMEOUTS } from './constants.js';
-import { loadUserConfig, saveUserConfig, applyUserConfig, hasUserConfigFile, type UserConfig } from './user-config.js';
-import { isSetupReady, type SetupState } from './onboarding.js';
+import { loadUserConfig, saveUserConfig, applyUserConfig, hasUserConfigFile } from './user-config.js';
+import { isSetupReady } from './onboarding.js';
 import { validateFeishuConfig, validateTelegramConfig } from './config-validation.js';
 import { resolveGuiIntegrationConfig } from './mcp-bridge.js';
+import {
+  getManagedBrowserStatus,
+  launchManagedBrowserSetup,
+} from './browser-profile.js';
 import {
   formatActiveTaskRestartError,
   getActiveTaskCount,
@@ -100,15 +102,15 @@ export function registerConfigRoutes(
     return true;
   }
 
-  // Extension config status
-  if (url.pathname === '/api/extensions' && method === 'GET') {
-    handleExtensions(res);
+  // Browser profile status
+  if (url.pathname === '/api/browser' && method === 'GET') {
+    void handleBrowserStatus(res);
     return true;
   }
 
-  // Save extension token and validate
-  if (url.pathname === '/api/save-extension-token' && method === 'POST') {
-    void handleSaveExtensionToken(ctx, req, res);
+  // Launch managed browser profile for login/setup
+  if (url.pathname === '/api/browser/setup' && method === 'POST') {
+    void handleBrowserSetup(ctx, req, res);
     return true;
   }
 
@@ -269,14 +271,22 @@ async function handleSwitchWorkdir(ctx: DashboardRouteContext, req: http.Incomin
   ctx.json(res, { ok: true, workdir: saved.workdir });
 }
 
-function handleExtensions(res: http.ServerResponse) {
-  const config = loadUserConfig();
+async function buildBrowserStatusResponse(config = loadUserConfig(), browserState = getManagedBrowserStatus()) {
   const gui = resolveGuiIntegrationConfig(config);
   const installed = isAppiumInstalled();
-  const data = {
+  return {
     browser: {
-      hasToken: !!gui.browserExtensionToken,
-      token: gui.browserExtensionToken || '',
+      status: gui.browserEnabled ? browserState.status : 'disabled',
+      enabled: gui.browserEnabled,
+      headlessMode: gui.browserHeadless ? 'headless' : 'headed',
+      chromeInstalled: browserState.chromeInstalled,
+      profileCreated: browserState.profileCreated,
+      running: browserState.running,
+      pid: browserState.pid,
+      profileDir: browserState.profileDir || gui.browserProfileDir,
+      detail: gui.browserEnabled
+        ? browserState.detail
+        : 'Browser automation is disabled. No browser MCP server will be injected into agent sessions. On macOS, operate your main browser directly with open, osascript, and screencapture when needed.',
     },
     desktop: {
       enabled: gui.desktopEnabled,
@@ -285,53 +295,41 @@ function handleExtensions(res: http.ServerResponse) {
       appiumUrl: gui.desktopAppiumUrl,
     },
   };
+}
+
+async function handleBrowserStatus(res: http.ServerResponse) {
+  const config = loadUserConfig();
+  const data = await buildBrowserStatusResponse(config);
   res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify(data));
 }
 
-async function handleSaveExtensionToken(ctx: DashboardRouteContext, req: http.IncomingMessage, res: http.ServerResponse) {
-  const body = await ctx.parseJsonBody(req);
-  const token = String(body.token || '').trim();
-  if (!token) return ctx.json(res, { ok: false, error: 'Token is required' }, 400);
-
-  // Validate by spawning Playwright MCP with the token — if the process starts
-  // and emits valid JSON-RPC output, the token is valid.
-  ctx.dashboardLog('[extensions] validating extension token...');
+async function handleBrowserSetup(ctx: DashboardRouteContext, _req: http.IncomingMessage, res: http.ServerResponse) {
+  ctx.dashboardLog('[browser] setup requested');
   try {
-    const proc = spawn('npx', ['-y', '@playwright/mcp@latest', '--extension'], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, PLAYWRIGHT_MCP_EXTENSION_TOKEN: token },
-      timeout: DASHBOARD_TIMEOUTS.extensionValidationSpawn,
-    });
-    let stdout = '';
-    proc.stdout?.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
-    let stderr = '';
-    proc.stderr?.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
-    const exitCode = await new Promise<number | null>((resolve) => {
-      const timer = setTimeout(() => {
-        // Process staying alive means it connected successfully (MCP stdio server)
-        proc.kill('SIGTERM');
-        resolve(0);
-      }, DASHBOARD_TIMEOUTS.extensionValidationAlive);
-      proc.on('exit', (code) => { clearTimeout(timer); resolve(code); });
-      proc.on('error', () => { clearTimeout(timer); resolve(1); });
-    });
-
-    // If the process started and didn't immediately exit with an error, the token is good.
-    // MCP stdio servers stay alive waiting for input, so a timeout kill is expected success.
-    const valid = exitCode === 0 || exitCode === null;
-    if (valid) {
-      const config = loadUserConfig();
-      saveUserConfig({ ...config, browserGuiExtensionToken: token });
-      applyUserConfig(loadUserConfig());
-      ctx.dashboardLog('[extensions] extension token saved and validated');
-      return ctx.json(res, { ok: true, valid: true });
+    const config = loadUserConfig();
+    const gui = resolveGuiIntegrationConfig(config);
+    if (!gui.browserEnabled) {
+      return ctx.json(res, {
+        ok: false,
+        error: 'Browser automation is disabled. Enable it first if you want pikiclaw to launch the managed browser profile.',
+      }, 400);
     }
-    ctx.dashboardLog(`[extensions] token validation failed: exit=${exitCode} stderr=${stderr.slice(0, 200)}`);
-    return ctx.json(res, { ok: false, error: 'Token validation failed — the extension did not accept this token.' });
+    const launch = launchManagedBrowserSetup();
+    ctx.dashboardLog(`[browser] launched managed profile at ${launch.profileDir} pid=${launch.pid ?? 'unknown'}`);
+    const payload = await buildBrowserStatusResponse(config, launch);
+    return ctx.json(res, {
+      ok: true,
+      browser: {
+        ...payload.browser,
+        detail: launch.running
+          ? 'Managed browser is open. Sign in to the sites you want pikiclaw to reuse. If it is still open later, pikiclaw will close it automatically before browser automation starts.'
+          : payload.browser.detail,
+      },
+    });
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    ctx.dashboardLog(`[extensions] token validation error: ${detail}`);
+    ctx.dashboardLog(`[browser] setup failed: ${detail}`);
     return ctx.json(res, { ok: false, error: detail }, 500);
   }
 }

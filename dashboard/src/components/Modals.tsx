@@ -4,9 +4,7 @@ import { createT } from '../i18n';
 import { api } from '../api';
 import { Modal, ModalHeader, Button, Input, Label, Badge } from './ui';
 import { fmtTime, getAgentMeta, sessionDisplayDetail, sessionDisplayState } from '../utils';
-import type { SessionInfo, SessionTailMessage, DirEntry } from '../types';
-
-const PLAYWRIGHT_MCP_EXTENSION_URL = 'https://chromewebstore.google.com/detail/playwright-mcp-bridge/mmlmfjhmonkocbjadbfplnigmagldckm';
+import type { BrowserStatusResponse, SessionInfo, SessionTailMessage, DirEntry } from '../types';
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && (
@@ -543,47 +541,99 @@ export function SessionDetailModal({ open, onClose, agent, sessionId, session }:
 }
 
 /* ═══════════════════════════════════════════════════
-   Playwright Setup Modal
+   Managed Browser Setup Modal
    ═══════════════════════════════════════════════════ */
-const PLAYWRIGHT_MCP_EXTENSION_STATUS_URL = 'chrome-extension://mmlmfjhmonkocbjadbfplnigmagldckm/status.html';
-
-export function PlaywrightSetupModal({ open, onClose, onSaved }: { open: boolean; onClose: () => void; onSaved?: () => void }) {
+export function BrowserSetupModal({ open, onClose, onSaved }: { open: boolean; onClose: () => void; onSaved?: () => void }) {
   const { toast, locale } = useStore();
   const t = createT(locale);
-  const [token, setToken] = useState('');
-  const [saving, setSaving] = useState(false);
+  const [status, setStatus] = useState<BrowserStatusResponse | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [enabled, setEnabled] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
 
   useEffect(() => {
     if (open) {
-      setSaving(false);
+      setSubmitting(false);
       setResult(null);
-      api.getExtensions().then(ext => {
-        setToken(ext.browser.token || '');
-      }).catch(() => {
-        setToken('');
-      });
+      api.getBrowser().then(next => {
+        setStatus(next);
+        setEnabled(!!next.browser.enabled);
+      }).catch(() => setStatus(null));
     }
   }, [open]);
 
-  const handleSave = async () => {
-    if (!token.trim()) { toast(t('modal.inputToken'), false); return; }
-    setSaving(true);
+  const browser = status?.browser;
+  const savedEnabled = !!browser?.enabled;
+  const modeChanged = !!browser && savedEnabled !== enabled;
+  const profileDir = browser?.profileDir || '';
+  const selectedInfoLabel = t('ext.profileDir');
+  const selectedInfoValue = profileDir;
+  const profileReady = !!browser?.chromeInstalled && !!browser?.profileCreated;
+  const browserStatusLabel = !status
+    ? t('status.loading')
+    : !browser?.enabled
+      ? t('ext.disabled')
+      : profileReady
+        ? t('ext.browserReady')
+        : browser?.chromeInstalled
+          ? t('ext.chromeInstalled')
+          : t('ext.needsSetup');
+  const browserStatusVariant = !status
+    ? 'muted' as const
+    : !browser?.enabled
+      ? 'muted' as const
+      : profileReady
+        ? 'ok' as const
+        : browser?.chromeInstalled
+          ? 'warn' as const
+          : 'err' as const;
+
+  const handleSubmit = async () => {
+    setSubmitting(true);
     setResult(null);
     try {
-      const r = await api.saveExtensionToken(token.trim());
-      if (r.ok) {
-        setResult({ ok: true, text: '\u2713 ' + t('ext.tokenSaved') });
-        toast(t('ext.tokenSaved'));
-        onSaved?.();
-        setTimeout(onClose, 600);
-      } else {
-        setResult({ ok: false, text: '\u2717 ' + (r.error || t('ext.tokenInvalid')) });
-      }
+      await api.saveConfig({ browserEnabled: enabled });
+      const next = await api.getBrowser();
+      setStatus(next);
+      onSaved?.();
     } catch {
-      setResult({ ok: false, text: '\u2717 ' + t('ext.tokenInvalid') });
+      setResult({ ok: false, text: '\u2717 ' + t('ext.browserModeSaveFailed') });
+      toast(t('ext.browserModeSaveFailed'), false);
+      setSubmitting(false);
+      return;
+    }
+
+    if (!enabled) {
+      setResult({ ok: true, text: '\u2713 ' + t('ext.browserDisabledSaved') });
+      toast(t('ext.browserDisabledSaved'));
+      setSubmitting(false);
+      return;
+    }
+
+    try {
+      const r = await api.setupBrowser();
+      if (!r.ok) {
+        setResult({ ok: false, text: '\u2717 ' + (r.error || t('ext.browserLaunchFailed')) });
+        toast(r.error || t('ext.browserLaunchFailed'), false);
+        return;
+      }
+      setStatus(prev => prev ? { ...prev, browser: r.browser } : {
+        browser: r.browser,
+        desktop: {
+          enabled: false,
+          installed: false,
+          running: false,
+          appiumUrl: '',
+        },
+      });
+      setResult({ ok: true, text: '\u2713 ' + t('ext.browserEnabledLaunched') });
+      toast(t('ext.browserEnabledLaunched'));
+      onSaved?.();
+    } catch {
+      setResult({ ok: false, text: '\u2717 ' + t('ext.browserLaunchFailed') });
+      toast(t('ext.browserLaunchFailed'), false);
     } finally {
-      setSaving(false);
+      setSubmitting(false);
     }
   };
 
@@ -591,64 +641,90 @@ export function PlaywrightSetupModal({ open, onClose, onSaved }: { open: boolean
     <Modal open={open} onClose={onClose}>
       <ModalHeader title={t('ext.setupBrowser')} description={t('ext.setupBrowserDesc')} onClose={onClose} />
       <div className="space-y-5">
-        {/* Step 1: Install */}
         <div className="rounded-lg border border-edge bg-panel-alt p-4">
-          <div className="text-sm font-medium text-fg-2 mb-1">{t('ext.step1Title')}</div>
-          <div className="text-xs text-fg-4 mb-3">{t('ext.step1Desc')}</div>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => window.open(PLAYWRIGHT_MCP_EXTENSION_URL, '_blank')}
-          >
-            {t('ext.step1Action')}
-          </Button>
-        </div>
-
-        {/* Step 2: Open extension status page to get token */}
-        <div className="rounded-lg border border-edge bg-panel-alt p-4">
-          <div className="text-sm font-medium text-fg-2 mb-1">{t('ext.step2Title')}</div>
-          <div className="text-xs text-fg-4 mb-3">{t('ext.step2Desc')}</div>
-          <div className="flex items-center gap-2">
-            <Input
-              className="font-mono text-xs flex-1"
-              value={PLAYWRIGHT_MCP_EXTENSION_STATUS_URL}
-              readOnly
-              onClick={e => (e.target as HTMLInputElement).select()}
-            />
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                navigator.clipboard.writeText(PLAYWRIGHT_MCP_EXTENSION_STATUS_URL);
-                toast(t('ext.step2Copied'));
-              }}
-            >
-              {t('ext.step2Action')}
-            </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant={browserStatusVariant}>{browserStatusLabel}</Badge>
+            {browser && (
+              <>
+                <Badge variant={savedEnabled ? 'accent' : 'muted'}>
+                  {savedEnabled ? t('ext.enabled') : t('ext.disabled')}
+                </Badge>
+                {modeChanged && <Badge variant="warn">{t('ext.pendingModeChange')}</Badge>}
+                {browser.running && (
+                  <Badge variant="accent">
+                    {t('ext.browserOpen')}
+                    {browser.pid ? ` · PID ${browser.pid}` : ''}
+                  </Badge>
+                )}
+              </>
+            )}
           </div>
-        </div>
-
-        {/* Step 3: Paste token */}
-        <div className="rounded-lg border border-edge bg-panel-alt p-4">
-          <div className="text-sm font-medium text-fg-2 mb-1">{t('ext.step3Title')}</div>
-          <div className="text-xs text-fg-4 mb-3">{t('ext.step3Desc')}</div>
-          <Input
-            className="font-mono text-xs"
-            placeholder={t('ext.tokenPlaceholder')}
-            value={token}
-            onChange={e => setToken(e.target.value)}
-          />
+          <div className="mt-3">
+            <Label>{selectedInfoLabel}</Label>
+            <div className="flex items-center gap-2">
+              <Input
+                className="font-mono text-xs flex-1"
+                value={selectedInfoValue || '—'}
+                readOnly
+                onClick={e => (e.target as HTMLInputElement).select()}
+              />
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={!selectedInfoValue}
+                onClick={() => {
+                  if (!selectedInfoValue) return;
+                  navigator.clipboard.writeText(selectedInfoValue);
+                  toast(t('ext.step2Copied'));
+                }}
+              >
+                {t('ext.copyPath')}
+              </Button>
+            </div>
+          </div>
+          <div className="mt-3 text-xs text-fg-5">
+            {enabled ? t('ext.profileModeDesc') : t('ext.browserDescDisabled')}
+          </div>
+          {browser?.detail && <div className="mt-2 text-xs text-fg-5">{browser.detail}</div>}
           {result && (
-            <div className="mt-2 text-xs" style={{ color: result.ok ? 'var(--th-ok)' : 'var(--th-err)' }}>
+            <div className="mt-3 text-xs" style={{ color: result.ok ? 'var(--th-ok)' : 'var(--th-err)' }}>
               {result.text}
             </div>
           )}
         </div>
+
+        <div className="rounded-lg border border-edge bg-panel-alt p-4">
+          <label className="flex cursor-pointer items-start gap-3">
+            <input
+              type="checkbox"
+              checked={enabled}
+              onChange={event => setEnabled(event.target.checked)}
+              className="mt-0.5 h-4 w-4 rounded border border-edge bg-inset"
+            />
+            <div>
+              <div className="text-sm font-medium text-fg-2 mb-1">{t('ext.browserEnableToggle')}</div>
+              <div className="text-xs text-fg-4">{t('ext.browserEnableToggleDesc')}</div>
+            </div>
+          </label>
+        </div>
+
+        <div className="rounded-lg border border-edge bg-panel-alt p-4">
+          <div className="text-sm font-medium text-fg-2 mb-1">
+            {enabled ? t('ext.step2Title') : t('ext.browserDisabledStepTitle')}
+          </div>
+          <div className="text-xs text-fg-4">
+            {enabled ? t('ext.step2Desc') : t('ext.browserDisabledHint')}
+          </div>
+        </div>
       </div>
       <div className="flex justify-end gap-2 mt-6">
         <Button variant="ghost" onClick={onClose}>{t('modal.cancel')}</Button>
-        <Button variant="primary" disabled={saving || !token.trim()} onClick={handleSave}>
-          {saving ? t('ext.savingToken') : t('ext.saveToken')}
+        <Button variant="primary" disabled={submitting} onClick={handleSubmit}>
+          {submitting
+            ? t('ext.launching')
+            : enabled
+              ? t('ext.enableAndLaunchBrowser')
+              : t('ext.saveBrowserDisabled')}
         </Button>
       </div>
     </Modal>
@@ -671,7 +747,7 @@ export function DesktopSetupModal({ open, onClose, onSaved }: { open: boolean; o
       setInstalling(false);
       setEnabling(false);
       setResult(null);
-      api.getExtensions().then(ext => {
+      api.getBrowser().then(ext => {
         setInstalled(ext.desktop.installed);
       }).catch(() => {});
     }

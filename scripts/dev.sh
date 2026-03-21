@@ -11,6 +11,9 @@ mkdir -p "${DEV_DIR}"
 : > "${LOG_FILE}"
 
 export PIKICLAW_CONFIG="${DEV_DIR}/setting.json"
+# Dev isolates setting.json only. The managed browser profile intentionally
+# stays at ~/.pikiclaw/browser/chrome-profile so dev and the main runtime reuse
+# the same browser login state.
 unset CLAUDECODE
 
 {

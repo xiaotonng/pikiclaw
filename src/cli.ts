@@ -195,6 +195,10 @@ async function handleMcpServeMode(): Promise<boolean> {
     await import('./mcp-session-server.js');
     return true;
   }
+  if (process.argv.includes('--playwright-mcp-proxy')) {
+    await import('./mcp-playwright-proxy.js');
+    return true;
+  }
   return false;
 }
 

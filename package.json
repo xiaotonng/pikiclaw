@@ -1,6 +1,6 @@
 {
   "name": "pikiclaw",
-  "version": "0.2.64",
+  "version": "0.2.65",
   "description": "Put the world's smartest AI agents in your pocket. Command local Claude & Gemini via IM. | 让最好用的 IM 变成你电脑上的顶级 Agent 控制台",
   "type": "module",
   "bin": {
@@ -54,6 +54,7 @@
     "vitest": "^4.0.18"
   },
   "dependencies": {
+    "@playwright/mcp": "0.0.68",
     "@larksuiteoapi/node-sdk": "^1.59.0",
     "undici": "^7.22.0"
   }
