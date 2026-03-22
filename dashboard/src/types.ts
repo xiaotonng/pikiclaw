@@ -49,7 +49,7 @@ export interface AgentStatusResponse {
 export type ChannelStatus = 'ready' | 'missing' | 'invalid' | 'error' | 'checking';
 
 export interface ChannelSetupState {
-  channel: 'telegram' | 'feishu' | 'whatsapp';
+  channel: 'telegram' | 'feishu' | 'weixin' | 'whatsapp';
   configured: boolean;
   ready: boolean;
   validated: boolean;
@@ -106,9 +106,43 @@ export interface UserConfig {
   telegramAllowedChatIds?: string;
   feishuAppId?: string;
   feishuAppSecret?: string;
+  weixinBaseUrl?: string;
+  weixinBotToken?: string;
+  weixinAccountId?: string;
   channels?: string[];
   browserEnabled?: boolean;
   browserHeadless?: boolean;
+}
+
+export interface WeixinValidationResult {
+  ok: boolean;
+  error?: string | null;
+  normalizedBaseUrl?: string;
+  account?: {
+    accountId: string;
+    baseUrl: string;
+  } | null;
+}
+
+export interface WeixinLoginStartResult {
+  ok: boolean;
+  sessionKey: string;
+  qrcodeUrl?: string;
+  message: string;
+  error?: string;
+}
+
+export interface WeixinLoginWaitResult {
+  ok: boolean;
+  connected: boolean;
+  status: 'wait' | 'scaned' | 'confirmed' | 'expired' | 'error';
+  message: string;
+  qrcodeUrl?: string;
+  botToken?: string;
+  accountId?: string;
+  userId?: string;
+  baseUrl?: string;
+  error?: string;
 }
 
 export interface AppState {
@@ -137,6 +171,7 @@ export interface HostInfo {
   platform: string;
   arch: string;
   cpuUsage?: { usedPercent: number };
+  loadAverage?: { one: number; five: number; fifteen: number } | null;
   disk?: { used: string; total: string; percent: string };
   battery?: { percent: string; state: string };
 }

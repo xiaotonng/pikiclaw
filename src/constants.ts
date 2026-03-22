@@ -196,6 +196,20 @@ export const FEISHU_LIMITS = {
 export const FEISHU_BOT_CARD_MAX = 25_000;
 
 // ---------------------------------------------------------------------------
+// Channels — Weixin
+// ---------------------------------------------------------------------------
+
+/** Weixin channel transport constants. */
+export const WEIXIN_LIMITS = {
+  /** Conservative text split budget for plain-text replies. */
+  maxMessageLength: 1200,
+  /** Long-poll timeout for getupdates. */
+  longPollTimeout: 35_000,
+  /** Maximum back-off delay for polling retries. */
+  maxRetryDelay: 60_000,
+};
+
+// ---------------------------------------------------------------------------
 // Config validation
 // ---------------------------------------------------------------------------
 
@@ -207,6 +221,10 @@ export const VALIDATION_TIMEOUTS = {
   feishuBotInfo: 5_000,
   /** Timeout for Telegram token validation (setup wizard). */
   telegramToken: 8_000,
+  /** Default timeout for Weixin credential validation. */
+  weixinDefault: 8_000,
+  /** Long-poll timeout for dashboard QR login wait calls. */
+  weixinQrPoll: 35_000,
 };
 
 // ---------------------------------------------------------------------------

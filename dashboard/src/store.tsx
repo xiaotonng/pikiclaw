@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
 import { api } from './api';
 import { hasPendingChannelValidation } from './channel-status';
+import { DEFAULT_DASHBOARD_TAB, type DashboardTab } from './tabs';
 import type { AppState, HostInfo, SessionInfo } from './types';
 import type { Locale } from './i18n';
 
@@ -16,8 +17,8 @@ export type Theme = 'dark' | 'light';
 /* ── Store value ── */
 interface StoreValue {
   state: AppState | null;
-  tab: string;
-  setTab: (t: string) => void;
+  tab: DashboardTab;
+  setTab: (t: DashboardTab) => void;
   reload: () => Promise<AppState | null>;
   reloadUntil: (predicate: (state: AppState) => boolean, opts?: { attempts?: number; intervalMs?: number }) => Promise<AppState | null>;
   toasts: Toast[];
@@ -53,7 +54,7 @@ function getInitialLocale(): Locale {
 
 export function StoreProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AppState | null>(null);
-  const [tab, setTab] = useState('config');
+  const [tab, setTab] = useState<DashboardTab>(DEFAULT_DASHBOARD_TAB);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [host, setHost] = useState<HostInfo | null>(null);
   const [allSessions, setAllSessions] = useState<Record<string, { sessions: SessionInfo[] }>>({});

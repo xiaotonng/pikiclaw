@@ -2,7 +2,7 @@ import type { AgentInfo } from './code-agent.js';
 import { getAgentInstallCommand, getAgentLabel } from './agent-npm.js';
 
 export type ChannelStatus = 'ready' | 'missing' | 'invalid' | 'error' | 'checking';
-export type SetupChannel = 'telegram' | 'feishu' | 'whatsapp';
+export type SetupChannel = 'telegram' | 'feishu' | 'weixin' | 'whatsapp';
 
 export interface AgentSetupState extends AgentInfo {
   label: string;
@@ -55,6 +55,16 @@ function defaultChannelState(channel: string, tokenProvided: boolean): ChannelSe
       validated: false,
       status: tokenProvided ? 'ready' : 'missing',
       detail: tokenProvided ? 'Feishu credentials are configured.' : 'Feishu is not configured.',
+    };
+  }
+  if (channel === 'weixin') {
+    return {
+      channel: 'weixin',
+      configured: tokenProvided,
+      ready: tokenProvided,
+      validated: false,
+      status: tokenProvided ? 'ready' : 'missing',
+      detail: tokenProvided ? 'Weixin credentials are configured.' : 'Weixin is not configured.',
     };
   }
   return {
@@ -111,7 +121,15 @@ export function isSetupReady(state: SetupState): boolean {
 export function buildSetupGuide(state: SetupState, version: string, options?: { doctor?: boolean }): string {
   const doctor = !!options?.doctor;
   const isTelegram = state.channel === 'telegram';
-  const channelLabel = isTelegram ? 'Telegram' : state.channel === 'feishu' ? 'Feishu' : state.channel === 'whatsapp' ? 'WhatsApp' : 'your chat app';
+  const channelLabel = isTelegram
+    ? 'Telegram'
+    : state.channel === 'feishu'
+      ? 'Feishu'
+      : state.channel === 'weixin'
+        ? 'Weixin'
+        : state.channel === 'whatsapp'
+          ? 'WhatsApp'
+          : 'your chat app';
   const lines: string[] = [
     `pikiclaw v${version}`,
     '',
@@ -150,6 +168,13 @@ export function buildSetupGuide(state: SetupState, version: string, options?: { 
     lines.push(
       'MISSING  No Feishu credentials configured in ~/.pikiclaw/setting.json',
       '         Run `pikiclaw` to open the dashboard and configure, or add feishuAppId/feishuAppSecret to setting.json.',
+    );
+  } else if (state.channel === 'weixin' && state.tokenProvided) {
+    lines.push('OK       Weixin credentials provided (weixinBaseUrl + weixinBotToken + weixinAccountId).');
+  } else if (state.channel === 'weixin') {
+    lines.push(
+      'MISSING  No Weixin credentials configured in ~/.pikiclaw/setting.json',
+      '         Run `pikiclaw` to open the dashboard, scan the QR code, and validate the channel before enabling it.',
     );
   } else if (state.channel === 'whatsapp') {
     lines.push('MISSING  WhatsApp setup is not available yet. Use `--channel telegram` for now.');

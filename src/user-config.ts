@@ -4,7 +4,7 @@ import path from 'node:path';
 import type { Agent } from './code-agent.js';
 import { USER_CONFIG_SYNC_DEFAULT_INTERVAL_MS } from './constants.js';
 
-export type ChannelName = 'telegram' | 'feishu' | 'whatsapp';
+export type ChannelName = 'telegram' | 'feishu' | 'weixin' | 'whatsapp';
 
 export interface UserConfig {
   version: 1;
@@ -23,6 +23,9 @@ export interface UserConfig {
   telegramAllowedChatIds?: string;
   feishuAppId?: string;
   feishuAppSecret?: string;
+  weixinBaseUrl?: string;
+  weixinBotToken?: string;
+  weixinAccountId?: string;
   browserEnabled?: boolean;
   browserHeadless?: boolean;
   desktopGuiEnabled?: boolean;
@@ -51,6 +54,9 @@ const MANAGED_ENV_KEYS = [
   'TELEGRAM_ALLOWED_CHAT_IDS',
   'FEISHU_APP_ID',
   'FEISHU_APP_SECRET',
+  'WEIXIN_BASE_URL',
+  'WEIXIN_BOT_TOKEN',
+  'WEIXIN_ACCOUNT_ID',
 ] as const;
 const USER_CONFIG_DIRNAME = '.pikiclaw';
 const USER_CONFIG_FILENAME = 'setting.json';
@@ -163,6 +169,9 @@ function buildManagedEnv(config: Partial<UserConfig>): Record<(typeof MANAGED_EN
     TELEGRAM_ALLOWED_CHAT_IDS: String(config.telegramAllowedChatIds || '').trim(),
     FEISHU_APP_ID: String(config.feishuAppId || '').trim(),
     FEISHU_APP_SECRET: String(config.feishuAppSecret || '').trim(),
+    WEIXIN_BASE_URL: String(config.weixinBaseUrl || '').trim(),
+    WEIXIN_BOT_TOKEN: String(config.weixinBotToken || '').trim(),
+    WEIXIN_ACCOUNT_ID: String(config.weixinAccountId || '').trim(),
   };
 }
 

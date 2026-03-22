@@ -6,6 +6,8 @@ import { Modal, ModalHeader, Button, Input, Label, Badge } from './ui';
 import { fmtTime, getAgentMeta, sessionDisplayDetail, sessionDisplayState } from '../utils';
 import type { BrowserStatusResponse, SessionInfo, SessionTailMessage, DirEntry } from '../types';
 
+const DEFAULT_WEIXIN_BASE_URL = 'https://ilinkai.weixin.qq.com';
+
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && (
     error.name === 'AbortError'
@@ -263,6 +265,197 @@ export function FeishuModal({ open, onClose }: { open: boolean; onClose: () => v
       <div className="flex justify-end gap-2 mt-6">
         <Button variant="ghost" onClick={handleRequestClose}>{t('modal.cancel')}</Button>
         <Button variant="primary" disabled={saving} onClick={handleSave}>{saving ? t('modal.validating') : t('modal.validateSave')}</Button>
+      </div>
+    </Modal>
+  );
+}
+
+/* ═══════════════════════════════════════════════════
+   Weixin Modal
+   ═══════════════════════════════════════════════════ */
+export function WeixinModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const { state, toast, reloadUntil, locale } = useStore();
+  const t = createT(locale);
+  const [baseUrl, setBaseUrl] = useState(DEFAULT_WEIXIN_BASE_URL);
+  const [busy, setBusy] = useState(false);
+  const [qrUrl, setQrUrl] = useState('');
+  const [sessionKey, setSessionKey] = useState('');
+  const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
+  const requestRef = useRef<AbortController | null>(null);
+
+  const stateRef = useRef(state);
+  stateRef.current = state;
+
+  useEffect(() => {
+    if (open) {
+      setBaseUrl(stateRef.current?.config.weixinBaseUrl || DEFAULT_WEIXIN_BASE_URL);
+      setBusy(false);
+      setQrUrl('');
+      setSessionKey('');
+      setResult(null);
+    } else {
+      requestRef.current?.abort();
+      requestRef.current = null;
+      setBusy(false);
+    }
+  }, [open]);
+
+  useEffect(() => () => {
+    requestRef.current?.abort();
+    requestRef.current = null;
+  }, []);
+
+  const handleRequestClose = () => {
+    requestRef.current?.abort();
+    requestRef.current = null;
+    onClose();
+  };
+
+  const waitForLogin = useCallback(async (
+    controller: AbortController,
+    nextSessionKey: string,
+    nextBaseUrl: string,
+  ) => {
+    while (!controller.signal.aborted) {
+      const waited = await api.waitWeixinLogin(nextSessionKey, nextBaseUrl, {
+        signal: controller.signal,
+        timeoutMs: 45_000,
+      });
+      if (!waited.ok && !waited.connected) {
+        setResult({ ok: false, text: '\u2717 ' + (waited.error || waited.message || t('modal.validationFailed')) });
+        return false;
+      }
+
+      if (waited.qrcodeUrl) setQrUrl(waited.qrcodeUrl);
+      if (waited.status === 'scaned') {
+        setResult({ ok: true, text: t('modal.weixinScanned') });
+      } else if (waited.status === 'expired') {
+        setResult({ ok: true, text: t('modal.weixinQrRefreshed') });
+      } else if (!waited.connected) {
+        setResult({ ok: true, text: t('modal.weixinWaitingScan') });
+      }
+
+      if (!waited.connected) continue;
+
+      setResult({ ok: true, text: t('modal.weixinLoginSuccess') });
+      const normalizedBaseUrl = waited.baseUrl || nextBaseUrl;
+      const botToken = waited.botToken || '';
+      const accountId = waited.accountId || '';
+      const validated = await api.validateWeixinConfig(normalizedBaseUrl, botToken, accountId, {
+        signal: controller.signal,
+        timeoutMs: 12_000,
+      });
+      if (!validated.ok) {
+        setResult({ ok: false, text: '\u2717 ' + (validated.error || t('modal.validationFailed')) });
+        return false;
+      }
+
+      const finalBaseUrl = validated.normalizedBaseUrl || normalizedBaseUrl;
+      const channels = new Set<string>(
+        (stateRef.current?.setupState?.channels || [])
+          .filter(item => (item.ready || item.configured) && item.channel !== 'weixin')
+          .map(item => item.channel),
+      );
+      channels.add('weixin');
+      await api.saveConfig({
+        weixinBaseUrl: finalBaseUrl,
+        weixinBotToken: botToken,
+        weixinAccountId: accountId,
+        channels: [...channels],
+      });
+      const refreshed = await reloadUntil(nextState => {
+        const channel = nextState.setupState?.channels?.find(item => item.channel === 'weixin');
+        return nextState.config.weixinBaseUrl === finalBaseUrl
+          && nextState.config.weixinBotToken === botToken
+          && nextState.config.weixinAccountId === accountId
+          && !!channel?.ready;
+      }, { attempts: 12, intervalMs: 350 });
+      if (!refreshed) {
+        setResult({ ok: false, text: '\u2717 ' + t('modal.refreshStateFailed') });
+        toast(t('modal.refreshStateFailed'), false);
+        return false;
+      }
+
+      toast(t('modal.weixinSaved'));
+      return true;
+    }
+    return false;
+  }, [reloadUntil, t, toast]);
+
+  const handleStart = async () => {
+    if (!baseUrl.trim()) { toast(t('modal.inputWeixinBaseUrl'), false); return; }
+    requestRef.current?.abort();
+    const controller = new AbortController();
+    requestRef.current = controller;
+    setBusy(true);
+    setQrUrl('');
+    setSessionKey('');
+    setResult(null);
+    let shouldClose = false;
+    try {
+      const started = await api.startWeixinLogin(baseUrl.trim(), {
+        signal: controller.signal,
+        timeoutMs: 12_000,
+      });
+      if (!started.ok || !started.qrcodeUrl) {
+        setResult({ ok: false, text: '\u2717 ' + (started.error || started.message || t('modal.validationFailed')) });
+        return;
+      }
+
+      setQrUrl(started.qrcodeUrl);
+      setSessionKey(started.sessionKey);
+      setResult({ ok: true, text: t('modal.weixinWaitingScan') });
+      shouldClose = await waitForLogin(controller, started.sessionKey, baseUrl.trim());
+    } catch (error) {
+      if (isAbortError(error)) return;
+      const text = requestErrorText(error, t);
+      setResult({ ok: false, text: '\u2717 ' + text });
+      toast(text, false);
+    } finally {
+      if (requestRef.current === controller) requestRef.current = null;
+      setBusy(false);
+      if (shouldClose) onClose();
+    }
+  };
+
+  return (
+    <Modal open={open} onClose={handleRequestClose}>
+      <ModalHeader title={t('modal.configureWeixin')} onClose={handleRequestClose} />
+      <div className="space-y-4">
+        <div className="text-xs leading-relaxed text-fg-4">{t('modal.weixinScanHint')}</div>
+        <div>
+          <Label>{t('modal.weixinBaseUrl')}</Label>
+          <Input
+            className="font-mono text-xs"
+            value={baseUrl}
+            onChange={e => setBaseUrl(e.target.value)}
+            placeholder={DEFAULT_WEIXIN_BASE_URL}
+          />
+          <div className="mt-1 text-[11px] text-fg-5">{t('modal.weixinDefaultBaseUrlHint')}</div>
+        </div>
+        {qrUrl && (
+          <div className="rounded-xl border border-edge bg-panel-alt p-4">
+            <img
+              src={qrUrl}
+              alt={t('modal.weixinQrAlt')}
+              className="mx-auto h-56 w-56 rounded-lg bg-white p-3 object-contain"
+            />
+            {sessionKey && <div className="mt-2 truncate text-center font-mono text-[10px] text-fg-5">{sessionKey}</div>}
+          </div>
+        )}
+        {result && (
+          <div className="text-xs" style={{ color: result.ok ? 'var(--th-ok)' : 'var(--th-err)' }}>
+            {result.text}
+          </div>
+        )}
+      </div>
+      <div className="mt-6 flex justify-end gap-2">
+        <Button variant="ghost" onClick={handleRequestClose}>{t('modal.cancel')}</Button>
+        <Button variant="primary" disabled={busy} onClick={handleStart}>
+          {busy
+            ? (qrUrl ? t('modal.validating') : t('modal.weixinGeneratingQr'))
+            : (qrUrl ? t('modal.weixinRetry') : t('modal.weixinGenerateQr'))}
+        </Button>
       </div>
     </Modal>
   );

@@ -16,7 +16,7 @@ import { loadUserConfig, applyUserConfig, resolveUserWorkdir, type UserConfig } 
 import { listAgents, normalizeClaudeModelId, type AgentDetectOptions } from './code-agent.js';
 import type { Agent } from './code-agent.js';
 import type { Bot } from './bot.js';
-import { validateFeishuConfig, validateTelegramConfig } from './config-validation.js';
+import { validateFeishuConfig, validateTelegramConfig, validateWeixinConfig } from './config-validation.js';
 import { getDashboardHtml } from './dashboard-ui.js';
 import { shouldCacheChannelStates } from './channel-states.js';
 import { registerProcessRuntime } from './process-control.js';
@@ -67,6 +67,11 @@ const CHANNEL_STATUS_VALIDATION_TIMEOUT_MS = DASHBOARD_TIMEOUTS.channelStatusVal
 const CHANNEL_STATUS_CACHE_TTL_MS = DASHBOARD_TIMEOUTS.channelStatusCacheTtl;
 
 function buildLocalChannelStates(config: Partial<UserConfig>): NonNullable<SetupState['channels']> {
+  const weixinBaseUrl = String(config.weixinBaseUrl || '').trim();
+  const weixinBotToken = String(config.weixinBotToken || '').trim();
+  const weixinAccountId = String(config.weixinAccountId || '').trim();
+  const weixinConfigured = !!(weixinBaseUrl || weixinBotToken || weixinAccountId);
+  const weixinReady = !!(weixinBaseUrl && weixinBotToken && weixinAccountId);
   const telegramConfigured = !!String(config.telegramBotToken || '').trim();
   const feishuAppId = String(config.feishuAppId || '').trim();
   const feishuSecret = String(config.feishuAppSecret || '').trim();
@@ -74,6 +79,18 @@ function buildLocalChannelStates(config: Partial<UserConfig>): NonNullable<Setup
   const feishuReady = !!(feishuAppId && feishuSecret);
 
   return [
+    {
+      channel: 'weixin',
+      configured: weixinConfigured,
+      ready: false,
+      validated: false,
+      status: !weixinConfigured ? 'missing' : weixinReady ? 'checking' : 'invalid',
+      detail: !weixinConfigured
+        ? 'Weixin is not configured.'
+        : weixinReady
+          ? 'Validating Weixin credentials...'
+          : 'Base URL, Bot Token, and Account ID are required.',
+    },
     {
       channel: 'telegram',
       configured: telegramConfigured,
@@ -192,6 +209,9 @@ export async function startDashboard(opts: DashboardOptions = {}): Promise<Dashb
 
   function channelStateCacheKey(config: Partial<UserConfig>): string {
     return JSON.stringify({
+      weixinBaseUrl: String(config.weixinBaseUrl || '').trim(),
+      weixinBotToken: String(config.weixinBotToken || '').trim(),
+      weixinAccountId: String(config.weixinAccountId || '').trim(),
       telegramBotToken: String(config.telegramBotToken || '').trim(),
       telegramAllowedChatIds: String(config.telegramAllowedChatIds || '').trim(),
       feishuAppId: String(config.feishuAppId || '').trim(),
@@ -207,15 +227,17 @@ export async function startDashboard(opts: DashboardOptions = {}): Promise<Dashb
     }
 
     const fallback = buildLocalChannelStates(config);
+    const weixinPromise = validateWeixinConfig(config.weixinBaseUrl, config.weixinBotToken, config.weixinAccountId).then(result => result.state);
     const telegramPromise = validateTelegramConfig(config.telegramBotToken, config.telegramAllowedChatIds).then(result => result.state);
     const feishuPromise = validateFeishuConfig(config.feishuAppId, config.feishuAppSecret).then(result => result.state);
 
-    const [telegram, feishu] = await Promise.all([
-      withTimeoutFallback(telegramPromise, CHANNEL_STATUS_VALIDATION_TIMEOUT_MS, fallback[0]),
-      withTimeoutFallback(feishuPromise, CHANNEL_STATUS_VALIDATION_TIMEOUT_MS, fallback[1]),
+    const [weixin, telegram, feishu] = await Promise.all([
+      withTimeoutFallback(weixinPromise, CHANNEL_STATUS_VALIDATION_TIMEOUT_MS, fallback[0]),
+      withTimeoutFallback(telegramPromise, CHANNEL_STATUS_VALIDATION_TIMEOUT_MS, fallback[1]),
+      withTimeoutFallback(feishuPromise, CHANNEL_STATUS_VALIDATION_TIMEOUT_MS, fallback[2]),
     ]);
 
-    const channels: NonNullable<SetupState['channels']> = [telegram, feishu];
+    const channels: NonNullable<SetupState['channels']> = [weixin, telegram, feishu];
     if (shouldCacheChannelStates(channels)) {
       channelStateCache = {
         key,
@@ -225,8 +247,8 @@ export async function startDashboard(opts: DashboardOptions = {}): Promise<Dashb
     } else {
       // Validation timed out — let it finish in the background and populate cache
       // so the next frontend poll picks up the result instantly.
-      void Promise.all([telegramPromise, feishuPromise]).then(([bgTelegram, bgFeishu]) => {
-        const bgChannels: NonNullable<SetupState['channels']> = [bgTelegram, bgFeishu];
+      void Promise.all([weixinPromise, telegramPromise, feishuPromise]).then(([bgWeixin, bgTelegram, bgFeishu]) => {
+        const bgChannels: NonNullable<SetupState['channels']> = [bgWeixin, bgTelegram, bgFeishu];
         if (!shouldCacheChannelStates(bgChannels)) return;
         // Only update if no newer config has replaced the cache
         if (channelStateCache && channelStateCache.key !== key) return;

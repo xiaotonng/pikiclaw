@@ -211,8 +211,8 @@ Run a bot that forwards IM messages to a local AI coding agent
 (Claude Code or Codex CLI), streams responses in real-time, and manages
 sessions, models, and workdirs.
 
-Channels are auto-detected from configured tokens. If both Feishu and
-Telegram tokens are present, both channels launch simultaneously.
+Channels are auto-detected from configured credentials. If multiple
+validated channels are enabled, they launch simultaneously.
 
 Usage:
   npx pikiclaw                              # auto-detect from config/env
@@ -247,6 +247,11 @@ Environment variables (Telegram):
   TELEGRAM_BOT_TOKEN         Telegram bot token (from @BotFather)
   TELEGRAM_ALLOWED_CHAT_IDS  Comma-separated allowed Telegram chat IDs
 
+Environment variables (Weixin):
+  WEIXIN_BASE_URL            Weixin API base URL (default: https://ilinkai.weixin.qq.com)
+  WEIXIN_BOT_TOKEN           Weixin bot token (normally configured from dashboard QR login)
+  WEIXIN_ACCOUNT_ID          Weixin bot account ID
+
 Environment variables (per agent):
   CLAUDE_MODEL               Claude model name
   CLAUDE_PERMISSION_MODE     Permission mode (default: bypassPermissions)
@@ -276,6 +281,7 @@ Environment variables (Feishu):
   FEISHU_ALLOWED_CHAT_IDS    Comma-separated allowed Feishu chat IDs
 
 Notes:
+  - weixin setup is QR-based in the dashboard and currently supports text-only replies.
   - whatsapp is planned but not implemented yet.
   - --safe-mode delegates to the agent's own permission model; it does not add
     a pikiclaw-specific approval workflow.
@@ -568,6 +574,13 @@ async function launchChannels(
       case 'feishu': {
         const { FeishuBot } = await import('./bot-feishu.js');
         const bot = new FeishuBot();
+        if (dashboard) dashboard.attachBot(bot);
+        await bot.run();
+        break;
+      }
+      case 'weixin': {
+        const { WeixinBot } = await import('./bot-weixin.js');
+        const bot = new WeixinBot();
         if (dashboard) dashboard.attachBot(bot);
         await bot.run();
         break;

@@ -3,6 +3,7 @@ import { validateTelegramToken, type TelegramBotIdentity } from './setup-wizard.
 import type { ChannelSetupState } from './onboarding.js';
 import type { UserConfig } from './user-config.js';
 import { VALIDATION_TIMEOUTS } from './constants.js';
+import { normalizeWeixinBaseUrl, weixinGetUpdates } from './weixin-api.js';
 
 export interface TelegramConfigCheckResult {
   state: ChannelSetupState;
@@ -20,11 +21,23 @@ export interface FeishuConfigCheckResult {
   app: FeishuAppIdentity | null;
 }
 
+export interface WeixinConfigIdentity {
+  accountId: string;
+  baseUrl: string;
+}
+
+export interface WeixinConfigCheckResult {
+  state: ChannelSetupState;
+  account: WeixinConfigIdentity | null;
+  normalizedBaseUrl: string;
+}
+
 interface FeishuValidationOptions {
   timeoutMs?: number;
 }
 
 const DEFAULT_FEISHU_VALIDATION_TIMEOUT_MS = VALIDATION_TIMEOUTS.feishuDefault;
+const DEFAULT_WEIXIN_VALIDATION_TIMEOUT_MS = VALIDATION_TIMEOUTS.weixinDefault;
 
 function feishuValidationLog(appId: string, message: string): void {
   const ts = new Date().toISOString().slice(11, 19);
@@ -305,13 +318,76 @@ export async function validateFeishuConfig(
   }
 }
 
+export async function validateWeixinConfig(
+  baseUrl: string | null | undefined,
+  botToken: string | null | undefined,
+  accountId: string | null | undefined,
+  options: { timeoutMs?: number } = {},
+): Promise<WeixinConfigCheckResult> {
+  const normalizedBaseUrl = normalizeWeixinBaseUrl(baseUrl);
+  const trimmedToken = String(botToken || '').trim();
+  const trimmedAccountId = String(accountId || '').trim();
+  const timeoutMs = Number.isFinite(options.timeoutMs) && Number(options.timeoutMs) > 0
+    ? Math.round(Number(options.timeoutMs))
+    : DEFAULT_WEIXIN_VALIDATION_TIMEOUT_MS;
+
+  if (!trimmedToken && !trimmedAccountId && !String(baseUrl || '').trim()) {
+    return {
+      state: missingChannelState('weixin', 'Weixin is not configured.'),
+      account: null,
+      normalizedBaseUrl,
+    };
+  }
+  if (!trimmedToken || !trimmedAccountId) {
+    return {
+      state: invalidChannelState('weixin', 'Weixin requires Base URL, Bot Token, and Account ID.'),
+      account: null,
+      normalizedBaseUrl,
+    };
+  }
+
+  try {
+    const response = await weixinGetUpdates({
+      baseUrl: normalizedBaseUrl,
+      token: trimmedToken,
+      getUpdatesBuf: '',
+      timeoutMs,
+    });
+    if ((response.ret ?? 0) !== 0 || (response.errcode ?? 0) !== 0) {
+      const detail = String(response.errmsg || response.errcode || 'credentials rejected').trim();
+      return {
+        state: invalidChannelState('weixin', `Weixin rejected these credentials: ${detail}`),
+        account: null,
+        normalizedBaseUrl,
+      };
+    }
+    return {
+      state: readyChannelState('weixin', `Weixin account ${trimmedAccountId} verified.`),
+      account: {
+        accountId: trimmedAccountId,
+        baseUrl: normalizedBaseUrl,
+      },
+      normalizedBaseUrl,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error ?? 'unknown error');
+    return {
+      state: errorChannelState('weixin', `Failed to reach Weixin: ${message}`),
+      account: null,
+      normalizedBaseUrl,
+    };
+  }
+}
+
 export async function collectChannelSetupStates(config: Partial<UserConfig>): Promise<ChannelSetupState[]> {
-  const [telegram, feishu] = await Promise.all([
+  const [telegram, feishu, weixin] = await Promise.all([
     validateTelegramConfig(config.telegramBotToken, config.telegramAllowedChatIds),
     validateFeishuConfig(config.feishuAppId, config.feishuAppSecret),
+    validateWeixinConfig(config.weixinBaseUrl, config.weixinBotToken, config.weixinAccountId),
   ]);
 
   return [
+    weixin.state,
     telegram.state,
     feishu.state,
   ];

@@ -1,6 +1,6 @@
 {
   "name": "pikiclaw",
-  "version": "0.2.65",
+  "version": "0.2.66",
   "description": "Put the world's smartest AI agents in your pocket. Command local Claude & Gemini via IM. | 让最好用的 IM 变成你电脑上的顶级 Agent 控制台",
   "type": "module",
   "bin": {
@@ -42,6 +42,7 @@
   "devDependencies": {
     "@tailwindcss/vite": "^4.2.1",
     "@types/node": "^25.3.5",
+    "@types/qrcode": "^1.5.6",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.4",
@@ -54,8 +55,9 @@
     "vitest": "^4.0.18"
   },
   "dependencies": {
-    "@playwright/mcp": "0.0.68",
     "@larksuiteoapi/node-sdk": "^1.59.0",
+    "@playwright/mcp": "0.0.68",
+    "qrcode": "^1.5.4",
     "undici": "^7.22.0"
   }
 }

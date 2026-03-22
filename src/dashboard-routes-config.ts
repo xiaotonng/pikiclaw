@@ -12,8 +12,13 @@ import path from 'node:path';
 import os from 'node:os';
 import { loadUserConfig, saveUserConfig, applyUserConfig, hasUserConfigFile } from './user-config.js';
 import { isSetupReady } from './onboarding.js';
-import { validateFeishuConfig, validateTelegramConfig } from './config-validation.js';
+import { validateFeishuConfig, validateTelegramConfig, validateWeixinConfig } from './config-validation.js';
 import { resolveGuiIntegrationConfig } from './mcp-bridge.js';
+import {
+  normalizeWeixinBaseUrl,
+  startWeixinQrLogin,
+  waitForWeixinQrLogin,
+} from './weixin-api.js';
 import {
   getManagedBrowserStatus,
   launchManagedBrowserSetup,
@@ -81,6 +86,24 @@ export function registerConfigRoutes(
   // Validate Feishu credentials
   if (url.pathname === '/api/validate-feishu-config' && method === 'POST') {
     void handleValidateFeishu(ctx, req, res);
+    return true;
+  }
+
+  // Validate Weixin credentials
+  if (url.pathname === '/api/validate-weixin-config' && method === 'POST') {
+    void handleValidateWeixin(ctx, req, res);
+    return true;
+  }
+
+  // Start Weixin QR login
+  if (url.pathname === '/api/weixin-login/start' && method === 'POST') {
+    void handleWeixinLoginStart(ctx, req, res);
+    return true;
+  }
+
+  // Wait for Weixin QR login
+  if (url.pathname === '/api/weixin-login/wait' && method === 'POST') {
+    void handleWeixinLoginWait(ctx, req, res);
     return true;
   }
 
@@ -172,9 +195,11 @@ function handleHost(ctx: DashboardRouteContext, res: http.ServerResponse) {
   const botRef = ctx.getBotRef();
   if (botRef) return ctx.json(res, botRef.getHostData());
   const cpus = os.cpus();
+  const [one, five, fifteen] = os.loadavg();
   ctx.json(res, {
     hostName: os.hostname(), cpuModel: cpus[0]?.model || 'unknown',
     cpuCount: cpus.length, totalMem: os.totalmem(), freeMem: os.freemem(),
+    loadAverage: { one, five, fifteen },
     platform: process.platform, arch: os.arch(),
   });
 }
@@ -224,6 +249,35 @@ async function handleValidateFeishu(ctx: DashboardRouteContext, req: http.Incomi
     error: result.state.ready ? null : result.state.detail,
     app: result.app,
   });
+}
+
+async function handleValidateWeixin(ctx: DashboardRouteContext, req: http.IncomingMessage, res: http.ServerResponse) {
+  const body = await ctx.parseJsonBody(req);
+  const result = await validateWeixinConfig(body.baseUrl || '', body.botToken || '', body.accountId || '');
+  ctx.json(res, {
+    ok: result.state.ready,
+    error: result.state.ready ? null : result.state.detail,
+    account: result.account,
+    normalizedBaseUrl: result.normalizedBaseUrl,
+  });
+}
+
+async function handleWeixinLoginStart(ctx: DashboardRouteContext, req: http.IncomingMessage, res: http.ServerResponse) {
+  const body = await ctx.parseJsonBody(req);
+  const result = await startWeixinQrLogin({
+    baseUrl: normalizeWeixinBaseUrl(body.baseUrl || ''),
+    sessionKey: body.sessionKey || undefined,
+  });
+  ctx.json(res, result, result.ok ? 200 : 500);
+}
+
+async function handleWeixinLoginWait(ctx: DashboardRouteContext, req: http.IncomingMessage, res: http.ServerResponse) {
+  const body = await ctx.parseJsonBody(req);
+  const result = await waitForWeixinQrLogin({
+    baseUrl: normalizeWeixinBaseUrl(body.baseUrl || ''),
+    sessionKey: String(body.sessionKey || '').trim(),
+  });
+  ctx.json(res, result, result.ok ? 200 : 500);
 }
 
 async function handleOpenPreferences(ctx: DashboardRouteContext, req: http.IncomingMessage, res: http.ServerResponse) {

@@ -3,6 +3,7 @@ import codexLogo from '../assets/brands/codex.png';
 import feishuLogo from '../assets/brands/feishu.ico';
 import geminiLogo from '../assets/brands/gemini.svg';
 import telegramLogo from '../assets/brands/telegram.svg';
+import weixinLogo from '../assets/brands/weixin.svg';
 import playwrightLogo from '../assets/brands/playwright.ico';
 import appiumLogo from '../assets/brands/appium.png';
 import { cn } from '../utils';
@@ -13,6 +14,7 @@ const brandIcons: Record<string, string> = {
   gemini: geminiLogo,
   telegram: telegramLogo,
   feishu: feishuLogo,
+  weixin: weixinLogo,
   playwright: playwrightLogo,
   appium: appiumLogo,
 };

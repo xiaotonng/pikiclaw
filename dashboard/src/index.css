@@ -76,13 +76,13 @@
   --th-fg-5: rgba(71,85,105,0.58);
   --th-fg-6: rgba(71,85,105,0.22);
 
-  --th-panel: rgba(255,255,255,0.86);
+  --th-panel: rgba(255,255,255,0.94);
   --th-panel-h: rgba(255,255,255,0.96);
-  --th-panel-alt: rgba(255,255,255,0.74);
+  --th-panel-alt: rgba(255,255,255,0.88);
   --th-inset: rgba(15,23,42,0.05);
 
-  --th-edge: rgba(15,23,42,0.12);
-  --th-edge-h: rgba(15,23,42,0.2);
+  --th-edge: rgba(15,23,42,0.10);
+  --th-edge-h: rgba(15,23,42,0.16);
 
   --th-primary: #0f172a;
   --th-primary-fg: #f8fafc;
@@ -229,9 +229,9 @@ button:disabled { cursor: not-allowed; }
 /* ── Glass ── */
 .glass {
   background: var(--th-panel);
-  backdrop-filter: blur(14px) saturate(1.1);
+  backdrop-filter: blur(6px) saturate(1.02);
   border: 1px solid var(--th-edge);
-  box-shadow: var(--th-card-shadow);
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.06);
 }
 .glass-strong {
   background: var(--th-modal-bg);

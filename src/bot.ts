@@ -1075,6 +1075,7 @@ export class Bot {
     const totalMem = os.totalmem(), freeMem = os.freemem();
     const memory = getHostMemoryUsageData(totalMem, freeMem);
     const cpuUsage = getHostCpuUsageData();
+    const [loadOne, loadFive, loadFifteen] = os.loadavg();
     let disk: { used: string; total: string; percent: string } | null = null;
     const battery = getHostBatteryData();
     try {
@@ -1090,6 +1091,7 @@ export class Bot {
       hostName: getHostDisplayName(),
       cpuModel: cpus[0]?.model || 'unknown', cpuCount: cpus.length,
       cpuUsage,
+      loadAverage: { one: loadOne, five: loadFive, fifteen: loadFifteen },
       totalMem, freeMem, memoryUsed: memory.usedBytes, memoryAvailable: memory.availableBytes, memoryPercent: memory.percent, memorySource: memory.source,
       disk, battery, topProcs,
       selfPid: process.pid, selfRss: mem.rss, selfHeap: mem.heapUsed,

@@ -1,21 +1,24 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useStore } from './store';
-import { resolveAppStatusBadge } from './app-status';
 import { createT } from './i18n';
-import { fmtBytes } from './utils';
 import { Sidebar } from './components/Sidebar';
-import { ConfigTab } from './components/ConfigTab';
+import AgentTab from './components/tabs/AgentTab';
+import { IMAccessTab } from './components/tabs/IMAccessTab';
+import { PermissionsTab } from './components/tabs/PermissionsTab';
+import { ExtensionsTab } from './components/tabs/ExtensionsTab';
+import { SystemTab } from './components/tabs/SystemTab';
 import { SessionsTab } from './components/SessionsTab';
-import { AutomationTab } from './components/ExtensionsTab';
-import { TelegramModal, FeishuModal, WorkdirModal, SessionDetailModal, BrowserSetupModal, DesktopSetupModal } from './components/Modals';
-import { Badge, Button, Dot, Toasts } from './components/ui';
+import { TelegramModal, FeishuModal, WeixinModal, WorkdirModal, SessionDetailModal, BrowserSetupModal, DesktopSetupModal } from './components/Modals';
+import { Toasts } from './components/ui';
 import { api } from './api';
+import { getDashboardTabMeta } from './tabs';
 import type { SessionInfo } from './types';
 
 /* eslint-disable @typescript-eslint/no-unused-vars */
 
 type ModalState =
   | null
+  | { type: 'weixin' }
   | { type: 'telegram' }
   | { type: 'feishu' }
   | { type: 'workdir' }
@@ -24,16 +27,22 @@ type ModalState =
   | { type: 'session'; agent: string; sessionId: string; session: SessionInfo | null };
 
 export function App() {
-  const { state, tab, toasts, toast, reload, locale, host } = useStore();
+  const { state, tab, toasts, toast, reload, locale } = useStore();
   const t = createT(locale);
   const [modal, setModal] = useState<ModalState>(null);
   const closeModal = useCallback(() => setModal(null), []);
 
   const [prompted, setPrompted] = useState(false);
   useEffect(() => {
-    if (state && !prompted && !state.config.telegramBotToken && !state.config.feishuAppId) {
+    if (
+      state
+      && !prompted
+      && !state.config.weixinBotToken
+      && !state.config.telegramBotToken
+      && !state.config.feishuAppId
+    ) {
       setPrompted(true);
-      setTimeout(() => setModal({ type: 'feishu' }), 400);
+      setTimeout(() => setModal({ type: 'weixin' }), 400);
     }
   }, [state, prompted]);
 
@@ -54,7 +63,7 @@ export function App() {
     }
   }, [toast, t]);
 
-  const { badgeVariant, badgeContent, dotVariant, dotPulse } = resolveAppStatusBadge(state, t);
+  const tabMeta = getDashboardTabMeta(tab, t);
 
   const [confirmingRestart, setConfirmingRestart] = useState(false);
   const onRestartClick = useCallback(() => {
@@ -66,11 +75,6 @@ export function App() {
       setTimeout(() => setConfirmingRestart(false), 3000);
     }
   }, [confirmingRestart, handleRestart]);
-
-  const hostSummary = host ? `${host.hostName || '—'}  ·  ${host.cpuCount} cores  ·  ${fmtBytes(host.memoryUsed || (host.totalMem || 0) - (host.freeMem || 0))} / ${fmtBytes(host.totalMem || 0)}` : '';
-  const currentWorkdir = state?.bot?.workdir || state?.runtimeWorkdir || state?.config.workdir || '';
-
-  const tabTitles: Record<string, string> = { config: t('tab.config'), automation: t('tab.automation'), sessions: t('tab.sessions') };
 
   return (
     <div className="noise-overlay">
@@ -88,39 +92,30 @@ export function App() {
         />
 
         <main className="flex-1 overflow-y-auto">
-          <div className="mx-auto max-w-[1100px] px-6 py-8">
-            <div className="mb-8 space-y-3">
-              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                <div className="flex min-w-0 items-center gap-4">
-                  <h2 className="shrink-0 text-lg font-semibold tracking-tight text-fg">{tabTitles[tab] || tab}</h2>
-                </div>
-                <div className="flex shrink-0 items-center gap-2.5">
-                  <Badge variant={badgeVariant}>
-                    <Dot variant={dotVariant} pulse={dotPulse} />
-                    {badgeContent}
-                  </Badge>
-                </div>
-              </div>
-
-              <div className="flex flex-col gap-3 rounded-xl border border-edge bg-panel-alt px-4 py-3 md:flex-row md:items-center md:justify-between">
-                <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2.5">
-                  <Badge variant="muted">{t('app.systemInfo')}</Badge>
-                  {hostSummary && <span className="min-w-0 truncate text-[13px] font-mono text-fg-5">{hostSummary}</span>}
-                  <span className="text-[11px] font-semibold uppercase tracking-[0.16em] text-fg-5">{t('config.workdir')}</span>
-                  <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-fg-3">{currentWorkdir || t('sidebar.notSet')}</span>
-                </div>
-                <Button variant="outline" size="sm" onClick={() => setModal({ type: 'workdir' })}>
-                  {t('sidebar.switchDir')}
-                </Button>
+          <div className="mx-auto max-w-[1120px] px-5 py-3">
+            <div className="mb-3 border-b border-edge pb-2">
+              <div className="min-w-0">
+                <h2 className="text-lg font-semibold tracking-tight text-fg">{tabMeta.title}</h2>
+                {tabMeta.description && <div className="mt-0.5 text-[13px] leading-relaxed text-fg-4">{tabMeta.description}</div>}
               </div>
             </div>
-            {tab === 'config' && <ConfigTab onOpenTelegram={() => setModal({ type: 'telegram' })} onOpenFeishu={() => setModal({ type: 'feishu' })} />}
-            {tab === 'automation' && <AutomationTab onOpenBrowserSetup={() => setModal({ type: 'browser-setup' })} onOpenDesktopSetup={() => setModal({ type: 'desktop-setup' })} />}
+            {tab === 'im' && (
+              <IMAccessTab
+                onOpenWeixin={() => setModal({ type: 'weixin' })}
+                onOpenTelegram={() => setModal({ type: 'telegram' })}
+                onOpenFeishu={() => setModal({ type: 'feishu' })}
+              />
+            )}
+            {tab === 'agents' && <AgentTab />}
+            {tab === 'permissions' && <PermissionsTab />}
+            {tab === 'extensions' && <ExtensionsTab onOpenBrowserSetup={() => setModal({ type: 'browser-setup' })} onOpenDesktopSetup={() => setModal({ type: 'desktop-setup' })} />}
             {tab === 'sessions' && <SessionsTab onOpenSession={handleOpenSession} />}
+            {tab === 'system' && <SystemTab onOpenWorkdir={() => setModal({ type: 'workdir' })} />}
           </div>
         </main>
       </div>
 
+      <WeixinModal open={modal?.type === 'weixin'} onClose={closeModal} />
       <TelegramModal open={modal?.type === 'telegram'} onClose={closeModal} />
       <FeishuModal open={modal?.type === 'feishu'} onClose={closeModal} />
       <BrowserSetupModal open={modal?.type === 'browser-setup'} onClose={closeModal} onSaved={() => reload()} />

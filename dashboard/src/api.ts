@@ -8,6 +8,9 @@ import type {
   PermissionRequestResult,
   SessionTailMessage,
   SessionsPageResult,
+  WeixinLoginStartResult,
+  WeixinLoginWaitResult,
+  WeixinValidationResult,
 } from './types';
 
 export interface ApiRequestOptions extends RequestInit {
@@ -97,6 +100,24 @@ export const api = {
     post<{ ok: boolean; error?: string | null; app?: { appId: string; displayName?: string | null } }>(
       '/api/validate-feishu-config',
       { appId, appSecret },
+      opts,
+    ),
+  validateWeixinConfig: (baseUrl: string, botToken: string, accountId: string, opts?: ApiRequestOptions) =>
+    post<WeixinValidationResult>(
+      '/api/validate-weixin-config',
+      { baseUrl, botToken, accountId },
+      opts,
+    ),
+  startWeixinLogin: (baseUrl: string, opts?: ApiRequestOptions) =>
+    post<WeixinLoginStartResult>(
+      '/api/weixin-login/start',
+      { baseUrl },
+      opts,
+    ),
+  waitWeixinLogin: (sessionKey: string, baseUrl: string, opts?: ApiRequestOptions) =>
+    post<WeixinLoginWaitResult>(
+      '/api/weixin-login/wait',
+      { sessionKey, baseUrl },
       opts,
     ),
   requestPermission: (permission: string) => post<PermissionRequestResult>('/api/open-preferences', { permission }),

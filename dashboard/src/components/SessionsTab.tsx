@@ -2,7 +2,7 @@ import { startTransition, useEffect, useEffectEvent, useRef, useState } from 're
 import { useStore } from '../store';
 import { createT } from '../i18n';
 import { api } from '../api';
-import { Badge, Button, Card, Dot, SectionLabel } from './ui';
+import { Badge, Button, Card } from './ui';
 import { BrandBadge } from './BrandIcon';
 import { cn, fmtTime, getAgentMeta, sessionDisplayDetail, sessionDisplayState } from '../utils';
 import type { AgentInfo, SessionInfo, SessionsPageResult } from '../types';
@@ -25,12 +25,10 @@ function SessionCard({
   dimmed?: boolean;
   t: (key: string) => string;
 }) {
-  const sid = session.sessionId || '';
-  const title = session.title || sid.slice(0, 16) || 'Session';
-  const truncTitle = title.length > 28 ? title.slice(0, 28) + '...' : title;
+  const title = session.title || 'Session';
   const displayState = sessionDisplayState(session);
   const detail = sessionDisplayDetail(session);
-  const dotVariant = displayState === 'running' ? 'ok' : displayState === 'incomplete' || session.isCurrent ? 'warn' : 'idle';
+  const updatedAt = session.runUpdatedAt || session.createdAt || '';
   const stateBadge = displayState === 'running'
     ? <Badge variant="ok" className="!h-5 !px-2 !text-[10px]">{t('status.running')}</Badge>
     : displayState === 'incomplete'
@@ -40,47 +38,46 @@ function SessionCard({
   return (
     <Card
       onClick={onOpen}
-      interactive
-      className={cn('mb-2 bg-panel-alt p-4 last:mb-0 transition-all duration-200', dimmed && 'opacity-65')}
+      className={cn('cursor-pointer bg-panel-alt p-3 transition-colors duration-200 hover:border-edge-h', dimmed && 'opacity-65')}
       title={title}
     >
-      <div className="mb-1.5 flex items-center gap-2">
-        <div className="flex-1 truncate text-[14px] font-medium text-fg-2">{truncTitle}</div>
-        <Dot variant={dotVariant} pulse={session.running} />
-      </div>
-      <div className="flex flex-wrap items-center gap-2.5 text-[12px] text-fg-5">
-        <span>{fmtTime(session.createdAt)}</span>
-        {session.model && <span className="font-mono">{session.model}</span>}
-        {session.isCurrent && <Badge variant="accent" className="!h-5 !px-2 !text-[10px]">{t('sessions.current')}</Badge>}
-        {stateBadge}
+      <div className="flex items-start justify-between gap-2.5">
+        <div className="min-w-0">
+          <div className="truncate text-[14px] font-medium text-fg">{title}</div>
+          <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-fg-5">
+            {updatedAt && <span>{fmtTime(updatedAt)}</span>}
+            {session.model && <span className="font-mono">{session.model}</span>}
+            {session.isCurrent && <Badge variant="accent" className="!h-5 !px-2 !text-[10px]">{t('sessions.current')}</Badge>}
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          {stateBadge}
+        </div>
       </div>
       {displayState === 'incomplete' && detail && (
-        <div className="mt-1 truncate text-[11px] text-amber-200/80">{detail}</div>
+        <div className="mt-1.5 text-[11px] leading-relaxed text-amber-200/80">{detail}</div>
       )}
-      <div className="mt-1.5 truncate text-[11px] font-mono text-fg-6">{sid}</div>
     </Card>
   );
 }
 
 function SessionCardSkeleton() {
   return (
-    <div className="mb-2 rounded-xl border border-edge bg-panel-alt p-4 last:mb-0">
-      <div className="mb-2 flex items-center gap-2">
-        <div className="h-4 flex-1 rounded-md bg-panel animate-shimmer" />
-        <div className="h-2 w-2 rounded-full bg-fg-5" />
+    <div className="rounded-md border border-edge bg-panel-alt p-3">
+      <div className="flex items-start justify-between gap-2.5">
+        <div className="min-w-0 flex-1">
+          <div className="h-4 w-48 rounded-md bg-panel animate-shimmer" />
+          <div className="mt-1.5 h-3 w-40 rounded-md bg-panel animate-shimmer" />
+        </div>
+        <div className="h-5 w-16 rounded-full bg-panel animate-shimmer" />
       </div>
-      <div className="mb-2 flex gap-2">
-        <div className="h-3 w-20 rounded-md bg-panel animate-shimmer" />
-        <div className="h-3 w-24 rounded-md bg-panel animate-shimmer" />
-      </div>
-      <div className="h-3 w-40 rounded-md bg-panel animate-shimmer" />
     </div>
   );
 }
 
 function SessionsLoadingState({ count = 3 }: { count?: number }) {
   return (
-    <div>
+    <div className="space-y-2">
       {Array.from({ length: count }, (_, index) => (
         <SessionCardSkeleton key={index} />
       ))}
@@ -88,7 +85,7 @@ function SessionsLoadingState({ count = 3 }: { count?: number }) {
   );
 }
 
-function SwimLanes({
+function AgentSessionsSection({
   agents,
   pages,
   loadingByAgent,
@@ -108,85 +105,86 @@ function SwimLanes({
   t: (key: string) => string;
 }) {
   if (!agents.length) {
-    return <div className="py-8 text-[15px] text-fg-5">{bootstrapping ? t('sessions.loading') : t('sessions.noAgent')}</div>;
+    return <div className="py-8 text-sm leading-relaxed text-fg-5">{bootstrapping ? t('sessions.loading') : t('sessions.noAgent')}</div>;
   }
 
   return (
-    <div className="flex gap-5 overflow-x-auto pb-2" style={{ minHeight: 200 }}>
+    <div className="overflow-x-auto pb-2">
+      <div className="flex min-w-max gap-3">
       {agents.map(agentInfo => {
         const meta = getAgentMeta(agentInfo.agent);
         const pageData = pages[agentInfo.agent];
         const sessions = pageData?.sessions || [];
         const loading = !!loadingByAgent[agentInfo.agent];
-        const total = pageData?.total ?? 0;
         const showInitialLoading = loading && !pageData;
 
         return (
-          <div key={agentInfo.agent} className="flex min-w-[280px] max-w-[360px] flex-1 flex-col">
-            <Card className="flex flex-1 flex-col overflow-hidden !p-0">
-              <div className="flex items-center gap-2.5 border-b border-edge px-4 py-3.5 text-[15px] font-semibold text-fg-2">
-                <BrandBadge brand={agentInfo.agent} size={24} iconSize={14} className="rounded-md" />
-                <span>{meta.label}</span>
-                <Badge variant="muted" className="ml-auto !text-[11px]">{total}</Badge>
+          <Card key={agentInfo.agent} className="flex min-h-[420px] w-[360px] shrink-0 flex-col overflow-hidden !p-0">
+            <div className="flex flex-wrap items-center gap-2.5 border-b border-edge px-3 py-2.5">
+              <BrandBadge brand={agentInfo.agent} size={24} iconSize={14} className="rounded-md" />
+              <div className="min-w-0 flex-1">
+                <div className="text-[14px] font-semibold text-fg">{meta.label}</div>
+                {pageData && (
+                  <div className="mt-0.5 text-[11px] text-fg-5">
+                    {pageData.page + 1} / {Math.max(pageData.totalPages, 1)}
+                  </div>
+                )}
               </div>
-
-              <div className="flex-1 bg-panel-alt p-2.5">
-                {loading && pageData && <div className="mb-2 h-1.5 rounded-full bg-panel animate-shimmer" />}
-                <div className="max-h-[56vh] overflow-y-auto">
-                  {showInitialLoading ? (
-                    <SessionsLoadingState />
-                  ) : pageData?.error ? (
-                    <div className="px-3 py-6 text-center">
-                      <div className="mb-3 text-[13px] text-fg-5">{pageData.error}</div>
-                      <Button size="sm" variant="ghost" onClick={() => onRetry(agentInfo.agent)}>
-                        {t('sessions.retry')}
-                      </Button>
-                    </div>
-                  ) : sessions.length === 0 ? (
-                    <div className="py-6 text-center text-[14px] text-fg-5">
-                      {loading ? t('sessions.loading') : t('sessions.noSessions')}
-                    </div>
-                  ) : (
-                    sessions.map(session => (
-                      <SessionCard
-                        key={session.sessionId}
-                        session={session}
-                        dimmed={loading}
-                        t={t}
-                        onOpen={() => onOpenSession(agentInfo.agent, session.sessionId || '', session)}
-                      />
-                    ))
-                  )}
-                </div>
+              <Badge variant="muted" className="!text-[11px]">
+                {pageData ? pageData.total : '—'}
+              </Badge>
+              <div className="flex items-center gap-1.5">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={!pageData || loading || pageData.page <= 0}
+                  onClick={() => onPageChange(agentInfo.agent, Math.max((pageData?.page || 0) - 1, 0))}
+                >
+                  {t('sessions.prev')}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={!pageData || loading || pageData.page + 1 >= pageData.totalPages}
+                  onClick={() => onPageChange(agentInfo.agent, (pageData?.page || 0) + 1)}
+                >
+                  {t('sessions.next')}
+                </Button>
               </div>
+            </div>
 
-              <div className="flex items-center gap-2 border-t border-edge px-3 py-2">
-                <div className="text-[11px] font-mono text-fg-5">
-                  {pageData ? `${pageData.page + 1} / ${Math.max(pageData.totalPages, 1)}` : t('sessions.loading')}
-                </div>
-                <div className="ml-auto flex items-center gap-1.5">
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    disabled={!pageData || loading || pageData.page <= 0}
-                    onClick={() => onPageChange(agentInfo.agent, Math.max((pageData?.page || 0) - 1, 0))}
-                  >
-                    {t('sessions.prev')}
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    disabled={!pageData || loading || pageData.page + 1 >= pageData.totalPages}
-                    onClick={() => onPageChange(agentInfo.agent, (pageData?.page || 0) + 1)}
-                  >
-                    {t('sessions.next')}
+            <div className="flex flex-1 flex-col gap-2 bg-panel-alt p-2.5">
+              {showInitialLoading ? (
+                <SessionsLoadingState />
+              ) : pageData?.error ? (
+                <div className="rounded-md border border-edge bg-panel px-2.5 py-4 text-center">
+                  <div className="mb-2 text-[13px] leading-relaxed text-fg-5">{pageData.error}</div>
+                  <Button size="sm" variant="ghost" onClick={() => onRetry(agentInfo.agent)}>
+                    {t('sessions.retry')}
                   </Button>
                 </div>
-              </div>
-            </Card>
-          </div>
+              ) : sessions.length === 0 ? (
+                <div className="rounded-md border border-edge bg-panel px-2.5 py-4 text-center text-[13px] leading-relaxed text-fg-5">
+                  {loading ? t('sessions.loading') : t('sessions.noSessions')}
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {sessions.map(session => (
+                    <SessionCard
+                      key={session.sessionId}
+                      session={session}
+                      dimmed={loading}
+                      t={t}
+                      onOpen={() => onOpenSession(agentInfo.agent, session.sessionId || '', session)}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          </Card>
         );
       })}
+      </div>
     </div>
   );
 }
@@ -271,20 +269,17 @@ export function SessionsTab({ onOpenSession }: { onOpenSession: (agent: string, 
   }, [installedAgentsKey, reload, state]);
 
   return (
-    <div className="animate-in space-y-8">
-      <section>
-        <SectionLabel>{t('sessions.agentSessions')}</SectionLabel>
-        <SwimLanes
-          agents={installedAgents}
-          pages={pages}
-          loadingByAgent={loadingByAgent}
-          bootstrapping={bootstrapping}
-          onOpenSession={onOpenSession}
-          onRetry={agent => { void loadAgentPage(agent, 0); }}
-          onPageChange={(agent, page) => { void loadAgentPage(agent, page); }}
-          t={t}
-        />
-      </section>
+    <div className="animate-in space-y-3">
+      <AgentSessionsSection
+        agents={installedAgents}
+        pages={pages}
+        loadingByAgent={loadingByAgent}
+        bootstrapping={bootstrapping}
+        onOpenSession={onOpenSession}
+        onRetry={agent => { void loadAgentPage(agent, 0); }}
+        onPageChange={(agent, page) => { void loadAgentPage(agent, page); }}
+        t={t}
+      />
     </div>
   );
 }
