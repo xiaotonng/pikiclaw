@@ -1299,7 +1299,7 @@ export interface SkillInfo {
   name: string;
   label: string | null;
   description: string | null;
-  source: 'commands' | 'skills';
+  source: 'skills';
 }
 
 export interface SkillListResult { skills: SkillInfo[]; workdir: string; }
@@ -1308,7 +1308,6 @@ export interface ProjectSkillPaths {
   sharedSkillFile: string | null;
   claudeSkillFile: string | null;
   agentsSkillFile: string | null;
-  claudeCommandFile: string | null;
 }
 
 function parseSkillMeta(content: string): { label: string | null; description: string | null } {
@@ -1430,29 +1429,16 @@ export function getProjectSkillPaths(workdir: string, skillName: string): Projec
   const sharedSkillFile = path.join(workdir, '.pikiclaw', 'skills', skillName, 'SKILL.md');
   const agentsSkillFile = path.join(workdir, '.agents', 'skills', skillName, 'SKILL.md');
   const claudeSkillFile = path.join(workdir, '.claude', 'skills', skillName, 'SKILL.md');
-  const claudeCommandFile = path.join(workdir, '.claude', 'commands', `${skillName}.md`);
   return {
     sharedSkillFile: hasFile(sharedSkillFile) ? sharedSkillFile : null,
     agentsSkillFile: hasFile(agentsSkillFile) ? agentsSkillFile : null,
     claudeSkillFile: hasFile(claudeSkillFile) ? claudeSkillFile : null,
-    claudeCommandFile: hasFile(claudeCommandFile) ? claudeCommandFile : null,
   };
 }
 
 export function listSkills(workdir: string): SkillListResult {
   const skills: SkillInfo[] = [];
   const seen = new Set<string>();
-  const commandsDir = path.join(workdir, '.claude', 'commands');
-  for (const entry of readSortedDir(commandsDir)) {
-    if (!entry.endsWith('.md')) continue;
-    const name = entry.replace(/\.md$/, '');
-    if (!name || seen.has(name)) continue;
-    let meta = { label: null as string | null, description: null as string | null };
-    try { meta = parseSkillMeta(fs.readFileSync(path.join(commandsDir, entry), 'utf-8')); } catch {}
-    skills.push({ name, label: meta.label, description: meta.description, source: 'commands' });
-    seen.add(name);
-  }
-
   const skillRoots = [
     path.join(workdir, '.pikiclaw', 'skills'),
   ];

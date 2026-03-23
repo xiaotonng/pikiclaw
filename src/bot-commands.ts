@@ -231,7 +231,7 @@ export interface SkillEntryData {
   label: string;
   description: string | null;
   command: string;
-  source: 'commands' | 'skills';
+  source: 'skills';
 }
 
 export interface SkillsListData {
@@ -406,25 +406,15 @@ export function resolveSkillPrompt(bot: Bot, chatId: ChatId, cmd: string, args: 
   const cs = bot.chat(chatId);
   const extra = args.trim();
   const suffix = extra ? ` Additional context: ${extra}` : '';
+  const workdirHint = `[Project directory: ${bot.workdir}]\n\n`;
   let prompt: string;
-  if (skill.source === 'commands') {
-    prompt = `In this project's .claude/commands/${skill.name}.md file, there is a custom command definition. Please read and execute the instructions defined there.${suffix}`;
-    return { prompt, skillName: skill.name };
-  }
-
   const paths = getProjectSkillPaths(bot.workdir, skill.name);
-  if (cs.agent === 'claude' && paths.claudeSkillFile) {
-    prompt = `Please execute the /${skill.name} skill defined in this project.${suffix}`;
+  const skillFile = paths.claudeSkillFile || paths.sharedSkillFile || paths.agentsSkillFile;
+  if (skillFile) {
+    prompt = `${workdirHint}Read the skill definition at \`${skillFile}\` and execute the instructions defined there.${suffix}`;
   } else {
-    const canonicalPath = paths.sharedSkillFile
-      ? `\`${relSkillPath(bot.workdir, paths.sharedSkillFile)}\``
-      : `\`.pikiclaw/skills/${skill.name}/SKILL.md\``;
-    const locationText = paths.sharedSkillFile
-      ? canonicalPath
-      : paths.agentsSkillFile || paths.claudeSkillFile
-        ? canonicalPath
-        : `\`${skill.name}/SKILL.md\``;
-    prompt = `In this project, the ${skill.name} skill is defined in ${locationText}. Please read that SKILL.md file and execute the instructions.${suffix}`;
+    const fallbackPath = `${bot.workdir}/.pikiclaw/skills/${skill.name}/SKILL.md`;
+    prompt = `${workdirHint}Read the skill definition at \`${fallbackPath}\` and execute the instructions defined there.${suffix}`;
   }
   return { prompt, skillName: skill.name };
 }

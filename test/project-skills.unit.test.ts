@@ -28,7 +28,7 @@ afterEach(() => {
 
 describe('project skills', () => {
   it('lists and resolves project skills with canonical metadata and deduplication', () => {
-    // Scenario 1: lists canonical project skills plus legacy command skills without duplicates
+    // Scenario 1: lists canonical project skills with deduplication; .claude/commands/ is NOT scanned
     {
       const workdir = makeTmpDir('pikiclaw-skills-');
       writeSkill(path.join(workdir, '.pikiclaw', 'skills'), 'ship', '---\nlabel: Shared Ship\ndescription: shared\n---\n');
@@ -38,8 +38,8 @@ describe('project skills', () => {
 
       const result = listSkills(workdir);
 
+      // .claude/commands/deploy.md is ignored — only .pikiclaw/skills/ is scanned
       expect(result.skills).toEqual([
-        { name: 'deploy', label: 'Deploy Cmd', description: 'legacy', source: 'commands' },
         { name: 'ship', label: 'Shared Ship', description: 'shared', source: 'skills' },
       ]);
     }
@@ -66,10 +66,11 @@ describe('project skills', () => {
       ]);
 
       const resolved = resolveSkillPrompt(bot, 1, 'sk_install', 'ship it');
-      expect(resolved).toEqual({
-        prompt: 'Please execute the /install skill defined in this project. Additional context: ship it',
-        skillName: 'install',
-      });
+      expect(resolved).not.toBeNull();
+      expect(resolved!.skillName).toBe('install');
+      expect(resolved!.prompt).toContain(workdir);
+      expect(resolved!.prompt).toContain('.claude/skills/install/SKILL.md');
+      expect(resolved!.prompt).toContain('Additional context: ship it');
     }
   });
 
@@ -85,10 +86,10 @@ describe('project skills', () => {
       bot.chat(2).agent = 'codex';
 
       const resolved = resolveSkillPrompt(bot, 2, 'sk_fixup', '');
-      expect(resolved).toEqual({
-        prompt: 'In this project, the fixup skill is defined in `.pikiclaw/skills/fixup/SKILL.md`. Please read that SKILL.md file and execute the instructions.',
-        skillName: 'fixup',
-      });
+      expect(resolved).not.toBeNull();
+      expect(resolved!.skillName).toBe('fixup');
+      expect(resolved!.prompt).toContain(workdir);
+      expect(resolved!.prompt).toContain('.claude/skills/fixup/SKILL.md');
     }
 
     // Scenario 2: merges legacy skill roots into .pikiclaw/skills and links .claude/.agents back to canonical

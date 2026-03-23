@@ -96,14 +96,13 @@ async function main() {
     case 'skills': {
       const result = listSkills(workdir);
       if (!result.skills.length) {
-        process.stdout.write(`No custom skills found in ${workdir} (.pikiclaw/skills, .claude/commands)\n`);
+        process.stdout.write(`No custom skills found in ${workdir} (.pikiclaw/skills)\n`);
         break;
       }
       process.stdout.write(`Project skills (${result.skills.length}):\n\n`);
       for (const sk of result.skills) {
-        const src = sk.source === 'skills' ? 'skill' : 'command';
         const desc = sk.description ? `  ${sk.description}` : '';
-        process.stdout.write(`  ${sk.name}  [${src}]${desc}\n`);
+        process.stdout.write(`  ${sk.name}${desc}\n`);
       }
       break;
     }
