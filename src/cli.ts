@@ -300,10 +300,15 @@ Docs: https://github.com/xiaotonng/pikiclaw
  */
 function persistWorkdir(args: Record<string, any>, userConfig: Partial<UserConfig>): Partial<UserConfig> {
   if (!process.env.PIKICLAW_DAEMON_CHILD) {
-    const cliWorkdir = path.resolve(args.workdir || '.');
-    if (userConfig.workdir !== cliWorkdir) {
-      updateUserConfig({ workdir: cliWorkdir });
-      return loadUserConfig();
+    // Only overwrite persisted workdir when the user explicitly passed -w.
+    // Falling back to cwd when no flag is given can clobber a valid saved
+    // workdir with a temp directory (e.g. after a non-daemon restart).
+    if (args.workdir) {
+      const cliWorkdir = path.resolve(args.workdir);
+      if (userConfig.workdir !== cliWorkdir) {
+        updateUserConfig({ workdir: cliWorkdir });
+        return loadUserConfig();
+      }
     }
   }
   return userConfig;

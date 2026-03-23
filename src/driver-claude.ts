@@ -217,9 +217,10 @@ function getNativeClaudeSessions(workdir: string): SessionInfo[] {
     const filePath = path.join(projectDir, entry.name);
     try {
       const stat = fs.statSync(filePath);
-      // Read first few KB to extract title and model from first user/assistant messages
+      // Read enough bytes to get past the system_prompt line (can be 20KB+) and
+      // reach the first user/assistant events for title and model extraction.
       const fd = fs.openSync(filePath, 'r');
-      const buf = Buffer.alloc(8192);
+      const buf = Buffer.alloc(65536);
       const bytesRead = fs.readSync(fd, buf, 0, buf.length, 0);
       fs.closeSync(fd);
       const head = buf.toString('utf8', 0, bytesRead);

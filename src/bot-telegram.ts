@@ -746,7 +746,8 @@ export class TelegramBot extends Bot {
     if (rendered.fullHtml.length <= 3900) {
       finalMsgId = await replacePreview(rendered.fullHtml);
     } else {
-      const maxFirst = 3900 - rendered.headerHtml.length - rendered.footerHtml.length;
+      // Split: header on first message, footer on last message
+      const maxFirst = 3900 - rendered.headerHtml.length;
       let firstBody: string;
       let remaining: string;
       if (maxFirst > 200) {
@@ -758,14 +759,25 @@ export class TelegramBot extends Bot {
         firstBody = '';
         remaining = rendered.bodyHtml;
       }
-      const firstHtml = `${rendered.headerHtml}${firstBody}${rendered.footerHtml}`;
-      finalMsgId = await replacePreview(firstHtml);
 
       if (remaining.trim()) {
+        // Multi-message: header on first, footer on last
+        const firstHtml = `${rendered.headerHtml}${firstBody}`;
+        finalMsgId = await replacePreview(firstHtml);
         const chunks = splitText(remaining, 3800);
-        for (const chunk of chunks) {
-          remember(await sendFinalText(chunk, finalMsgId ?? phId ?? ctx.messageId));
+        for (let i = 0; i < chunks.length; i++) {
+          const isLast = i === chunks.length - 1;
+          const chunkText = isLast ? `${chunks[i]}${rendered.footerHtml}` : chunks[i];
+          remember(await sendFinalText(chunkText, finalMsgId ?? phId ?? ctx.messageId));
         }
+        // Safety: re-clear the Stop keyboard on the placeholder in case the first edit silently failed
+        if (phId != null) {
+          try { await this.channel.editMessage(ctx.chatId, phId, firstHtml || '(done)', { parseMode: 'HTML', keyboard: { inline_keyboard: [] } }); } catch {}
+        }
+      } else {
+        // Body fits on first message; only footer pushes it over — keep together
+        const firstHtml = `${rendered.headerHtml}${firstBody}${rendered.footerHtml}`;
+        finalMsgId = await replacePreview(firstHtml);
       }
     }
     return { primaryMessageId: finalMsgId, messageIds };

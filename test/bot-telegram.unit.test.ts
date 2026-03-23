@@ -297,8 +297,11 @@ describe('TelegramBot status and session previews', () => {
       expect(replies[0]?.text).toContain('Source: app-server model/list');
       expect(replies[0]?.text).toContain('debug note should stay hidden while models exist');
       expect(replies[0]?.opts?.keyboard?.inline_keyboard).toEqual([
-        [{ text: '● opus', callback_data: 'mod:claude-opus-4-6' }, { text: 'sonnet', callback_data: 'mod:claude-sonnet-4-6' }],
-        [{ text: 'Low', callback_data: 'eff:low' }, { text: 'Medium', callback_data: 'eff:medium' }, { text: '● High', callback_data: 'eff:high' }],
+        [{ text: '● opus', callback_data: 'md:claude-opus-4-6' }],
+        [{ text: 'sonnet', callback_data: 'md:claude-sonnet-4-6' }],
+        [{ text: '— Thinking Effort —', callback_data: 'mc' }],
+        [{ text: 'Low', callback_data: 'ed:low' }, { text: 'Medium', callback_data: 'ed:medium' }, { text: '● High', callback_data: 'ed:high' }],
+        [{ text: '✓ OK', callback_data: 'mc' }],
       ]);
     }
 

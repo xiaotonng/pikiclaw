@@ -202,6 +202,7 @@ function spawnReplacementProcess(bin: string, args: string[], env: Record<string
     stdio: 'inherit',
     detached: true,
     env,
+    cwd: process.cwd(),
   });
   child.unref();
   log?.(`restart: new process spawned (PID ${child.pid})`);

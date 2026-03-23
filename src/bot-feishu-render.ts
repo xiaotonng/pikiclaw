@@ -136,6 +136,31 @@ export function renderCommandSelectionCard(view: CommandSelectionView): FeishuCa
   };
 }
 
+/**
+ * Strip code-fence markers (``` / ~~~) from text that is not meant to be
+ * rendered as full markdown (thinking, activity).  Truncation by
+ * extractThinkingTail can leave stray fences that open unwanted code blocks.
+ */
+function stripCodeFences(text: string): string {
+  return text.replace(/^(`{3,}|~{3,}).*$/gm, '');
+}
+
+/**
+ * Ensure code fences in markdown text are balanced.  If an odd number of
+ * fence markers is detected, append a closing fence so partial code blocks
+ * do not swallow the rest of the card.
+ */
+function ensureBalancedCodeFences(text: string): string {
+  let inCode = false;
+  for (const line of text.split('\n')) {
+    const trimmed = line.trimStart();
+    if (trimmed.startsWith('```') || trimmed.startsWith('~~~')) {
+      inCode = !inCode;
+    }
+  }
+  return inCode ? text + '\n```' : text;
+}
+
 function escapeFeishuMarkdownText(text: string): string {
   return text.replace(/([\\`*_{}[\]()#+\-.!|>~])/g, '\\$1');
 }
@@ -210,20 +235,20 @@ function buildPreviewMarkdown(input: StreamPreviewRenderInput, options?: { inclu
   const parts: string[] = [];
 
   if (data.planDisplay) {
-    parts.push(`**Plan**\n${data.planDisplay}`);
+    parts.push(`**Plan**\n${stripCodeFences(data.planDisplay)}`);
   }
 
   if (data.activityDisplay) {
-    parts.push(`**Activity**\n${trimActivityForPreview(data.activityDisplay, data.maxActivity)}`);
+    parts.push(`**Activity**\n${stripCodeFences(trimActivityForPreview(data.activityDisplay, data.maxActivity))}`);
   }
 
   if (data.thinkDisplay && !data.display) {
-    parts.push(`**${data.label}**\n${data.thinkDisplay}`);
+    parts.push(`**${data.label}**\n${stripCodeFences(data.thinkDisplay)}`);
   } else if (data.display) {
     if (data.rawThinking) {
-      parts.push(`**${data.label}**\n${data.thinkSnippet}`);
+      parts.push(`**${data.label}**\n${stripCodeFences(data.thinkSnippet)}`);
     }
-    parts.push(data.preview);
+    parts.push(ensureBalancedCodeFences(data.preview));
   }
 
   if (options?.includeFooter !== false) {
@@ -270,7 +295,7 @@ export function buildFinalReplyRender(agent: Agent, result: StreamResult): Feish
   let activityText = '';
   let activityNoteText = '';
   if (data.activityNarrative) {
-    activityText = `**Activity**\n${data.activityNarrative}\n\n`;
+    activityText = `**Activity**\n${stripCodeFences(data.activityNarrative)}\n\n`;
   }
   if (data.activityCommandSummary) {
     activityNoteText = `*${data.activityCommandSummary}*\n\n`;
@@ -278,7 +303,7 @@ export function buildFinalReplyRender(agent: Agent, result: StreamResult): Feish
 
   let thinkingText = '';
   if (data.thinkingDisplay) {
-    thinkingText = `**${data.thinkLabel}**\n${data.thinkingDisplay}\n\n`;
+    thinkingText = `**${data.thinkLabel}**\n${stripCodeFences(data.thinkingDisplay)}\n\n`;
   }
 
   let statusText = '';
@@ -287,7 +312,7 @@ export function buildFinalReplyRender(agent: Agent, result: StreamResult): Feish
   }
 
   const headerText = `${activityText}${activityNoteText}${statusText}${thinkingText}`;
-  const bodyText = data.bodyMessage;
+  const bodyText = ensureBalancedCodeFences(data.bodyMessage);
   return {
     fullText: `${headerText}${bodyText}${footerText}`,
     headerText,
@@ -665,6 +690,10 @@ function normalizeFeishuMarkdown(lines: string[]): string {
     pendingBlankLine = false;
     out.push(line);
   }
+
+  // Safety: close any unclosed code block so it doesn't swallow the rest of
+  // a Feishu card element (e.g. truncated body text ending mid-fence).
+  if (inCodeBlock) out.push('```');
 
   return out.join('\n');
 }

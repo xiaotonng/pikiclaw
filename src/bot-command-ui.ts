@@ -18,6 +18,9 @@ export type CommandAction =
   | { kind: 'agent.switch'; agent: Agent }
   | { kind: 'model.switch'; modelId: string }
   | { kind: 'effort.set'; effort: string }
+  | { kind: 'models.select.model'; modelId: string }
+  | { kind: 'models.select.effort'; effort: string }
+  | { kind: 'models.confirm' }
   | { kind: 'skill.run'; command: string };
 
 export type CommandItemState = 'default' | 'current' | 'running' | 'unavailable';
@@ -87,6 +90,12 @@ export function encodeCommandAction(action: CommandAction): string {
       return `mod:${action.modelId}`;
     case 'effort.set':
       return `eff:${action.effort}`;
+    case 'models.select.model':
+      return `md:${action.modelId}`;
+    case 'models.select.effort':
+      return `ed:${action.effort}`;
+    case 'models.confirm':
+      return 'mc';
     case 'skill.run':
       return `skr:${action.command}`;
   }
@@ -121,6 +130,17 @@ export function decodeCommandAction(data: string): CommandAction | null {
     if (!effort) return null;
     return { kind: 'effort.set', effort };
   }
+  if (data.startsWith('md:')) {
+    const modelId = data.slice(3);
+    if (!modelId) return null;
+    return { kind: 'models.select.model', modelId };
+  }
+  if (data.startsWith('ed:')) {
+    const effort = data.slice(3);
+    if (!effort) return null;
+    return { kind: 'models.select.effort', effort };
+  }
+  if (data === 'mc') return { kind: 'models.confirm' };
   if (data.startsWith('skr:')) {
     const command = data.slice(4);
     if (!command) return null;
@@ -192,24 +212,78 @@ export function buildAgentsCommandView(bot: Bot, chatId: ChatId): CommandSelecti
   };
 }
 
-export async function buildModelsCommandView(bot: Bot, chatId: ChatId): Promise<CommandSelectionView> {
+// ---------------------------------------------------------------------------
+// Models draft state — "select then confirm" pattern
+// ---------------------------------------------------------------------------
+
+interface ModelsDraft {
+  modelId: string;
+  effort: string | null;
+}
+
+const modelsDrafts = new Map<string, ModelsDraft>();
+
+async function initModelsDraft(bot: Bot, chatId: ChatId): Promise<ModelsDraft> {
   const data = await getModelsListData(bot, chatId);
-  const models = [...data.models].sort((a, b) => Number(b.isCurrent) - Number(a.isCurrent));
+  const draft: ModelsDraft = { modelId: data.currentModel, effort: data.effort?.current ?? null };
+  modelsDrafts.set(String(chatId), draft);
+  return draft;
+}
+
+export async function buildModelsCommandView(
+  bot: Bot,
+  chatId: ChatId,
+  draft?: ModelsDraft,
+): Promise<CommandSelectionView> {
+  const data = await getModelsListData(bot, chatId);
+
+  // Initialize draft from current state or use the provided one
+  const d: ModelsDraft = draft ?? {
+    modelId: data.currentModel,
+    effort: data.effort?.current ?? null,
+  };
+  modelsDrafts.set(String(chatId), d);
+
+  const isSelected = (modelId: string) => modelMatchesSelection(data.agent, modelId, d.modelId);
+
+  const models = [...data.models].sort((a, b) => Number(isSelected(b.id)) - Number(isSelected(a.id)));
   const modelButtons = models.map(model => ({
     label: model.alias || model.id,
-    action: { kind: 'model.switch', modelId: model.id } as CommandAction,
-    state: buttonStateFromFlags({ isCurrent: model.isCurrent }),
-    primary: model.isCurrent,
+    action: { kind: 'models.select.model', modelId: model.id } as CommandAction,
+    state: buttonStateFromFlags({ isCurrent: isSelected(model.id) }),
+    primary: isSelected(model.id),
   }));
-  const rows = chunkRows(modelButtons, modelButtons.some(button => button.label.length > 14) ? 1 : 2);
+  const rows = chunkRows(modelButtons, 1);
+
   if (data.effort) {
-    rows.push(data.effort.levels.map(level => ({
+    const effortButtons = data.effort.levels.map(level => ({
       label: level.label,
-      action: { kind: 'effort.set', effort: level.id } as CommandAction,
-      state: buttonStateFromFlags({ isCurrent: level.isCurrent }),
-      primary: level.isCurrent,
-    })));
+      action: { kind: 'models.select.effort', effort: level.id } as CommandAction,
+      state: buttonStateFromFlags({ isCurrent: level.id === d.effort }),
+      primary: level.id === d.effort,
+    }));
+    // Section label — clicking it is harmless (triggers confirm, which is noop if nothing changed)
+    rows.push([{
+      label: '— Thinking Effort —',
+      action: { kind: 'models.confirm' } as CommandAction,
+      state: 'default' as CommandItemState,
+      primary: false,
+    }]);
+    // ≤3 levels fit in one row; 4+ split into rows of 2 to avoid Feishu truncation
+    rows.push(...chunkRows(effortButtons, effortButtons.length <= 3 ? effortButtons.length : 2));
   }
+
+  // Detect whether draft differs from current live values
+  const modelChanged = !modelMatchesSelection(data.agent, d.modelId, data.currentModel);
+  const effortChanged = !!(data.effort && d.effort !== data.effort.current);
+  const hasChanges = modelChanged || effortChanged;
+
+  rows.push([{
+    label: hasChanges ? '✓ Apply' : '✓ OK',
+    action: { kind: 'models.confirm' } as CommandAction,
+    state: 'default' as CommandItemState,
+    primary: hasChanges,
+  }]);
 
   return {
     kind: 'models',
@@ -218,15 +292,15 @@ export async function buildModelsCommandView(bot: Bot, chatId: ChatId): Promise<
     metaLines: [
       ...(data.sources.length ? [`Source: ${data.sources.join(', ')}`] : []),
       ...(data.note ? [data.note] : []),
-      ...(data.effort ? [`Thinking Effort: ${data.effort.current}`] : []),
+      ...(data.effort ? [`Thinking Effort: ${d.effort}`] : []),
     ],
     items: models.map(model => ({
       label: model.alias || model.id,
       detail: model.alias ? model.id : null,
-      state: buttonStateFromFlags({ isCurrent: model.isCurrent }),
+      state: buttonStateFromFlags({ isCurrent: isSelected(model.id) }),
     })),
     emptyText: 'No discoverable models found.',
-    helperText: data.models.length ? 'Use the controls below to switch models.' : null,
+    helperText: data.models.length ? 'Select model and effort, then tap Apply.' : null,
     rows,
   };
 }
@@ -355,6 +429,57 @@ export async function executeCommandAction(
           value: action.effort,
           detail: `${chat.agent} · takes effect on next message`,
           valueMode: 'code',
+        },
+      };
+    }
+
+    case 'models.select.model': {
+      const draft = modelsDrafts.get(String(chatId)) ?? await initModelsDraft(bot, chatId);
+      draft.modelId = action.modelId;
+      return { kind: 'view', view: await buildModelsCommandView(bot, chatId, draft), callbackText: '' };
+    }
+
+    case 'models.select.effort': {
+      const draft = modelsDrafts.get(String(chatId)) ?? await initModelsDraft(bot, chatId);
+      draft.effort = action.effort;
+      return { kind: 'view', view: await buildModelsCommandView(bot, chatId, draft), callbackText: '' };
+    }
+
+    case 'models.confirm': {
+      const chat = bot.chat(chatId);
+      const draft = modelsDrafts.get(String(chatId));
+      modelsDrafts.delete(String(chatId));
+      if (!draft) return { kind: 'noop', message: 'No changes' };
+
+      const currentModel = bot.modelForAgent(chat.agent);
+      const currentEffort = bot.effortForAgent(chat.agent);
+      const modelChanged = !modelMatchesSelection(chat.agent, draft.modelId, currentModel);
+      const effortChanged = draft.effort != null && draft.effort !== currentEffort;
+
+      if (!modelChanged && !effortChanged) {
+        return { kind: 'noop', message: 'No changes' };
+      }
+
+      const parts: string[] = [];
+      if (modelChanged) {
+        bot.switchModelForChat(chatId, draft.modelId);
+        parts.push(`Model: ${draft.modelId}`);
+      }
+      if (effortChanged) {
+        bot.switchEffortForChat(chatId, draft.effort!);
+        parts.push(`Effort: ${draft.effort}`);
+      }
+
+      return {
+        kind: 'notice',
+        callbackText: parts.join(', '),
+        notice: {
+          title: 'Configuration Updated',
+          value: parts.join('\n'),
+          detail: modelChanged
+            ? `${chat.agent} · session reset`
+            : `${chat.agent} · takes effect on next message`,
+          valueMode: 'plain',
         },
       };
     }
