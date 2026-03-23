@@ -166,6 +166,10 @@ export class LivePreview {
     return this.editCount;
   }
 
+  getRenderedPreview(): string {
+    return this.lastPreview;
+  }
+
   private stopFeedback() {
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);

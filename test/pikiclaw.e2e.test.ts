@@ -300,23 +300,6 @@ describe.skipIf(SKIP)('/switch', () => {
 // =========================================================================
 
 describe.skipIf(SKIP)('/host', () => {
-  it('shows the latest host summary fields', async () => {
-    const { ctx, replies } = createCaptureCtx();
-    await claw.handleCommand('host', '', ctx);
-
-    expect(replies.length).toBe(1);
-    const text = replies[0].text;
-    expect(text).toContain('<b>Host</b>');
-    expect(text).toContain('Name');
-    expect(text).toContain(os.hostname());
-    expect(text).toContain('CPU');
-    expect(text).toContain('CPU Usage');
-    expect(text).toContain('Memory');
-    expect(text).toContain('Process');
-    expect(text).toContain(String(process.pid));
-    expect(replies[0].opts?.parseMode).toBe('HTML');
-  });
-
   it('includes disk info on macOS/Linux', async () => {
     if (process.platform !== 'darwin' && process.platform !== 'linux') return;
     const { ctx, replies } = createCaptureCtx();

@@ -6,6 +6,7 @@ import type { FeishuContext } from '../src/channel-feishu.ts';
 import { makeTmpDir } from './support/env.ts';
 
 function createBot() {
+  const edits: Array<{ text: string; opts?: any }> = [];
   const reactions: Array<{ chatId: string; messageId: string; reactions: string[] }> = [];
   const channel = {
     capabilities: {
@@ -21,6 +22,11 @@ function createBot() {
     setMessageReaction: vi.fn(async (chatId: string, messageId: string, reactionList: string[]) => {
       reactions.push({ chatId, messageId, reactions: reactionList });
     }),
+    editMessage: vi.fn(async (_chatId: string, _messageId: string, text: string, opts?: any) => {
+      edits.push({ text, opts });
+    }),
+    isStreamingCard: vi.fn(() => true),
+    endStreaming: vi.fn(async () => {}),
     knownChats: new Set<string>(),
   };
 
@@ -38,7 +44,7 @@ function createBot() {
     raw: {},
   };
 
-  return { bot, channel, ctx, reactions };
+  return { bot, channel, ctx, reactions, edits };
 }
 
 beforeEach(() => {
@@ -70,5 +76,26 @@ describe('FeishuBot.handleMessage file staging', () => {
     ]);
 
     fs.rmSync(uploadDir, { recursive: true, force: true });
+  });
+});
+
+describe('FeishuBot steer handoff preview', () => {
+  it('freezes the previous preview card content and removes its actions', async () => {
+    const { bot, channel, ctx, edits } = createBot();
+
+    const messageIds = await (bot as any).freezeSteerHandoffPreview(
+      ctx,
+      'om_preview',
+      { getRenderedPreview: () => '**Partial reply**' },
+    );
+
+    expect(messageIds).toEqual(['om_preview']);
+    expect(channel.endStreaming).toHaveBeenCalledWith('om_preview', 'Steered to a new reply.');
+    expect(edits).toEqual([
+      {
+        text: '**Partial reply**',
+        opts: { keyboard: { rows: [] } },
+      },
+    ]);
   });
 });

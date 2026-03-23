@@ -34,8 +34,13 @@ export function buildKnownChatEnv(
   return ids.size ? { [envName]: [...ids].join(',') } : {};
 }
 
+export type SessionMessageRef = Pick<
+  SessionRuntime,
+  'key' | 'workdir' | 'agent' | 'sessionId' | 'workspacePath' | 'codexCumulative' | 'modelId'
+>;
+
 export class SessionMessageRegistry<ChatKey extends ChatId, MessageId extends ChatId> {
-  private readonly messages = new Map<ChatKey, Map<MessageId, string>>();
+  private readonly messages = new Map<ChatKey, Map<MessageId, SessionMessageRef>>();
 
   constructor(private readonly maxPerChat = 1024) {}
 
@@ -46,7 +51,7 @@ export class SessionMessageRegistry<ChatKey extends ChatId, MessageId extends Ch
   register(
     chatId: ChatKey,
     messageId: MessageId | null | undefined,
-    session: Pick<SessionRuntime, 'key' | 'workdir'>,
+    session: SessionMessageRef,
     workdir: string,
   ) {
     if (session.workdir !== workdir) return;
@@ -54,11 +59,19 @@ export class SessionMessageRegistry<ChatKey extends ChatId, MessageId extends Ch
 
     let chatMessages = this.messages.get(chatId);
     if (!chatMessages) {
-      chatMessages = new Map<MessageId, string>();
+      chatMessages = new Map<MessageId, SessionMessageRef>();
       this.messages.set(chatId, chatMessages);
     }
 
-    chatMessages.set(messageId, session.key);
+    chatMessages.set(messageId, {
+      key: session.key,
+      workdir: session.workdir,
+      agent: session.agent,
+      sessionId: session.sessionId,
+      workspacePath: session.workspacePath ?? null,
+      codexCumulative: session.codexCumulative,
+      modelId: session.modelId ?? null,
+    });
     while (chatMessages.size > this.maxPerChat) {
       const oldest = chatMessages.keys().next();
       if (oldest.done) break;
@@ -69,13 +82,13 @@ export class SessionMessageRegistry<ChatKey extends ChatId, MessageId extends Ch
   registerMany(
     chatId: ChatKey,
     messageIds: Array<MessageId | null | undefined>,
-    session: Pick<SessionRuntime, 'key' | 'workdir'>,
+    session: SessionMessageRef,
     workdir: string,
   ) {
     for (const messageId of messageIds) this.register(chatId, messageId, session, workdir);
   }
 
-  resolve(chatId: ChatKey, messageId: MessageId | null | undefined): string | null {
+  resolve(chatId: ChatKey, messageId: MessageId | null | undefined): SessionMessageRef | null {
     if (!this.isValidMessageId(messageId)) return null;
     return this.messages.get(chatId)?.get(messageId) || null;
   }

@@ -114,7 +114,15 @@ export class CodexAppServer {
       });
 
       proc.on('error', () => { clearTimeout(timer); this.ready = false; resolve(false); });
-      proc.on('close', () => { this.ready = false; this.proc = null; });
+      proc.on('close', () => {
+        this.ready = false;
+        this.proc = null;
+        // Resolve any pending RPC calls so callers don't hang forever
+        for (const [id, cb] of this.pending) {
+          cb({ error: { message: 'process exited before responding' } });
+        }
+        this.pending.clear();
+      });
 
       this.call('initialize', { clientInfo: { name: 'pikiclaw', version: '0.2.0' } })
         .then(resp => {
@@ -128,14 +136,27 @@ export class CodexAppServer {
     });
   }
 
-  call(method: string, params?: any): Promise<any> {
+  call(method: string, params?: any, timeoutMs?: number): Promise<any> {
     return new Promise((resolve) => {
       if (!this.proc || this.proc.killed) { resolve({ error: { message: 'not connected' } }); return; }
       const id = this.nextId++;
-      this.pending.set(id, resolve);
+      const wrappedResolve = (result: any) => {
+        if (timer) clearTimeout(timer);
+        this.pending.delete(id);
+        resolve(result);
+      };
+      const timer = timeoutMs ? setTimeout(() => {
+        this.pending.delete(id);
+        resolve({ error: { message: `RPC call '${method}' timed out after ${timeoutMs}ms` } });
+      }, timeoutMs) : null;
+      this.pending.set(id, wrappedResolve);
       const msg: any = { jsonrpc: '2.0', id, method };
       if (params !== undefined) msg.params = params;
-      try { this.proc.stdin!.write(JSON.stringify(msg) + '\n'); } catch { resolve({ error: { message: 'write failed' } }); }
+      try { this.proc.stdin!.write(JSON.stringify(msg) + '\n'); } catch {
+        if (timer) clearTimeout(timer);
+        this.pending.delete(id);
+        resolve({ error: { message: 'write failed' } });
+      }
     });
   }
 
@@ -248,6 +269,34 @@ function summarizeCodexFileChange(item: any): string {
   if (paths.length === 1) return `Updated ${paths[0]}`;
   if (paths.length > 1) return `Updated ${paths.length} files`;
   return 'Updated files';
+}
+
+function summarizeCodexRawResponseItem(item: any): string | null {
+  if (!item || typeof item !== 'object') return null;
+  switch (item.type) {
+    case 'web_search_call': {
+      const action = item.action || {};
+      if (action.type === 'search') {
+        const query = shortValue(action.query, 120);
+        return query ? `Search web: ${query}` : 'Search web';
+      }
+      if (action.type === 'open_page') {
+        const url = shortValue(action.url, 120);
+        return url ? `Open ${url}` : 'Open web page';
+      }
+      return 'Search web';
+    }
+    case 'custom_tool_call': {
+      const name = shortValue(item.name, 80);
+      return name ? `Use ${name}` : 'Use tool';
+    }
+    case 'local_shell_call': {
+      const command = shortValue(item.action?.command || item.action?.cmd, 120);
+      return command ? `Run shell command: ${command}` : 'Run shell command';
+    }
+    default:
+      return null;
+  }
 }
 
 function buildCodexInteractionRequest(method: string, params: any, requestId: string): CodexInteractionRequest | null {
@@ -490,6 +539,7 @@ function handleCodexNotification(
   emit: () => void,
   hardTimer: ReturnType<typeof setTimeout>,
   settleTurnDone: (() => void) | null,
+  publishTurnControl?: () => void,
 ): void {
   if (Date.now() > deadline) return;
   if (params.threadId !== s.sessionId) {
@@ -512,6 +562,9 @@ function handleCodexNotification(
       return;
     case 'item/completed':
       handleItemCompleted(params.item || {}, s, emit);
+      return;
+    case 'rawResponseItem/completed':
+      handleRawResponseItemCompleted(params.item || {}, s, emit);
       return;
     case 'thread/tokenUsage/updated':
       applyCodexTokenUsage(s, params.tokenUsage, opts.codexPrevCumulative);
@@ -538,6 +591,7 @@ function handleCodexNotification(
     }
     case 'turn/started':
       s.turnId = params.turn?.id ?? null;
+      publishTurnControl?.();
       return;
     case 'model/rerouted':
       s.model = params.model ?? s.model;
@@ -592,6 +646,27 @@ function handleItemCompleted(item: any, s: CodexStreamState, emit: () => void): 
     pushRecentActivity(s.recentNarrative, summarizeCodexFileChange(item));
     emit();
   }
+}
+
+function handleRawResponseItemCompleted(item: any, s: CodexStreamState, emit: () => void): void {
+  if (item?.type === 'reasoning') {
+    const summary = Array.isArray(item.summary)
+      ? item.summary
+        .map((entry: any) => (typeof entry === 'string' ? entry : entry?.text || ''))
+        .filter(Boolean)
+        .join('\n')
+        .trim()
+      : '';
+    if (summary) {
+      s.thinkParts.push(summary);
+      emit();
+      return;
+    }
+  }
+  const summary = summarizeCodexRawResponseItem(item);
+  if (!summary) return;
+  pushRecentActivity(s.recentNarrative, summary);
+  emit();
 }
 
 function handleCompletedAgentMessage(item: any, s: CodexStreamState, emit: () => void): void {
@@ -681,6 +756,8 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
   let unsubscribeNotifications = () => {};
   let unsubscribeRequests = () => {};
   let settleTurnDone: (() => void) | null = null;
+  let emitPreview = () => {};
+  let publishedTurnControl = false;
 
   try {
     const config: string[] = [];
@@ -695,6 +772,42 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
     }
 
     const s = createCodexStreamState(opts);
+    const publishTurnControl = () => {
+      if (publishedTurnControl || !opts.onCodexTurnReady || !s.sessionId || !s.turnId) return;
+      publishedTurnControl = true;
+      try {
+        const control = {
+          threadId: s.sessionId,
+          turnId: s.turnId,
+          steer: async (prompt: string, attachments: string[] = []) => {
+            if (!s.sessionId || !s.turnId) return false;
+            const expectedTurnId = s.turnId;
+            const clippedPrompt = prompt.slice(0, 200);
+            agentLog(`[codex-rpc] turn/steer turn=${expectedTurnId} prompt="${clippedPrompt}${prompt.length > 200 ? '…' : ''}"`);
+            const steerResp = await srv.call('turn/steer', {
+              threadId: s.sessionId,
+              expectedTurnId,
+              input: buildCodexTurnInput(prompt, attachments),
+            }, 30_000);
+            if (steerResp.error) {
+              const errMsg = steerResp.error.message || 'turn/steer failed';
+              agentLog(`[codex-rpc] turn/steer error: ${errMsg}`);
+              pushRecentActivity(s.recentFailures, `Steer failed: ${shortValue(errMsg, 120)}`, 4);
+              emitPreview();
+              return false;
+            }
+            s.turnId = steerResp.result?.turnId ?? s.turnId;
+            pushRecentActivity(s.recentNarrative, 'Applied steer input');
+            emitPreview();
+            return true;
+          },
+        };
+        opts.onSteerReady?.(control.steer);
+        opts.onCodexTurnReady?.(control);
+      } catch (error: any) {
+        agentLog(`[codex-rpc] onCodexTurnReady error: ${error?.message || error}`);
+      }
+    };
 
     // thread/start or thread/resume
     let threadResp: any;
@@ -707,10 +820,10 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
     };
     if (opts.sessionId) {
       agentLog(`[codex-rpc] thread/resume id=${opts.sessionId}`);
-      threadResp = await srv.call('thread/resume', { threadId: opts.sessionId, ...threadParams });
+      threadResp = await srv.call('thread/resume', { threadId: opts.sessionId, ...threadParams }, 60_000);
     } else {
       agentLog(`[codex-rpc] thread/start cwd=${opts.workdir} model=${opts.codexModel || '(default)'}`);
-      threadResp = await srv.call('thread/start', threadParams);
+      threadResp = await srv.call('thread/start', threadParams, 60_000);
     }
 
     if (threadResp.error) {
@@ -752,9 +865,10 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
         s.activity = buildCodexActivityPreview(s);
         opts.onText(s.text, s.thinking, s.activity, buildStreamPreviewMeta(s), s.plan);
       };
+      emitPreview = emit;
 
       unsubscribeNotifications = srv.onNotification((method, params) => {
-        handleCodexNotification(method, params, s, opts, deadline, emit, hardTimer, settleTurnDone);
+        handleCodexNotification(method, params, s, opts, deadline, emit, hardTimer, settleTurnDone, publishTurnControl);
       });
       unsubscribeRequests = srv.onRequest((method, params, requestId) => {
         return handleCodexRequest(method, params, requestId, s, opts, emit);
@@ -768,10 +882,15 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
       s.turnError = s.turnError || 'Interrupted by user.';
       agentLog(`[codex-rpc] abort requested thread=${s.sessionId || '?'} turn=${s.turnId || '?'}`);
       if (s.turnId && s.sessionId) {
-        srv.call('turn/interrupt', { threadId: s.sessionId, turnId: s.turnId }).catch(() => {});
+        // Send turn/interrupt and wait for Codex to acknowledge before settling.
+        // Don't kill the process here — let the finally block handle it after
+        // Codex has had time to persist the interrupted session state.
+        srv.call('turn/interrupt', { threadId: s.sessionId, turnId: s.turnId }, 5_000)
+          .finally(() => settleTurnDone?.());
+      } else {
+        srv.kill();
+        settleTurnDone?.();
       }
-      srv.kill();
-      settleTurnDone?.();
     };
     if (opts.abortSignal?.aborted) abortStream();
     opts.abortSignal?.addEventListener('abort', abortStream, { once: true });
@@ -792,7 +911,7 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
       threadId: s.sessionId, input,
       model: opts.codexModel || undefined,
       effort: mapEffort(opts.thinkingEffort),
-    });
+    }, 60_000);
 
     if (turnResp.error) {
       opts.abortSignal?.removeEventListener('abort', abortStream);
@@ -803,6 +922,7 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
       return codexErrorResult(errMsg, start, s.sessionId, s.model, s.thinkingEffort);
     }
     s.turnId = turnResp.result?.turn?.id ?? null;
+    publishTurnControl();
 
     await turnDone;
     opts.abortSignal?.removeEventListener('abort', abortStream);

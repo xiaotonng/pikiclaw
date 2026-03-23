@@ -12,7 +12,7 @@ import { getActiveUserConfig, onUserConfigChange, resolveUserWorkdir, setUserWor
 import {
   doStream, getSessions, getSessionTail, getUsage, initializeProjectSkills, listAgents, listModels, listSkills, stageSessionFiles,
   type Agent, type CodexCumulativeUsage, type StreamOpts, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type SessionInfo, type UsageResult,
-  type CodexInteractionRequest,
+  type CodexInteractionRequest, type CodexTurnControl,
   type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult,
   type SkillInfo, type SkillListResult, type AgentDetectOptions, isPendingSessionId, normalizeClaudeModelId,
 } from './code-agent.js';
@@ -473,11 +473,14 @@ export interface RunningTask {
   agent: Agent;
   sessionKey: string;
   prompt: string;
+  attachments?: string[];
   startedAt: number;
   sourceMessageId: number | string;
   status?: 'queued' | 'running';
   cancelled?: boolean;
   abort?: (() => void) | null;
+  steer?: ((prompt: string, attachments?: string[]) => Promise<boolean>) | null;
+  freezePreviewOnAbort?: boolean;
   placeholderMessageIds?: Array<number | string>;
 }
 
@@ -602,7 +605,26 @@ export class Bot {
   }
 
   protected getSelectedSession(cs: ChatState): SessionRuntime | null {
-    return this.getSessionRuntimeByKey(cs.activeSessionKey);
+    return this.getSessionRuntimeByKey(cs.activeSessionKey, { allowAnyWorkdir: true });
+  }
+
+  protected hydrateSessionRuntime(session: {
+    agent: Agent;
+    sessionId: string | null;
+    workdir?: string | null;
+    workspacePath?: string | null;
+    codexCumulative?: CodexCumulativeUsage;
+    modelId?: string | null;
+  }): SessionRuntime | null {
+    if (!session.sessionId) return null;
+    return this.upsertSessionRuntime({
+      agent: session.agent,
+      sessionId: session.sessionId,
+      workdir: session.workdir || this.workdir,
+      workspacePath: session.workspacePath ?? null,
+      codexCumulative: session.codexCumulative,
+      modelId: session.modelId ?? null,
+    });
   }
 
   protected upsertSessionRuntime(session: {
@@ -641,6 +663,7 @@ export class Bot {
   }
 
   protected applySessionSelection(cs: ChatState, session: SessionRuntime | null) {
+    const previousSessionKey = cs.activeSessionKey ?? null;
     cs.activeSessionKey = session?.key ?? null;
     if (session) {
       cs.agent = session.agent;
@@ -648,29 +671,36 @@ export class Bot {
       cs.workspacePath = session.workspacePath;
       cs.codexCumulative = session.codexCumulative;
       cs.modelId = session.modelId ?? null;
+      if (previousSessionKey && previousSessionKey !== session.key) this.maybeEvictSessionRuntime(previousSessionKey);
       return;
     }
     cs.sessionId = null;
     cs.workspacePath = null;
     cs.codexCumulative = undefined;
     cs.modelId = null;
+    if (previousSessionKey) this.maybeEvictSessionRuntime(previousSessionKey);
   }
 
   protected resetChatConversation(cs: ChatState) {
     this.applySessionSelection(cs, null);
   }
 
-  protected adoptSession(cs: ChatState, session: Pick<SessionInfo, 'agent' | 'sessionId' | 'workspacePath' | 'model'>) {
+  protected adoptSession(cs: ChatState, session: Pick<SessionInfo, 'agent' | 'sessionId' | 'workdir' | 'workspacePath' | 'model'>) {
     if (!session.sessionId) {
       this.applySessionSelection(cs, null);
       return;
     }
-    const runtime = this.upsertSessionRuntime({
+    const runtime = this.hydrateSessionRuntime({
       agent: session.agent,
       sessionId: session.sessionId,
+      workdir: 'workdir' in session ? session.workdir : null,
       workspacePath: session.workspacePath ?? null,
       modelId: session.model ?? null,
     });
+    if (!runtime) {
+      this.applySessionSelection(cs, null);
+      return;
+    }
     this.applySessionSelection(cs, runtime);
   }
 
@@ -679,6 +709,23 @@ export class Bot {
       if (cs.activeSessionKey !== session.key) continue;
       this.applySessionSelection(cs, session);
     }
+  }
+
+  protected isSessionSelected(sessionKey: string | null | undefined): boolean {
+    if (!sessionKey) return false;
+    for (const [, cs] of this.chats) {
+      if (cs.activeSessionKey === sessionKey) return true;
+    }
+    return false;
+  }
+
+  protected maybeEvictSessionRuntime(sessionKey: string | null | undefined) {
+    const session = this.getSessionRuntimeByKey(sessionKey, { allowAnyWorkdir: true });
+    if (!session) return;
+    if (session.runningTaskIds.size) return;
+    if (session.workdir === this.workdir) return;
+    if (this.isSessionSelected(session.key)) return;
+    this.sessionStates.delete(session.key);
   }
 
   protected ensureSessionForChat(chatId: ChatId, title: string, files: string[]): SessionRuntime {
@@ -733,9 +780,7 @@ export class Bot {
     const session = this.getSessionRuntimeByKey(task.sessionKey, { allowAnyWorkdir: true });
     if (!session) return;
     session.runningTaskIds.delete(taskId);
-    if (!session.runningTaskIds.size && session.workdir !== this.workdir) {
-      this.sessionStates.delete(session.key);
-    }
+    this.maybeEvictSessionRuntime(session.key);
   }
 
   protected runningTaskForSession(sessionKey: string | null | undefined): RunningTask | null {
@@ -756,6 +801,8 @@ export class Bot {
     if (task.cancelled) return task;
     task.status = 'running';
     task.abort = abort || null;
+    task.steer = null;
+    task.freezePreviewOnAbort = false;
     return task;
   }
 
@@ -828,29 +875,30 @@ export class Bot {
   }
 
   /**
-   * Steer: interrupt the running task so a queued task (identified by actionId) runs next.
-   * Returns { task, interrupted } where task is the queued task and interrupted indicates
-   * whether a running task was aborted.
+   * Steer hands off to the queued task's own placeholder card. Interrupt the
+   * active task so the queued task can run next and the current preview can be
+   * frozen in place instead of being rewritten as an error.
    */
-  protected steerTaskByActionId(actionId: string): { task: RunningTask | null; interrupted: boolean } {
+  protected async steerTaskByActionId(actionId: string): Promise<{ task: RunningTask | null; interrupted: boolean; steered: boolean }> {
     const taskId = this.taskKeysByActionId.get(String(actionId));
-    if (!taskId) return { task: null, interrupted: false };
+    if (!taskId) return { task: null, interrupted: false, steered: false };
     const task = this.activeTasks.get(taskId) || null;
-    if (!task || task.status !== 'queued') return { task, interrupted: false };
-    const interrupted = this.interruptRunningTask(task.sessionKey);
-    return { task, interrupted };
+    if (!task || task.status !== 'queued') return { task, interrupted: false, steered: false };
+    const interrupted = this.interruptRunningTask(task.sessionKey, { freezePreview: true });
+    return { task, interrupted, steered: false };
   }
 
   /**
    * Interrupt only the currently running task for a session, leaving queued tasks intact.
    * Used by the "Steer" action to let a queued task run next.
    */
-  protected interruptRunningTask(sessionKey: string | null | undefined): boolean {
+  protected interruptRunningTask(sessionKey: string | null | undefined, opts: { freezePreview?: boolean } = {}): boolean {
     const session = this.getSessionRuntimeByKey(sessionKey, { allowAnyWorkdir: true });
     if (!session) return false;
     for (const taskId of session.runningTaskIds) {
       const task = this.activeTasks.get(taskId);
       if (!task || task.status !== 'running') continue;
+      task.freezePreviewOnAbort = !!opts.freezePreview;
       try { task.abort?.(); } catch {}
       return true;
     }
@@ -1017,7 +1065,7 @@ export class Bot {
 
   adoptExistingSessionForChat(
     chatId: ChatId,
-    session: Pick<SessionInfo, 'agent' | 'sessionId' | 'workspacePath' | 'model'>,
+    session: Pick<SessionInfo, 'agent' | 'sessionId' | 'workdir' | 'workspacePath' | 'model'>,
   ): SessionRuntime | null {
     const cs = this.chat(chatId);
     this.adoptSession(cs, session);
@@ -1054,8 +1102,8 @@ export class Bot {
     return getSessions({ agent, workdir: this.workdir });
   }
 
-  fetchSessionTail(agent: Agent, sessionId: string, limit?: number) {
-    return getSessionTail({ agent, sessionId, workdir: this.workdir, limit });
+  fetchSessionTail(agent: Agent, sessionId: string, limit?: number, workdir = this.workdir) {
+    return getSessionTail({ agent, sessionId, workdir, limit });
   }
 
   fetchAgents(options: AgentDetectOptions = {}) {
@@ -1110,7 +1158,7 @@ export class Bot {
     return {
       version: VERSION, uptime: Date.now() - this.startedAt,
       memRss: mem.rss, memHeap: mem.heapUsed, pid: process.pid,
-      workdir: this.workdir, agent: cs.agent, model, sessionId: cs.sessionId,
+      workdir: selectedSession?.workdir || this.workdir, agent: cs.agent, model, sessionId: cs.sessionId,
       workspacePath: cs.workspacePath ?? null,
       running: fallbackTask, activeTasksCount: this.activeTasks.size, stats: this.stats,
       usage: getUsage({ agent: cs.agent, model }),
@@ -1203,18 +1251,23 @@ export class Bot {
   }
 
   async runStream(
-    prompt: string, cs: Pick<SessionRuntime, 'key' | 'agent' | 'sessionId' | 'workspacePath' | 'codexCumulative' | 'modelId'> | ChatState, attachments: string[],
+    prompt: string, cs: Pick<SessionRuntime, 'key' | 'workdir' | 'agent' | 'sessionId' | 'workspacePath' | 'codexCumulative' | 'modelId'> | ChatState, attachments: string[],
     onText: (text: string, thinking: string, activity?: string, meta?: StreamPreviewMeta, plan?: StreamPreviewPlan | null) => void,
     systemPrompt?: string,
     mcpSendFile?: import('./mcp-bridge.js').McpSendFileCallback,
     abortSignal?: AbortSignal,
     onCodexInteractionRequest?: (request: CodexInteractionRequest) => Promise<Record<string, any> | null>,
+    onSteerReady?: (steer: (prompt: string, attachments?: string[]) => Promise<boolean>) => void,
+    onCodexTurnReady?: (control: CodexTurnControl) => void,
   ): Promise<StreamResult> {
     const resolvedModel = cs.modelId || this.modelForAgent(cs.agent);
     const agentConfig = this.agentConfigs[cs.agent] || {};
     const extraArgs: string[] = agentConfig.extraArgs || [];
     const browserEnabled = resolveGuiIntegrationConfig(getActiveUserConfig()).browserEnabled;
-    this.log(`[runStream] agent=${cs.agent} session=${cs.sessionId || '(new)'} workdir=${this.workdir} timeout=${this.runTimeout}s attachments=${attachments.length}`);
+    const sessionWorkdir = 'workdir' in cs && typeof cs.workdir === 'string' && cs.workdir
+      ? path.resolve(cs.workdir)
+      : this.workdir;
+    this.log(`[runStream] agent=${cs.agent} session=${cs.sessionId || '(new)'} workdir=${sessionWorkdir} timeout=${this.runTimeout}s attachments=${attachments.length}`);
     this.log(`[runStream] ${cs.agent} config: model=${resolvedModel} extraArgs=[${extraArgs.join(' ')}]`);
     const isFirstTurnOfSession = !cs.sessionId || isPendingSessionId(cs.sessionId);
     const mcpSystemPrompt = mcpSendFile
@@ -1224,7 +1277,7 @@ export class Bot {
       ? appendExtraPrompt(systemPrompt, mcpSystemPrompt)
       : undefined;
     const opts: StreamOpts = {
-      agent: cs.agent, prompt, workdir: this.workdir, timeout: this.runTimeout,
+      agent: cs.agent, prompt, workdir: sessionWorkdir, timeout: this.runTimeout,
       sessionId: cs.sessionId, model: null,
       thinkingEffort: agentConfig.reasoningEffort || 'high', onText,
       attachments: attachments.length ? attachments : undefined,
@@ -1249,6 +1302,8 @@ export class Bot {
       mcpSendFile,
       abortSignal,
       onCodexInteractionRequest,
+      onSteerReady,
+      onCodexTurnReady,
     };
     const result = await doStream(opts);
     this.stats.totalTurns++;

@@ -145,7 +145,6 @@ export class TelegramBot extends Bot {
   }
 
   protected override afterSwitchWorkdir(_oldPath: string, _newPath: string) {
-    this.sessionMessages.clear();
     if (!(this as any).channel) return;
     void this.setupMenu().catch(err => this.log(`menu refresh failed after workdir switch: ${err}`));
   }
@@ -230,16 +229,18 @@ export class TelegramBot extends Bot {
   }
 
   private registerSessionMessage(chatId: number, messageId: number | null | undefined, session: SessionRuntime) {
-    this.sessionMessages.register(chatId, messageId, session, this.workdir);
+    this.sessionMessages.register(chatId, messageId, session, session.workdir);
   }
 
   private registerSessionMessages(chatId: number, messageIds: Array<number | null | undefined>, session: SessionRuntime) {
-    this.sessionMessages.registerMany(chatId, messageIds, session, this.workdir);
+    this.sessionMessages.registerMany(chatId, messageIds, session, session.workdir);
   }
 
   private sessionFromMessage(chatId: number, messageId: number | null | undefined): SessionRuntime | null {
-    const sessionKey = this.sessionMessages.resolve(chatId, messageId);
-    return this.getSessionRuntimeByKey(sessionKey);
+    const sessionRef = this.sessionMessages.resolve(chatId, messageId);
+    if (!sessionRef) return null;
+    return this.getSessionRuntimeByKey(sessionRef.key, { allowAnyWorkdir: true })
+      || this.hydrateSessionRuntime(sessionRef);
   }
 
   private ensureSession(chatId: number, title: string, files: string[]): SessionRuntime {
@@ -564,7 +565,7 @@ export class TelegramBot extends Bot {
           }
           const staged = stageSessionFiles({
             agent: session.agent,
-            workdir: this.workdir,
+            workdir: session.workdir,
             files: msg.files,
             sessionId: session.sessionId,
             title: undefined,
@@ -601,6 +602,7 @@ export class TelegramBot extends Bot {
       agent: session.agent,
       sessionKey: session.key,
       prompt,
+      attachments: files,
       startedAt: start,
       sourceMessageId: ctx.messageId,
     });
@@ -624,9 +626,10 @@ export class TelegramBot extends Bot {
 
     void this.queueSessionTask(session, async () => {
       let livePreview: LivePreview | null = null;
+      let task: ReturnType<TelegramBot['markTaskRunning']> = null;
       const abortController = new AbortController();
       try {
-        const task = this.markTaskRunning(taskId, () => abortController.abort());
+        task = this.markTaskRunning(taskId, () => abortController.abort());
         if (!task || task.cancelled) {
           if (phId != null) {
             try { await this.channel.deleteMessage(ctx.chatId, phId); } catch {}
@@ -662,8 +665,19 @@ export class TelegramBot extends Bot {
 
         const result = await this.runStream(prompt, session, files, (nextText, nextThinking, nextActivity = '', meta, plan) => {
           livePreview?.update(nextText, nextThinking, nextActivity, meta, plan);
-        }, undefined, mcpSendFile, abortController.signal, this.createCodexHumanLoopHandler(ctx, taskId, messageThreadId));
+        }, undefined, mcpSendFile, abortController.signal, this.createCodexHumanLoopHandler(ctx, taskId, messageThreadId), (steer) => {
+          const currentTask = this.activeTasks.get(taskId);
+          if (!currentTask || currentTask.cancelled || currentTask.status !== 'running') return;
+          currentTask.steer = steer;
+        });
         await livePreview?.settle();
+
+        if (task?.freezePreviewOnAbort && result.stopReason === 'interrupted') {
+          const frozenMessageIds = await this.freezeSteerHandoffPreview(ctx, phId, livePreview);
+          this.registerSessionMessages(ctx.chatId, frozenMessageIds, session);
+          this.log(`[handleMessage] steer handoff preserved previous preview chat=${ctx.chatId} task=${taskId}`);
+          return;
+        }
 
         this.log(
           `[handleMessage] done agent=${session.agent} ok=${result.ok} session=${result.sessionId || '?'} elapsed=${result.elapsedS.toFixed(1)}s edits=${livePreview?.getEditCount() || 0} ` +
@@ -675,6 +689,12 @@ export class TelegramBot extends Bot {
         this.registerSessionMessages(ctx.chatId, finalReply.messageIds, session);
         this.log(`[handleMessage] final reply sent to chat=${ctx.chatId}`);
       } catch (e: any) {
+        if (task?.freezePreviewOnAbort && abortController.signal.aborted) {
+          const frozenMessageIds = await this.freezeSteerHandoffPreview(ctx, phId, livePreview);
+          this.registerSessionMessages(ctx.chatId, frozenMessageIds, session);
+          this.log(`[handleMessage] steer handoff preserved preview after abort chat=${ctx.chatId} task=${taskId}`);
+          return;
+        }
         const msgText = String(e?.message || e || 'Unknown error');
         this.log(`[handleMessage] task failed chat=${ctx.chatId} session=${session.sessionId} error=${msgText}`);
         const errorHtml = `<b>Error</b>\n\n<code>${escapeHtml(msgText.slice(0, 500))}</code>`;
@@ -700,6 +720,25 @@ export class TelegramBot extends Bot {
       this.log(`[handleMessage] queue execution failed: ${e}`);
       this.finishTask(taskId);
     });
+  }
+
+  private async freezeSteerHandoffPreview(
+    ctx: TgContext,
+    phId: number | null,
+    livePreview: LivePreview | null,
+  ): Promise<number[]> {
+    if (phId == null) return [];
+    const previewHtml = livePreview?.getRenderedPreview()?.trim() || '';
+    if (!previewHtml) return [phId];
+    try {
+      await this.channel.editMessage(ctx.chatId, phId, previewHtml, {
+        parseMode: 'HTML',
+        keyboard: { inline_keyboard: [] },
+      });
+      return [phId];
+    } catch {
+      return [];
+    }
   }
 
   /** Create an MCP sendFile callback bound to a Telegram chat context. */
@@ -870,7 +909,7 @@ export class TelegramBot extends Bot {
   private async handleTaskSteerCallback(data: string, ctx: TgCallbackContext): Promise<boolean> {
     if (!data.startsWith('tsk:steer:')) return false;
     const actionId = data.slice('tsk:steer:'.length).trim();
-    const result = this.steerTaskByActionId(actionId);
+    const result = await this.steerTaskByActionId(actionId);
     if (!result.task) {
       await ctx.answerCallback('This task already finished.');
       return true;
@@ -879,7 +918,7 @@ export class TelegramBot extends Bot {
       await ctx.answerCallback('Task is already running.');
       return true;
     }
-    await ctx.answerCallback(result.interrupted ? 'Steering — interrupting current task...' : 'No running task to interrupt.');
+    await ctx.answerCallback(result.interrupted ? 'Steering — switching to the queued reply...' : 'No running task to interrupt.');
     return true;
   }
 

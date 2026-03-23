@@ -201,7 +201,6 @@ export class FeishuBot extends Bot {
   }
 
   protected override afterSwitchWorkdir(_oldPath: string, _newPath: string) {
-    this.sessionMessages.clear();
     if (!this.channel) return;
     void this.setupMenu().catch(err => this.log(`menu refresh failed: ${err}`));
   }
@@ -258,16 +257,18 @@ export class FeishuBot extends Bot {
   }
 
   private registerSessionMessage(chatId: string, messageId: string | null | undefined, session: SessionRuntime) {
-    this.sessionMessages.register(chatId, messageId, session, this.workdir);
+    this.sessionMessages.register(chatId, messageId, session, session.workdir);
   }
 
   private registerSessionMessages(chatId: string, messageIds: Array<string | null | undefined>, session: SessionRuntime) {
-    this.sessionMessages.registerMany(chatId, messageIds, session, this.workdir);
+    this.sessionMessages.registerMany(chatId, messageIds, session, session.workdir);
   }
 
   private sessionFromMessage(chatId: string, messageId: string | null | undefined): SessionRuntime | null {
-    const sessionKey = this.sessionMessages.resolve(chatId, messageId);
-    return this.getSessionRuntimeByKey(sessionKey);
+    const sessionRef = this.sessionMessages.resolve(chatId, messageId);
+    if (!sessionRef) return null;
+    return this.getSessionRuntimeByKey(sessionRef.key, { allowAnyWorkdir: true })
+      || this.hydrateSessionRuntime(sessionRef);
   }
 
   private ensureSession(chatId: string, title: string, files: string[]): SessionRuntime {
@@ -640,7 +641,7 @@ export class FeishuBot extends Bot {
           }
           const staged = stageSessionFiles({
             agent: session.agent,
-            workdir: this.workdir,
+            workdir: session.workdir,
             files: msg.files,
             sessionId: session.sessionId,
             title: undefined,
@@ -678,6 +679,7 @@ export class FeishuBot extends Bot {
       agent: session.agent,
       sessionKey: session.key,
       prompt,
+      attachments: files,
       startedAt: start,
       sourceMessageId: ctx.messageId,
     });
@@ -697,9 +699,10 @@ export class FeishuBot extends Bot {
 
     void this.queueSessionTask(session, async () => {
       let livePreview: LivePreview | null = null;
+      let task: ReturnType<FeishuBot['markTaskRunning']> = null;
       const abortController = new AbortController();
       try {
-        const task = this.markTaskRunning(taskId, () => abortController.abort());
+        task = this.markTaskRunning(taskId, () => abortController.abort());
         if (!task || task.cancelled) {
           if (placeholderId) {
             try { await this.channel.deleteMessage(ctx.chatId, placeholderId); } catch {}
@@ -738,8 +741,19 @@ export class FeishuBot extends Bot {
 
         const result = await this.runStream(prompt, session, files, (nextText, nextThinking, nextActivity = '', meta, plan) => {
           livePreview?.update(nextText, nextThinking, nextActivity, meta, plan);
-        }, undefined, mcpSendFile, abortController.signal, this.createCodexHumanLoopHandler(ctx, taskId));
+        }, undefined, mcpSendFile, abortController.signal, this.createCodexHumanLoopHandler(ctx, taskId), (steer) => {
+          const currentTask = this.activeTasks.get(taskId);
+          if (!currentTask || currentTask.cancelled || currentTask.status !== 'running') return;
+          currentTask.steer = steer;
+        });
         await livePreview?.settle();
+
+        if (task?.freezePreviewOnAbort && result.stopReason === 'interrupted') {
+          const frozenMessageIds = await this.freezeSteerHandoffPreview(ctx, placeholderId, livePreview);
+          this.registerSessionMessages(ctx.chatId, frozenMessageIds, session);
+          this.log(`[handleMessage] steer handoff preserved previous preview chat=${ctx.chatId} task=${taskId}`);
+          return;
+        }
 
         const finalReplyIds = await this.sendFinalReply(ctx, placeholderId, session.agent, result);
         this.registerSessionMessages(ctx.chatId, finalReplyIds, session);
@@ -749,6 +763,12 @@ export class FeishuBot extends Bot {
           `tools=${formatToolLog(result.activity)}`,
         );
       } catch (e: any) {
+        if (task?.freezePreviewOnAbort && abortController.signal.aborted) {
+          const frozenMessageIds = await this.freezeSteerHandoffPreview(ctx, placeholderId, livePreview);
+          this.registerSessionMessages(ctx.chatId, frozenMessageIds, session);
+          this.log(`[handleMessage] steer handoff preserved preview after abort chat=${ctx.chatId} task=${taskId}`);
+          return;
+        }
         const msgText = String(e?.message || e || 'Unknown error');
         this.log(
           `[handleMessage] end chat=${ctx.chatId} agent=${session.agent} ok=false session=${session.sessionId || '(new)'} ` +
@@ -776,6 +796,27 @@ export class FeishuBot extends Bot {
       this.log(`[handleMessage] queue execution failed: ${e}`);
       this.finishTask(taskId);
     });
+  }
+
+  private async freezeSteerHandoffPreview(
+    ctx: FeishuContext,
+    placeholderId: string | null,
+    livePreview: LivePreview | null,
+  ): Promise<string[]> {
+    if (!placeholderId) return [];
+    const previewMarkdown = livePreview?.getRenderedPreview()?.trim() || '';
+    if (!previewMarkdown) return [placeholderId];
+    try {
+      if (this.channel.isStreamingCard(placeholderId)) {
+        await this.channel.endStreaming(placeholderId, 'Steered to a new reply.');
+      }
+      await this.channel.editMessage(ctx.chatId, placeholderId, previewMarkdown, {
+        keyboard: { rows: [] },
+      });
+      return [placeholderId];
+    } catch {
+      return [];
+    }
   }
 
   private async sendFinalReply(
@@ -989,7 +1030,7 @@ export class FeishuBot extends Bot {
   private async handleTaskSteerCallback(data: string, ctx: FeishuCallbackContext): Promise<boolean> {
     if (!data.startsWith('tsk:steer:')) return false;
     const actionId = data.slice('tsk:steer:'.length).trim();
-    const result = this.steerTaskByActionId(actionId);
+    const result = await this.steerTaskByActionId(actionId);
     if (!result.task) return true;
     // The queued task will naturally run next after the running task is interrupted
     return true;

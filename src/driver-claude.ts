@@ -4,7 +4,8 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { execSync } from 'node:child_process';
+import { execSync, spawn } from 'node:child_process';
+import { createInterface } from 'node:readline';
 import { registerDriver, type AgentDriver } from './agent-driver.js';
 import {
   type AgentInfo, type StreamOpts, type StreamResult,
@@ -13,22 +14,23 @@ import {
   type UsageOpts, type UsageResult, type UsageWindowInfo,
   type SessionInfo,
   // shared helpers
-  run, agentLog, detectAgentBin,
+  Q, run, agentLog, detectAgentBin,
   appendSystemPrompt, buildStreamPreviewMeta, pushRecentActivity,
-  summarizeClaudeToolUse, summarizeClaudeToolResult,
+  summarizeClaudeToolUse, summarizeClaudeToolResult, joinErrorMessages,
   IMAGE_EXTS, mimeForExt,
   listPikiclawSessions, findPikiclawSession, isPendingSessionId,
   mergeManagedAndNativeSessions,
   readTailLines, stripInjectedPrompts,
   roundPercent, toIsoFromEpochSeconds, modelFamily, normalizeClaudeModelId, emptyUsage, normalizeUsageStatus,
 } from './code-agent.js';
-import { SESSION_RUNNING_THRESHOLD_MS } from './constants.js';
+import { AGENT_STREAM_HARD_KILL_GRACE_MS, SESSION_RUNNING_THRESHOLD_MS } from './constants.js';
+import { terminateProcessTree } from './process-control.js';
 
 // ---------------------------------------------------------------------------
 // Multimodal stdin
 // ---------------------------------------------------------------------------
 
-function buildClaudeMultimodalStdin(prompt: string, attachments: string[]): string {
+function buildClaudeUserMessage(prompt: string, attachments: string[]): string {
   const content: any[] = [];
   for (const filePath of attachments) {
     const ext = path.extname(filePath).toLowerCase();
@@ -50,6 +52,12 @@ function buildClaudeMultimodalStdin(prompt: string, attachments: string[]): stri
   return JSON.stringify({ type: 'user', message: { role: 'user', content } }) + '\n';
 }
 
+function claudeUsesStreamJsonInput(o: StreamOpts): boolean {
+  return !!o.attachments?.length || !!o.onSteerReady;
+}
+
+const CLAUDE_STEER_IDLE_CLOSE_MS = 1200;
+
 // ---------------------------------------------------------------------------
 // Command & parser
 // ---------------------------------------------------------------------------
@@ -60,9 +68,10 @@ function claudeCmd(o: StreamOpts): string[] {
   if (model) args.push('--model', model);
   if (o.claudePermissionMode) args.push('--permission-mode', o.claudePermissionMode);
   if (o.sessionId) args.push('--resume', o.sessionId);
-  if (o.attachments?.length) {
+  if (claudeUsesStreamJsonInput(o)) {
     args.push('--input-format', 'stream-json');
-    o._stdinOverride = buildClaudeMultimodalStdin(o.prompt, o.attachments);
+    if (o.onSteerReady) args.push('--replay-user-messages');
+    if (o.attachments?.length) o._stdinOverride = buildClaudeUserMessage(o.prompt, o.attachments);
   }
   if (o.thinkingEffort) args.push('--effort', o.thinkingEffort);
   if (o.claudeAppendSystemPrompt) args.push('--append-system-prompt', o.claudeAppendSystemPrompt);
@@ -179,15 +188,306 @@ function claudeParse(ev: any, s: any) {
   }
 }
 
+function createClaudeStreamState(opts: StreamOpts) {
+  return {
+    sessionId: opts.sessionId,
+    text: '',
+    thinking: '',
+    msgs: [] as string[],
+    thinkParts: [] as string[],
+    model: opts.model,
+    thinkingEffort: opts.thinkingEffort,
+    errors: null as unknown[] | null,
+    inputTokens: null as number | null,
+    outputTokens: null as number | null,
+    cachedInputTokens: null as number | null,
+    cacheCreationInputTokens: null as number | null,
+    contextWindow: null as number | null,
+    contextUsedTokens: null as number | null,
+    codexCumulative: null,
+    stopReason: null as string | null,
+    activity: '',
+    recentActivity: [] as string[],
+    claudeToolsById: new Map<string, { name: string; summary: string }>(),
+    seenClaudeToolIds: new Set<string>(),
+  };
+}
+
+function resetClaudeTurnState(s: ReturnType<typeof createClaudeStreamState>, note?: string) {
+  s.text = '';
+  s.thinking = '';
+  s.msgs = [];
+  s.thinkParts = [];
+  s.errors = null;
+  s.inputTokens = null;
+  s.outputTokens = null;
+  s.cachedInputTokens = null;
+  s.cacheCreationInputTokens = null;
+  s.contextUsedTokens = null;
+  s.stopReason = null;
+  s.activity = '';
+  s.recentActivity = [];
+  s.claudeToolsById = new Map();
+  s.seenClaudeToolIds = new Set();
+  if (note) {
+    pushRecentActivity(s.recentActivity, note);
+    s.activity = s.recentActivity.join('\n');
+  }
+}
+
+async function doClaudeInteractiveStream(opts: StreamOpts): Promise<StreamResult> {
+  const start = Date.now();
+  const deadline = start + opts.timeout * 1000;
+  let stderr = '';
+  let lineCount = 0;
+  let timedOut = false;
+  let interrupted = false;
+  let stdinClosed = false;
+  let steerQueued = false;
+  let awaitingSteeredResponseStart = false;
+  let idleCloseTimer: NodeJS.Timeout | null = null;
+  const s = createClaudeStreamState(opts);
+
+  const cmd = claudeCmd(opts);
+  const shellCmd = cmd.map(Q).join(' ');
+  agentLog(`[spawn] full command: cd ${Q(opts.workdir)} && ${shellCmd}`);
+  agentLog(`[spawn] timeout: ${opts.timeout}s session: ${opts.sessionId || '(new)'}`);
+  agentLog(`[spawn] prompt (stdin): "${opts.prompt.slice(0, 300)}${opts.prompt.length > 300 ? '…' : ''}"`);
+
+  const spawnEnv = { ...process.env, ...(opts.extraEnv || {}) };
+  delete spawnEnv.CLAUDECODE;
+  const proc = spawn(shellCmd, {
+    cwd: opts.workdir,
+    env: spawnEnv,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    shell: true,
+    detached: process.platform !== 'win32',
+  });
+  agentLog(`[spawn] pid=${proc.pid}`);
+
+  const closeInput = () => {
+    if (idleCloseTimer) {
+      clearTimeout(idleCloseTimer);
+      idleCloseTimer = null;
+    }
+    if (stdinClosed) return;
+    stdinClosed = true;
+    try { proc.stdin?.end(); } catch {}
+  };
+
+  const emit = () => {
+    opts.onText(s.text, s.thinking, s.activity, buildStreamPreviewMeta(s), null);
+  };
+
+  const abortStream = () => {
+    if (interrupted || proc.killed) return;
+    interrupted = true;
+    s.stopReason = 'interrupted';
+    closeInput();
+    agentLog(`[abort] user interrupt, killing process tree pid=${proc.pid}`);
+    terminateProcessTree(proc, { signal: 'SIGTERM', forceSignal: 'SIGKILL', forceAfterMs: 5000 });
+  };
+  if (opts.abortSignal?.aborted) abortStream();
+  opts.abortSignal?.addEventListener('abort', abortStream, { once: true });
+
+  const scheduleIdleClose = () => {
+    if (idleCloseTimer) clearTimeout(idleCloseTimer);
+    idleCloseTimer = setTimeout(() => {
+      idleCloseTimer = null;
+      if (stdinClosed || interrupted || timedOut || proc.killed || proc.exitCode != null) return;
+      agentLog(`[stdin] closing Claude input after ${CLAUDE_STEER_IDLE_CLOSE_MS}ms idle result window`);
+      closeInput();
+    }, CLAUDE_STEER_IDLE_CLOSE_MS);
+  };
+
+  const startsClaudeFollowup = (ev: any): boolean => {
+    const evType = ev?.type || '';
+    if (evType === 'assistant') return true;
+    if (evType !== 'stream_event') return false;
+    const innerType = ev?.event?.type || '';
+    return innerType === 'message_start' || innerType === 'content_block_delta';
+  };
+
+  const sendInput = (
+    prompt: string,
+    attachments: string[] = [],
+    note?: string,
+    kind: 'initial' | 'steer' = 'steer',
+  ): boolean => {
+    if (stdinClosed || interrupted || timedOut || proc.killed || proc.exitCode != null) return false;
+    try {
+      proc.stdin?.write(buildClaudeUserMessage(prompt, attachments));
+      if (kind === 'steer') {
+        steerQueued = true;
+        if (idleCloseTimer) {
+          clearTimeout(idleCloseTimer);
+          idleCloseTimer = null;
+        }
+      }
+      if (note) {
+        pushRecentActivity(s.recentActivity, note);
+        s.activity = s.recentActivity.join('\n');
+        emit();
+      }
+      return true;
+    } catch (error: any) {
+      agentLog(`[stdin] failed to write Claude input: ${error?.message || error}`);
+      return false;
+    }
+  };
+
+  if (!sendInput(opts.prompt, opts.attachments || [], undefined, 'initial')) {
+    closeInput();
+  }
+  try {
+    opts.onSteerReady?.(async (prompt: string, attachments: string[] = []) => {
+      if (!sendInput(prompt, attachments, 'Queued steer input', 'steer')) return false;
+      return true;
+    });
+  } catch (error: any) {
+    agentLog(`[stdin] onSteerReady error: ${error?.message || error}`);
+  }
+
+  proc.stderr?.on('data', (c: Buffer) => {
+    const chunk = c.toString();
+    stderr += chunk;
+    agentLog(`[stderr] ${chunk.trim().slice(0, 200)}`);
+  });
+
+  const rl = createInterface({ input: proc.stdout!, crlfDelay: Infinity });
+  rl.on('line', raw => {
+    if (Date.now() > deadline) {
+      timedOut = true;
+      s.stopReason = 'timeout';
+      closeInput();
+      agentLog('[timeout] deadline exceeded, killing process tree');
+      terminateProcessTree(proc, { signal: 'SIGKILL' });
+      return;
+    }
+    const line = raw.trim();
+    if (!line || line[0] !== '{') return;
+    lineCount++;
+    try {
+      const ev = JSON.parse(line);
+      const evType = ev.type || '?';
+      if (evType !== 'result' && idleCloseTimer) {
+        clearTimeout(idleCloseTimer);
+        idleCloseTimer = null;
+      }
+      if (awaitingSteeredResponseStart && startsClaudeFollowup(ev)) {
+        awaitingSteeredResponseStart = false;
+        steerQueued = false;
+        resetClaudeTurnState(s);
+      }
+      if (evType === 'system' || evType === 'result' || evType === 'assistant') {
+        agentLog(`[event] type=${evType} session=${ev.session_id || s.sessionId || '?'} model=${ev.model || s.model || '?'}`);
+      }
+      if (evType === 'stream_event') {
+        const inner = ev.event || {};
+        if (inner.type === 'message_start' || inner.type === 'message_delta') {
+          agentLog(`[event] stream_event/${inner.type} session=${ev.session_id || s.sessionId || '?'}`);
+        }
+      }
+      claudeParse(ev, s);
+      if (evType === 'result') {
+        const hasError = !!ev.is_error || (Array.isArray(ev.errors) && ev.errors.length > 0);
+        if (hasError) {
+          awaitingSteeredResponseStart = false;
+          steerQueued = false;
+          closeInput();
+        } else if (steerQueued) {
+          awaitingSteeredResponseStart = true;
+          scheduleIdleClose();
+        } else {
+          closeInput();
+        }
+      }
+      emit();
+    } catch {}
+  });
+
+  const hardTimer = setTimeout(() => {
+    timedOut = true;
+    s.stopReason = 'timeout';
+    closeInput();
+    agentLog(`[timeout] hard deadline reached (${opts.timeout}s), killing process tree pid=${proc.pid}`);
+    terminateProcessTree(proc, { signal: 'SIGTERM', forceSignal: 'SIGKILL', forceAfterMs: 5000 });
+  }, opts.timeout * 1000 + AGENT_STREAM_HARD_KILL_GRACE_MS);
+
+  const [procOk, code] = await new Promise<[boolean, number | null]>(resolve => {
+    proc.on('close', code => {
+      clearTimeout(hardTimer);
+      if (idleCloseTimer) {
+        clearTimeout(idleCloseTimer);
+        idleCloseTimer = null;
+      }
+      agentLog(`[exit] code=${code} lines_parsed=${lineCount}`);
+      resolve([code === 0, code]);
+    });
+    proc.on('error', e => {
+      clearTimeout(hardTimer);
+      if (idleCloseTimer) {
+        clearTimeout(idleCloseTimer);
+        idleCloseTimer = null;
+      }
+      agentLog(`[error] ${e.message}`);
+      stderr += e.message;
+      resolve([false, -1]);
+    });
+  });
+  opts.abortSignal?.removeEventListener('abort', abortStream);
+
+  if (!s.text.trim() && s.msgs.length) s.text = s.msgs.join('\n\n');
+  if (!s.thinking.trim() && s.thinkParts.length) s.thinking = s.thinkParts.join('\n\n');
+
+  const errorText = joinErrorMessages(s.errors);
+  const ok = procOk && !s.errors && !timedOut && !interrupted;
+  const error = errorText
+    || (interrupted ? 'Interrupted by user.' : null)
+    || (timedOut ? `Timed out after ${opts.timeout}s before the agent reported completion.` : null)
+    || (!procOk ? (stderr.trim() || `Failed (exit=${code}).`) : null);
+  const incomplete = !ok || s.stopReason === 'max_tokens' || s.stopReason === 'timeout';
+  const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+  agentLog(`[result] ok=${ok && !s.errors} elapsed=${elapsed}s text=${s.text.length}chars thinking=${s.thinking.length}chars session=${s.sessionId || '?'}`);
+  if (errorText) agentLog(`[result] errors: ${errorText}`);
+  if (s.stopReason) agentLog(`[result] stop_reason=${s.stopReason}`);
+  if (stderr.trim() && !procOk) agentLog(`[result] stderr: ${stderr.trim().slice(0, 300)}`);
+
+  return {
+    ok,
+    sessionId: s.sessionId,
+    workspacePath: null,
+    model: s.model,
+    thinkingEffort: s.thinkingEffort,
+    message: s.text.trim() || errorText || (procOk ? '(no textual response)' : `Failed (exit=${code}).\n\n${stderr.trim() || '(no output)'}`),
+    thinking: s.thinking.trim() || null,
+    elapsedS: (Date.now() - start) / 1000,
+    inputTokens: s.inputTokens,
+    outputTokens: s.outputTokens,
+    cachedInputTokens: s.cachedInputTokens,
+    cacheCreationInputTokens: s.cacheCreationInputTokens,
+    contextWindow: s.contextWindow,
+    contextUsedTokens: s.contextUsedTokens,
+    contextPercent: roundPercent((s.contextUsedTokens || 0) / (s.contextWindow || 0)),
+    codexCumulative: null,
+    error,
+    stopReason: s.stopReason,
+    incomplete,
+    activity: s.activity.trim() || null,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Stream
 // ---------------------------------------------------------------------------
 
 export async function doClaudeStream(opts: StreamOpts): Promise<StreamResult> {
-  const result = await run(claudeCmd(opts), opts, claudeParse);
+  const result = opts.onSteerReady
+    ? await doClaudeInteractiveStream(opts)
+    : await run(claudeCmd(opts), opts, claudeParse);
   const retryText = `${result.error || ''}\n${result.message}`;
   if (!result.ok && opts.sessionId && /no conversation found/i.test(retryText)) {
-    return run(claudeCmd({ ...opts, sessionId: null }), { ...opts, sessionId: null }, claudeParse);
+    return doClaudeStream({ ...opts, sessionId: null });
   }
   return result;
 }

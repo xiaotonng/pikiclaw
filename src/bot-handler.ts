@@ -86,7 +86,7 @@ export async function stageFilesIntoSession(
 ): Promise<StageFilesResult> {
   const staged = stageSessionFiles({
     agent: session.agent,
-    workdir: bot.workdir,
+    workdir: session.workdir,
     files,
     sessionId: session.sessionId,
     title: undefined,

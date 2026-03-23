@@ -84,6 +84,12 @@ export type CodexInteractionRequest =
     questions: CodexInteractionQuestion[];
   };
 
+export interface CodexTurnControl {
+  threadId: string;
+  turnId: string;
+  steer: (prompt: string, attachments?: string[]) => Promise<boolean>;
+}
+
 export interface StreamOpts {
   agent: Agent;
   prompt: string;
@@ -132,6 +138,10 @@ export interface StreamOpts {
   abortSignal?: AbortSignal;
   /** Optional callback for Codex human-in-the-loop server requests. */
   onCodexInteractionRequest?: (request: CodexInteractionRequest) => Promise<Record<string, any> | null>;
+  /** Optional callback when a running agent can accept steer input in-place. */
+  onSteerReady?: (steer: (prompt: string, attachments?: string[]) => Promise<boolean>) => void;
+  /** Optional callback when a Codex turn can be steered in place. */
+  onCodexTurnReady?: (control: CodexTurnControl) => void;
 }
 
 export interface StreamResult {

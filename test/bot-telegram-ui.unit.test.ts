@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { buildAgentsCommandView } from '../src/bot-command-ui.ts';
 import { buildSwitchWorkdirView, resolveRegisteredPath } from '../src/bot-telegram-directory.ts';
 import {
   buildCompactSelectionNotice,
@@ -9,9 +10,11 @@ import {
   compactCode,
   formatMenuLines,
   formatProviderUsageLines,
+  renderCommandSelectionKeyboard,
   truncateMiddle,
 } from '../src/bot-telegram-render.ts';
 import { makeTmpDir } from './support/env.ts';
+import { createTelegramBotHarness } from './support/telegram-bot-harness.ts';
 
 describe('bot-telegram render helpers', () => {
   // NOTE: renderSessionTurnHtml and buildFinalReplyRender are covered by
@@ -99,6 +102,29 @@ describe('bot-telegram render helpers', () => {
 
     expect(html).toContain('The release job succeeded on GitHub');
     expect(html).not.toContain('\n...\n');
+  });
+
+  it('renders one agent button per row with version labels', () => {
+    const { bot, ctx } = createTelegramBotHarness();
+    vi.spyOn(bot, 'fetchAgents').mockReturnValue({
+      ok: true,
+      agents: [
+        { agent: 'claude', installed: true, version: '1.2.3', path: '/tmp/claude' } as any,
+        { agent: 'codex', installed: true, version: '9.9.9', path: '/tmp/codex' } as any,
+        { agent: 'gemini', installed: true, version: '2.0.0', path: '/tmp/gemini' } as any,
+      ],
+      error: null,
+    });
+    bot.chat(ctx.chatId).agent = 'codex';
+
+    const view = buildAgentsCommandView(bot, ctx.chatId);
+
+    expect(view.items).toEqual([]);
+    expect(renderCommandSelectionKeyboard(view)?.inline_keyboard).toEqual([
+      [{ text: 'claude 1.2.3', callback_data: 'ag:claude' }],
+      [{ text: '● codex 9.9.9', callback_data: 'ag:codex' }],
+      [{ text: 'gemini 2.0.0', callback_data: 'ag:gemini' }],
+    ]);
   });
 });
 

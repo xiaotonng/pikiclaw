@@ -190,7 +190,7 @@ export function buildAgentsCommandView(bot: Bot, chatId: ChatId): CommandSelecti
   const actions = data.agents
     .filter(agent => agent.installed)
     .map(agent => ({
-      label: agent.agent,
+      label: agent.version ? `${agent.agent} ${agent.version}` : agent.agent,
       action: { kind: 'agent.switch', agent: agent.agent as Agent } as CommandAction,
       state: buttonStateFromFlags({ isCurrent: agent.isCurrent }),
       primary: agent.isCurrent,
@@ -200,15 +200,9 @@ export function buildAgentsCommandView(bot: Bot, chatId: ChatId): CommandSelecti
     kind: 'agents',
     title: 'Agents',
     metaLines: [],
-    items: data.agents.map(agent => ({
-      label: agent.agent,
-      detail: agent.installed
-        ? (agent.version ? `Version ${agent.version}` : 'Installed')
-        : 'Not installed',
-      state: buttonStateFromFlags({ isCurrent: agent.isCurrent, unavailable: !agent.installed }),
-    })),
-    helperText: 'Use the controls below to switch agents.',
-    rows: chunkRows(actions, 3),
+    items: [],
+    emptyText: actions.length ? undefined : 'No installed agents.',
+    rows: actions.map(action => [action]),
   };
 }
 

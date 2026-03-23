@@ -109,6 +109,26 @@ describe('TelegramBot.sendFinalReply', () => {
   });
 });
 
+describe('TelegramBot steer handoff preview', () => {
+  it('freezes the previous preview content and clears its keyboard', async () => {
+    const harness = createBot();
+
+    const messageIds = await (harness.bot as any).freezeSteerHandoffPreview(
+      harness.ctx,
+      321,
+      { getRenderedPreview: () => '<b>Partial reply</b>' },
+    );
+
+    expect(messageIds).toEqual([321]);
+    expect(harness.edits).toEqual([
+      {
+        text: '<b>Partial reply</b>',
+        opts: { parseMode: 'HTML', keyboard: { inline_keyboard: [] } },
+      },
+    ]);
+  });
+});
+
 describe('TelegramBot.run shutdown and restart', () => {
   it('exits after SIGINT, treats shutdown as idempotent, and uses non-interactive npx restarts', async () => {
     // --- Sub-scenario 1: shutdown handling ---
@@ -273,10 +293,12 @@ describe('TelegramBot status and session previews', () => {
       await (bot as any).cmdAgents(ctx);
 
       expect(replies[0]?.text).toContain('<b>Agents</b>');
-      expect(replies[0]?.text).toContain('Version 1.2.3');
+      expect(replies[0]?.text).not.toContain('Version 1.2.3');
+      expect(replies[0]?.text).not.toContain('Use the controls below to switch agents.');
       expect(replies[0]?.text).not.toContain('Path:');
       expect(replies[0]?.opts?.keyboard?.inline_keyboard).toEqual([
-        [{ text: 'claude', callback_data: 'ag:claude' }, { text: '● codex', callback_data: 'ag:codex' }],
+        [{ text: 'claude 1.2.3', callback_data: 'ag:claude' }],
+        [{ text: '● codex 9.9.9', callback_data: 'ag:codex' }],
       ]);
 
       replies.length = 0;
@@ -665,5 +687,94 @@ describe('TelegramBot.handleMessage streaming', () => {
       await Promise.resolve();
       await Promise.resolve();
     }
+  });
+
+  it('restores reply follow-ups to the original workdir and agent after global switches', async () => {
+    const { bot, ctx } = createBot();
+    let nextReplyId = 3000;
+    ctx.reply = vi.fn(async () => nextReplyId++);
+    ctx.raw = { chat: { type: 'private' } };
+    bot.chat(ctx.chatId).agent = 'codex';
+
+    const originalWorkdir = bot.workdir;
+    const switchedWorkdir = makeTmpDir('bot-tg-reply-switched-');
+    const states: Array<{ agent: string; sessionId: string | null; workdir: string | null }> = [];
+
+    vi.spyOn(bot, 'runStream').mockImplementation(async (_prompt: string, state: any) => {
+      if (!state.sessionId || String(state.sessionId).startsWith('pending_')) {
+        const nextSessionId = 'sess-original';
+        const previousKey = state.key;
+        state.sessionId = nextSessionId;
+        state.key = (bot as any).sessionKey(state.agent, nextSessionId);
+        (bot as any).sessionStates.delete(previousKey);
+        (bot as any).sessionStates.set(state.key, state);
+        for (const [, chatState] of (bot as any).chats) {
+          if (chatState.activeSessionKey === previousKey) chatState.activeSessionKey = state.key;
+        }
+      }
+
+      states.push({
+        agent: state.agent,
+        sessionId: state.sessionId,
+        workdir: state.workdir ?? null,
+      });
+
+      return codexResult({
+        message: 'done',
+        sessionId: state.sessionId,
+        workspacePath: state.workspacePath,
+        elapsedS: 1,
+        inputTokens: 1,
+        outputTokens: 1,
+      });
+    });
+
+    const ctx1 = { ...ctx, messageId: 31, raw: { chat: { type: 'private' } } };
+    await (bot as any).handleMessage({ text: 'first turn', files: [] }, ctx1);
+    await vi.waitFor(() => {
+      expect(states).toHaveLength(1);
+    });
+
+    expect(states[0]).toMatchObject({
+      agent: 'codex',
+      sessionId: 'sess-original',
+      workdir: originalWorkdir,
+    });
+
+    const repliedMessageId = 3000;
+    bot.switchWorkdir(switchedWorkdir);
+    bot.switchAgentForChat(ctx.chatId, 'claude');
+
+    const ctx2 = {
+      ...ctx,
+      messageId: 32,
+      raw: {
+        chat: { type: 'private' },
+        reply_to_message: { message_id: repliedMessageId },
+      },
+    };
+    await (bot as any).handleMessage({ text: 'reply turn', files: [] }, ctx2);
+    await vi.waitFor(() => {
+      expect(states).toHaveLength(2);
+    });
+
+    expect(states[1]).toMatchObject({
+      agent: 'codex',
+      sessionId: 'sess-original',
+      workdir: originalWorkdir,
+    });
+    expect(bot.chat(ctx.chatId).agent).toBe('codex');
+
+    const ctx3 = { ...ctx, messageId: 33, raw: { chat: { type: 'private' } } };
+    await (bot as any).handleMessage({ text: 'plain follow up', files: [] }, ctx3);
+    await vi.waitFor(() => {
+      expect(states).toHaveLength(3);
+    });
+
+    expect(states[2]).toMatchObject({
+      agent: 'codex',
+      sessionId: 'sess-original',
+      workdir: originalWorkdir,
+    });
   });
 });

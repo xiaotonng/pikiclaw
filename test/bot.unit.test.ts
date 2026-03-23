@@ -94,6 +94,81 @@ describe('Bot.runStream', () => {
     expect(cs2.codexCumulative).toBeUndefined();
   });
 
+  it('uses the session workdir when continuing a session from another project', async () => {
+    const doStreamMock = vi.mocked(doStream);
+    const bot = new Bot();
+    const sessionWorkdir = makeTmpDir('bot-unit-session-workdir-');
+    const workspacePath = path.join(sessionWorkdir, '.pikiclaw', 'sessions', 'claude', 'session-1', 'workspace');
+    const runtime: any = {
+      key: 'claude:session-1',
+      workdir: sessionWorkdir,
+      agent: 'claude',
+      sessionId: 'session-1',
+      workspacePath,
+      codexCumulative: undefined,
+      modelId: null,
+      runningTaskIds: new Set<string>(),
+    };
+
+    doStreamMock.mockImplementationOnce(async opts => {
+      expect(opts.workdir).toBe(sessionWorkdir);
+      return makeStreamResult('claude', {
+        sessionId: 'session-1',
+        workspacePath,
+        elapsedS: 1,
+        inputTokens: 1,
+        outputTokens: 1,
+      });
+    });
+
+    await bot.runStream('continue', runtime, [], () => {});
+  });
+});
+
+describe('Bot steering handoff', () => {
+  it('interrupts the running task and preserves its preview instead of using in-process steer', async () => {
+    const bot = new Bot() as any;
+    const runtime = bot.upsertSessionRuntime({
+      agent: 'claude',
+      sessionId: 'sess-steer',
+      workdir: process.env.PIKICLAW_WORKDIR!,
+      workspacePath: null,
+      modelId: null,
+    });
+
+    const runningAbort = vi.fn();
+    const runningSteer = vi.fn(async () => true);
+    bot.beginTask({
+      taskId: 'run-1',
+      chatId: 1,
+      agent: 'claude',
+      sessionKey: runtime.key,
+      prompt: 'first task',
+      startedAt: Date.now() - 1000,
+      sourceMessageId: 10,
+    });
+    bot.markTaskRunning('run-1', runningAbort);
+    bot.activeTasks.get('run-1').steer = runningSteer;
+
+    bot.beginTask({
+      taskId: 'queued-1',
+      chatId: 1,
+      agent: 'claude',
+      sessionKey: runtime.key,
+      prompt: 'name only',
+      startedAt: Date.now(),
+      sourceMessageId: 11,
+    });
+
+    const result = await bot.steerTaskByActionId(bot.actionIdForTask('queued-1'));
+
+    expect(result.steered).toBe(false);
+    expect(result.interrupted).toBe(true);
+    expect(runningSteer).not.toHaveBeenCalled();
+    expect(runningAbort).toHaveBeenCalledTimes(1);
+    expect(bot.activeTasks.get('run-1')?.freezePreviewOnAbort).toBe(true);
+    expect(bot.activeTasks.get('queued-1')?.cancelled).toBe(false);
+  });
 });
 
 describe('Bot gitignore management', () => {

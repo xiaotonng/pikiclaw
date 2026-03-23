@@ -913,6 +913,146 @@ exit 1`;
     expect(empty.message).toBe('(no textual response)');
   });
 
+  it('exposes in-process Claude steering and keeps only the latest steered response', async () => {
+    const argsFile = path.join(tmpDir, 'claude-steer-args.txt');
+    const inputsFile = path.join(tmpDir, 'claude-steer-inputs.jsonl');
+    const script = `#!/usr/bin/env node
+const fs = require('node:fs');
+const readline = require('node:readline');
+fs.writeFileSync(${JSON.stringify(argsFile)}, process.argv.slice(2).join(' '));
+let inputCount = 0;
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+rl.on('line', (line) => {
+  if (!line.trim()) return;
+  fs.appendFileSync(${JSON.stringify(inputsFile)}, line + '\\n');
+  inputCount += 1;
+  if (inputCount === 1) {
+    process.stdout.write(JSON.stringify({ type: 'system', session_id: 's-steer', model: 'claude-sonnet-4-6' }) + '\\n');
+    setTimeout(() => {
+      process.stdout.write(JSON.stringify({
+        type: 'stream_event',
+        event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'First answer' } },
+      }) + '\\n');
+      process.stdout.write(JSON.stringify({
+        type: 'result',
+        session_id: 's-steer',
+        usage: { input_tokens: 10, output_tokens: 4 },
+      }) + '\\n');
+    }, 150);
+    return;
+  }
+  setTimeout(() => {
+    process.stdout.write(JSON.stringify({
+      type: 'stream_event',
+      event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Updated answer' } },
+    }) + '\\n');
+    process.stdout.write(JSON.stringify({
+      type: 'result',
+      session_id: 's-steer',
+      usage: { input_tokens: 12, output_tokens: 5 },
+    }) + '\\n');
+    process.exit(0);
+  }, 220);
+});
+rl.on('close', () => setTimeout(() => process.exit(0), 30));`;
+    fs.writeFileSync(path.join(fakeBin, 'claude'), script, { mode: 0o755 });
+
+    let steer: ((prompt: string, attachments?: string[]) => Promise<boolean>) | null = null;
+    const streamPromise = doClaudeStream(baseOpts('claude', {
+      onSteerReady: value => { steer = value; },
+    }));
+
+    const deadline = Date.now() + 1500;
+    while (!steer && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+
+    const notesPath = path.join(tmpDir, 'notes.txt');
+    const steered = await steer?.('change direction', [notesPath]);
+    expect(steered).toBe(true);
+
+    const result = await streamPromise;
+    expect(result.ok).toBe(true);
+    expect(result.sessionId).toBe('s-steer');
+    expect(result.message).toBe('Updated answer');
+
+    const argv = fs.readFileSync(argsFile, 'utf-8');
+    expect(argv).toContain('--input-format');
+    expect(argv).toContain('--replay-user-messages');
+
+    const inputs = fs.readFileSync(inputsFile, 'utf-8')
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map(line => JSON.parse(line));
+    expect(inputs).toHaveLength(2);
+    expect(inputs[0]?.message?.content).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'text', text: 'test prompt' }),
+    ]));
+    expect(inputs[1]?.message?.content).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'text', text: expect.stringContaining(notesPath) }),
+      expect.objectContaining({ type: 'text', text: 'change direction' }),
+    ]));
+  });
+
+  it('auto-closes Claude stdin after a coalesced steered result without dropping the answer', async () => {
+    const inputsFile = path.join(tmpDir, 'claude-steer-coalesced-inputs.jsonl');
+    const script = `#!/usr/bin/env node
+const fs = require('node:fs');
+const readline = require('node:readline');
+let inputCount = 0;
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+rl.on('line', (line) => {
+  if (!line.trim()) return;
+  fs.appendFileSync(${JSON.stringify(inputsFile)}, line + '\\n');
+  inputCount += 1;
+  if (inputCount === 1) {
+    process.stdout.write(JSON.stringify({ type: 'system', session_id: 's-coalesced', model: 'claude-sonnet-4-6' }) + '\\n');
+    return;
+  }
+  setTimeout(() => {
+    process.stdout.write(JSON.stringify({
+      type: 'stream_event',
+      session_id: 's-coalesced',
+      event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Steered final answer' } },
+    }) + '\\n');
+    process.stdout.write(JSON.stringify({
+      type: 'result',
+      session_id: 's-coalesced',
+      usage: { input_tokens: 11, output_tokens: 4 },
+    }) + '\\n');
+  }, 120);
+});
+rl.on('close', () => process.exit(0));`;
+    fs.writeFileSync(path.join(fakeBin, 'claude'), script, { mode: 0o755 });
+
+    let steer: ((prompt: string, attachments?: string[]) => Promise<boolean>) | null = null;
+    const streamPromise = doClaudeStream(baseOpts('claude', {
+      onSteerReady: value => { steer = value; },
+    }));
+
+    const deadline = Date.now() + 1500;
+    while (!steer && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+
+    const steered = await steer?.('narrow it down');
+    expect(steered).toBe(true);
+
+    const result = await streamPromise;
+    expect(result.ok).toBe(true);
+    expect(result.sessionId).toBe('s-coalesced');
+    expect(result.message).toBe('Steered final answer');
+    expect(result.elapsedS).toBeLessThan(3);
+
+    const inputs = fs.readFileSync(inputsFile, 'utf-8')
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map(line => JSON.parse(line));
+    expect(inputs).toHaveLength(2);
+  });
+
   it('exposes the native codex session id before the turn finishes', async () => {
     const script = `#!/usr/bin/env node
 const readline = require('node:readline');
@@ -976,6 +1116,144 @@ rl.on('line', (line) => {
     const result = await streamPromise;
     expect(result.ok).toBe(true);
     expect(result.sessionId).toBe('thread-early');
+  });
+
+  it('exposes native codex steering and forwards steer input to turn/steer', async () => {
+    const callsFile = path.join(tmpDir, 'codex-steer-calls.jsonl');
+    const script = `#!/usr/bin/env node
+const fs = require('node:fs');
+const readline = require('node:readline');
+const callsFile = ${JSON.stringify(callsFile)};
+let completed = false;
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+const finishTurn = () => {
+  if (completed) return;
+  completed = true;
+  process.stdout.write(JSON.stringify({
+    method: 'item/started',
+    params: { threadId: 'thread-steer', item: { id: 'msg-steer', type: 'agentMessage', phase: 'final_answer' } },
+  }) + '\\n');
+  process.stdout.write(JSON.stringify({
+    method: 'item/agentMessage/delta',
+    params: { threadId: 'thread-steer', itemId: 'msg-steer', delta: 'done' },
+  }) + '\\n');
+  process.stdout.write(JSON.stringify({
+    method: 'turn/completed',
+    params: { threadId: 'thread-steer', turn: { id: 'turn-steer', status: 'completed' } },
+  }) + '\\n');
+};
+rl.on('line', (line) => {
+  if (!line.trim()) return;
+  const msg = JSON.parse(line);
+  fs.appendFileSync(callsFile, JSON.stringify(msg) + '\\n');
+
+  if (msg.method === 'initialize') {
+    process.stdout.write(JSON.stringify({ id: msg.id, result: {} }) + '\\n');
+    return;
+  }
+
+  if (msg.method === 'thread/start') {
+    process.stdout.write(JSON.stringify({
+      id: msg.id,
+      result: { thread: { id: 'thread-steer' }, model: msg.params.model || 'gpt-5.4' },
+    }) + '\\n');
+    return;
+  }
+
+  if (msg.method === 'turn/start') {
+    process.stdout.write(JSON.stringify({ id: msg.id, result: { turn: { id: 'turn-steer' } } }) + '\\n');
+    process.stdout.write(JSON.stringify({
+      method: 'turn/started',
+      params: { threadId: 'thread-steer', turn: { id: 'turn-steer' } },
+    }) + '\\n');
+    setTimeout(finishTurn, 200);
+    return;
+  }
+
+  if (msg.method === 'turn/steer') {
+    process.stdout.write(JSON.stringify({ id: msg.id, result: { turnId: 'turn-steer' } }) + '\\n');
+    return;
+  }
+
+  process.stdout.write(JSON.stringify({ id: msg.id, error: { message: 'unexpected method' } }) + '\\n');
+});`;
+    fs.writeFileSync(path.join(fakeBin, 'codex'), script, { mode: 0o755 });
+
+    let control: { turnId: string; steer: (prompt: string, attachments?: string[]) => Promise<boolean> } | null = null;
+    const streamPromise = doCodexStream(baseOpts('codex', {
+      onCodexTurnReady: value => { control = value; },
+    }));
+
+    const deadline = Date.now() + 1500;
+    while (!control && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+
+    expect(control?.turnId).toBe('turn-steer');
+    const steered = await control!.steer('switch direction', [path.join(tmpDir, 'notes.txt')]);
+    expect(steered).toBe(true);
+
+    const result = await streamPromise;
+    expect(result.ok).toBe(true);
+
+    const calls = fs.readFileSync(callsFile, 'utf-8')
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map(line => JSON.parse(line));
+    const steerCall = calls.find(call => call.method === 'turn/steer');
+    expect(steerCall?.params).toEqual({
+      threadId: 'thread-steer',
+      expectedTurnId: 'turn-steer',
+      input: buildCodexTurnInput('switch direction', [path.join(tmpDir, 'notes.txt')]),
+    });
+  });
+
+  it('surfaces raw response items like web search calls in codex activity', async () => {
+    const script = `#!/usr/bin/env node
+const readline = require('node:readline');
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+rl.on('line', (line) => {
+  if (!line.trim()) return;
+  const msg = JSON.parse(line);
+
+  if (msg.method === 'initialize') {
+    process.stdout.write(JSON.stringify({ id: msg.id, result: {} }) + '\\n');
+    return;
+  }
+
+  if (msg.method === 'thread/start') {
+    process.stdout.write(JSON.stringify({
+      id: msg.id,
+      result: { thread: { id: 'thread-raw' }, model: msg.params.model || 'gpt-5.4' },
+    }) + '\\n');
+    return;
+  }
+
+  if (msg.method === 'turn/start') {
+    process.stdout.write(JSON.stringify({ id: msg.id, result: { turn: { id: 'turn-raw' } } }) + '\\n');
+    process.stdout.write(JSON.stringify({
+      method: 'rawResponseItem/completed',
+      params: {
+        threadId: 'thread-raw',
+        turnId: 'turn-raw',
+        item: { type: 'web_search_call', action: { type: 'search', query: 'latest gold price' } },
+      },
+    }) + '\\n');
+    process.stdout.write(JSON.stringify({
+      method: 'turn/completed',
+      params: { threadId: 'thread-raw', turn: { id: 'turn-raw', status: 'completed' } },
+    }) + '\\n');
+    return;
+  }
+
+  process.stdout.write(JSON.stringify({ id: msg.id, error: { message: 'unexpected method' } }) + '\\n');
+});`;
+    fs.writeFileSync(path.join(fakeBin, 'codex'), script, { mode: 0o755 });
+
+    const result = await doCodexStream(baseOpts('codex'));
+    expect(result.ok).toBe(true);
+    expect(result.activity).toContain('Search web: latest gold price');
   });
 });
 

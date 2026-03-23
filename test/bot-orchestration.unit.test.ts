@@ -41,17 +41,17 @@ describe('bot-orchestration helpers', () => {
     expect(buildSessionTaskId({ key: 'codex:sess-1' } as any, 7, 123456789)).toBe('codex:sess-1:21i3v9:7');
 
     const registry = new SessionMessageRegistry<number, number>(2);
-    const session = { key: 'codex:sess-1', workdir: '/tmp/workdir' };
+    const session = { key: 'codex:sess-1', workdir: '/tmp/workdir', agent: 'codex', sessionId: 'sess-1' };
 
     registry.register(1, 100, session as any, '/tmp/workdir');
     registry.register(1, 101, session as any, '/tmp/workdir');
     registry.register(1, 102, session as any, '/tmp/workdir');
     registry.register(1, Number.NaN, session as any, '/tmp/workdir');
-    registry.register(1, 103, { key: 'codex:sess-2', workdir: '/tmp/other' } as any, '/tmp/workdir');
+    registry.register(1, 103, { key: 'codex:sess-2', workdir: '/tmp/other', agent: 'codex', sessionId: 'sess-2' } as any, '/tmp/workdir');
 
     expect(registry.resolve(1, 100)).toBeNull();
-    expect(registry.resolve(1, 101)).toBe('codex:sess-1');
-    expect(registry.resolve(1, 102)).toBe('codex:sess-1');
+    expect(registry.resolve(1, 101)).toMatchObject({ key: 'codex:sess-1', workdir: '/tmp/workdir', agent: 'codex', sessionId: 'sess-1' });
+    expect(registry.resolve(1, 102)).toMatchObject({ key: 'codex:sess-1', workdir: '/tmp/workdir', agent: 'codex', sessionId: 'sess-1' });
     expect(registry.resolve(1, 103)).toBeNull();
   });
 });
