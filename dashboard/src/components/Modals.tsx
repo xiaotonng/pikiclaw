@@ -1,9 +1,10 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useStore } from '../store';
 import { createT } from '../i18n';
 import { api } from '../api';
 import { Modal, ModalHeader, Button, Input, Label, Badge } from './ui';
 import { fmtTime, getAgentMeta, sessionDisplayDetail, sessionDisplayState } from '../utils';
+import { DirBrowser } from './DirBrowser';
 import type { BrowserStatusResponse, SessionInfo, SessionTailMessage, DirEntry } from '../types';
 
 const DEFAULT_WEIXIN_BASE_URL = 'https://ilinkai.weixin.qq.com';
@@ -24,8 +25,11 @@ function requestErrorText(error: unknown, t: (key: string) => string): string {
    Telegram Modal
    ═══════════════════════════════════════════════════ */
 export function TelegramModal({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const { state, toast, reloadUntil, locale } = useStore();
-  const t = createT(locale);
+  const state = useStore(s => s.state);
+  const toast = useStore(s => s.toast);
+  const reloadUntil = useStore(s => s.reloadUntil);
+  const locale = useStore(s => s.locale);
+  const t = useMemo(() => createT(locale), [locale]);
   const [token, setToken] = useState('');
   const [ids, setIds] = useState('');
   const [showToken, setShowToken] = useState(false);
@@ -156,8 +160,11 @@ export function TelegramModal({ open, onClose }: { open: boolean; onClose: () =>
    Feishu Modal
    ═══════════════════════════════════════════════════ */
 export function FeishuModal({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const { state, toast, reloadUntil, locale } = useStore();
-  const t = createT(locale);
+  const state = useStore(s => s.state);
+  const toast = useStore(s => s.toast);
+  const reloadUntil = useStore(s => s.reloadUntil);
+  const locale = useStore(s => s.locale);
+  const t = useMemo(() => createT(locale), [locale]);
   const [appId, setAppId] = useState('');
   const [secret, setSecret] = useState('');
   const [saving, setSaving] = useState(false);
@@ -274,8 +281,11 @@ export function FeishuModal({ open, onClose }: { open: boolean; onClose: () => v
    Weixin Modal
    ═══════════════════════════════════════════════════ */
 export function WeixinModal({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const { state, toast, reloadUntil, locale } = useStore();
-  const t = createT(locale);
+  const state = useStore(s => s.state);
+  const toast = useStore(s => s.toast);
+  const reloadUntil = useStore(s => s.reloadUntil);
+  const locale = useStore(s => s.locale);
+  const t = useMemo(() => createT(locale), [locale]);
   const [baseUrl, setBaseUrl] = useState(DEFAULT_WEIXIN_BASE_URL);
   const [busy, setBusy] = useState(false);
   const [qrUrl, setQrUrl] = useState('');
@@ -465,44 +475,26 @@ export function WeixinModal({ open, onClose }: { open: boolean; onClose: () => v
    Workdir Modal
    ═══════════════════════════════════════════════════ */
 export function WorkdirModal({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const { state, toast, reload, locale } = useStore();
-  const t = createT(locale);
+  const state = useStore(s => s.state);
+  const toast = useStore(s => s.toast);
+  const reload = useStore(s => s.reload);
+  const locale = useStore(s => s.locale);
+  const t = useMemo(() => createT(locale), [locale]);
   const runtimeWorkdir = state?.bot?.workdir || state?.runtimeWorkdir || '';
-  const [currentPath, setCurrentPath] = useState('');
-  const [inputPath, setInputPath] = useState('');
-  const [dirs, setDirs] = useState<DirEntry[]>([]);
-  const [parentDir, setParentDir] = useState('');
-  const [isGit, setIsGit] = useState(false);
-  const [breadcrumbs, setBreadcrumbs] = useState<{ label: string; path: string }[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-
-  const browse = useCallback(async (dir?: string) => {
-    setLoading(true);
-    setError('');
-    try {
-      const r = await api.lsDir(dir);
-      if (!r.ok) { setError(r.error || t('modal.cannotRead')); return; }
-      setCurrentPath(r.path);
-      setInputPath(r.path);
-      setDirs(r.dirs);
-      setParentDir(r.parent);
-      setIsGit(r.isGit);
-      const parts = r.path.split('/').filter(Boolean);
-      let acc = '';
-      setBreadcrumbs(parts.map(p => { acc += '/' + p; return { label: p, path: acc }; }));
-    } catch { setError(t('modal.loadFailed')); }
-    finally { setLoading(false); }
-  }, [t]);
+  const [selectedPath, setSelectedPath] = useState('');
+  // Reset key forces DirBrowser to re-initialize when modal reopens
+  const [browseKey, setBrowseKey] = useState(0);
 
   useEffect(() => {
-    if (open) {
-      browse(runtimeWorkdir || undefined);
-    }
-  }, [open, runtimeWorkdir, browse]);
+    if (open) { setSelectedPath(runtimeWorkdir); setBrowseKey(k => k + 1); }
+  }, [open, runtimeWorkdir]);
+
+  const handleSelect = useCallback((path: string) => {
+    setSelectedPath(path);
+  }, []);
 
   const handleConfirm = async () => {
-    const p = inputPath.trim() || currentPath;
+    const p = selectedPath.trim();
     if (!p) { toast(t('modal.selectDirFirst'), false); return; }
     try {
       const r = await api.switchWorkdir(p);
@@ -510,8 +502,6 @@ export function WorkdirModal({ open, onClose }: { open: boolean; onClose: () => 
       else toast(r.error || t('modal.switchFailed'), false);
     } catch { toast(t('modal.switchFailed'), false); }
   };
-
-  const escHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
   return (
     <Modal
@@ -523,76 +513,7 @@ export function WorkdirModal({ open, onClose }: { open: boolean; onClose: () => 
       }}
     >
       <ModalHeader title={t('modal.switchWorkdir')} onClose={onClose} />
-
-      <div className="flex items-center gap-1 text-[11px] font-mono text-fg-4 mb-3 flex-wrap">
-        <span className="cursor-pointer hover:text-fg-2 transition-colors" onClick={() => browse('/')}>~</span>
-        {breadcrumbs.map((b, i) => (
-          <span key={i}>
-            <span className="text-fg-6">/</span>
-            <span className="cursor-pointer hover:text-fg-2 transition-colors" onClick={() => browse(b.path)}>{b.label}</span>
-          </span>
-        ))}
-        {isGit && <Badge variant="accent" className="ml-1 !text-[9px] !py-0 !px-1.5">git</Badge>}
-      </div>
-
-      <div className="relative">
-        <div
-          className="pointer-events-none absolute inset-x-0 top-0 z-10 h-5 rounded-t-lg"
-          style={{ background: 'linear-gradient(to bottom, var(--th-panel-alt), rgba(0, 0, 0, 0))' }}
-        />
-        <div
-          className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-5 rounded-b-lg"
-          style={{ background: 'linear-gradient(to top, var(--th-panel-alt), rgba(0, 0, 0, 0))' }}
-        />
-        <div
-          className="border border-edge rounded-lg overflow-y-auto overscroll-contain scroll-smooth bg-panel-alt"
-          style={{ maxHeight: 420, minHeight: 240, scrollbarGutter: 'stable' }}
-        >
-          {loading ? (
-            <div className="text-xs text-fg-5 p-4 text-center">{t('sessions.loading')}</div>
-          ) : error ? (
-            <div className="text-xs text-red-500/70 p-4">{error}</div>
-          ) : (
-            <>
-              {parentDir && parentDir !== currentPath && (
-                <div
-                  className="flex items-center gap-2.5 px-3 py-2 cursor-pointer hover:bg-panel transition-colors border-b border-edge"
-                  onClick={() => browse(parentDir)}
-                >
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className="text-fg-5 shrink-0"><polyline points="15 18 9 12 15 6"/></svg>
-                  <span className="text-xs text-fg-4">..</span>
-                </div>
-              )}
-              {dirs.length === 0 && !parentDir && (
-                <div className="text-xs text-fg-5 p-4 text-center">{t('modal.emptyDir')}</div>
-              )}
-              {dirs.map(d => (
-                <div
-                  key={d.path}
-                  className="flex items-center gap-2.5 px-3 py-[7px] cursor-pointer hover:bg-panel transition-colors"
-                  onClick={() => browse(d.path)}
-                >
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={d.name === '.git' ? 'var(--th-primary)' : 'currentColor'} strokeWidth="1.8" className="text-fg-5 shrink-0">
-                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-                  </svg>
-                  <span className="text-xs text-fg-3">{escHtml(d.name)}</span>
-                </div>
-              ))}
-            </>
-          )}
-        </div>
-      </div>
-
-      <div className="mt-3">
-        <Input
-          className="font-mono text-xs"
-          placeholder={t('modal.manualInput')}
-          value={inputPath}
-          onChange={e => setInputPath(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter') browse(inputPath); }}
-        />
-      </div>
-
+      <DirBrowser key={browseKey} initialPath={runtimeWorkdir} onSelect={handleSelect} t={t} />
       <div className="flex justify-end gap-2 mt-4">
         <Button variant="ghost" onClick={onClose}>{t('modal.cancel')}</Button>
         <Button variant="primary" onClick={handleConfirm}>{t('modal.selectDir')}</Button>
@@ -608,8 +529,8 @@ export function SessionDetailModal({ open, onClose, agent, sessionId, session }:
   open: boolean; onClose: () => void;
   agent: string; sessionId: string; session: SessionInfo | null;
 }) {
-  const { locale } = useStore();
-  const t = createT(locale);
+  const locale = useStore(s => s.locale);
+  const t = useMemo(() => createT(locale), [locale]);
   const [messages, setMessages] = useState<SessionTailMessage[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -737,8 +658,9 @@ export function SessionDetailModal({ open, onClose, agent, sessionId, session }:
    Managed Browser Setup Modal
    ═══════════════════════════════════════════════════ */
 export function BrowserSetupModal({ open, onClose, onSaved }: { open: boolean; onClose: () => void; onSaved?: () => void }) {
-  const { toast, locale } = useStore();
-  const t = createT(locale);
+  const toast = useStore(s => s.toast);
+  const locale = useStore(s => s.locale);
+  const t = useMemo(() => createT(locale), [locale]);
   const [status, setStatus] = useState<BrowserStatusResponse | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [enabled, setEnabled] = useState(false);
@@ -928,8 +850,9 @@ export function BrowserSetupModal({ open, onClose, onSaved }: { open: boolean; o
    Desktop Setup Modal
    ═══════════════════════════════════════════════════ */
 export function DesktopSetupModal({ open, onClose, onSaved }: { open: boolean; onClose: () => void; onSaved?: () => void }) {
-  const { toast, locale } = useStore();
-  const t = createT(locale);
+  const toast = useStore(s => s.toast);
+  const locale = useStore(s => s.locale);
+  const t = useMemo(() => createT(locale), [locale]);
   const [installing, setInstalling] = useState(false);
   const [installed, setInstalled] = useState(false);
   const [enabled, setEnabled] = useState(false);

@@ -1,6 +1,6 @@
 {
   "name": "pikiclaw",
-  "version": "0.2.73",
+  "version": "0.3.1",
   "description": "Put the world's smartest AI agents in your pocket. Command local Claude & Gemini via IM. | 让最好用的 IM 变成你电脑上的顶级 Agent 控制台",
   "type": "module",
   "bin": {
@@ -8,6 +8,7 @@
   },
   "files": [
     "dist/",
+    "dashboard/dist/",
     "LICENSE",
     "README.md"
   ],
@@ -29,11 +30,10 @@
   "scripts": {
     "dev": "bash scripts/dev.sh",
     "command": "set -ae && . ./.env && set +a && tsx src/run.ts",
-    "build:dashboard": "tsx scripts/build-dashboard.ts",
+    "build:dashboard": "vite build --config dashboard/vite.config.ts",
     "build": "npm run build:dashboard && tsc",
     "prepack": "npm run build",
     "test": "vitest run",
-    "test:e2e": "set -ae && . ./.env && set +a && vitest run --config vitest.e2e.config.ts test/e2e/",
     "test:watch": "vitest"
   },
   "engines": {
@@ -48,15 +48,20 @@
     "@vitejs/plugin-react": "^5.1.4",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
     "tailwindcss": "^4.2.1",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
-    "vite-plugin-singlefile": "^2.3.0",
-    "vitest": "^4.0.18"
+    "react-router-dom": "^7.13.2",
+    "vitest": "^4.0.18",
+    "zustand": "^5.0.12"
   },
   "dependencies": {
+    "@hono/node-server": "^1.19.11",
     "@larksuiteoapi/node-sdk": "^1.59.0",
     "@playwright/mcp": "0.0.68",
+    "hono": "^4.12.9",
     "qrcode": "^1.5.4",
     "undici": "^7.22.0"
   }

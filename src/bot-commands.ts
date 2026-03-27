@@ -12,7 +12,7 @@
 import path from 'node:path';
 import type { Bot, ChatId, Agent, SessionInfo, SessionRuntime, ChatState, StreamResult } from './bot.js';
 import { fmtTokens, fmtUptime, fmtBytes } from './bot.js';
-import { getProjectSkillPaths, normalizeClaudeModelId } from './code-agent.js';
+import { getProjectSkillPaths, normalizeClaudeModelId, sanitizeSessionUserPreviewText } from './code-agent.js';
 import { getDriver } from './agent-driver.js';
 import { buildWelcomeIntro, buildSkillCommandName, indexSkillsByCommand, SKILL_CMD_PREFIX } from './bot-menu.js';
 import { buildBotMenuState } from './bot-orchestration.js';
@@ -64,6 +64,11 @@ export function getStartData(bot: Bot, chatId: ChatId): StartData {
 // ---------------------------------------------------------------------------
 // Sessions
 // ---------------------------------------------------------------------------
+
+function sessionListDisplayText(session: Pick<SessionInfo, 'lastQuestion' | 'title' | 'sessionId'>): string {
+  const question = sanitizeSessionUserPreviewText(String(session.lastQuestion || ''));
+  return question || session.title || session.sessionId || '';
+}
 
 export interface SessionEntry {
   key: string;
@@ -136,7 +141,8 @@ export async function getSessionsPageData(bot: Bot, chatId: ChatId, page: number
       runState: status.isRunning ? 'running' : s.runState,
       runDetail: s.runDetail,
     });
-    const title = s.title ? s.title.replace(/\n/g, ' ').slice(0, 20) : sessionKey.slice(0, 20);
+    const displayText = sessionListDisplayText(s);
+    const title = displayText ? displayText.replace(/\n/g, ' ').slice(0, 20) : sessionKey.slice(0, 20);
     const time = s.createdAt
       ? new Date(s.createdAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
       : '?';
@@ -306,6 +312,7 @@ const EFFORT_LEVELS: Record<string, { id: string; label: string }[]> = {
     { id: 'low', label: 'Low' },
     { id: 'medium', label: 'Medium' },
     { id: 'high', label: 'High' },
+    { id: 'max', label: 'Max' },
   ],
   codex: [
     { id: 'low', label: 'Low' },

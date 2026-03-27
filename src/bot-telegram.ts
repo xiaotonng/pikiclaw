@@ -561,7 +561,7 @@ export class TelegramBot extends Bot {
       const stageTask = this.queueSessionTask(session, async () => {
         try {
           if (this.isSourceMessageWithdrawn(ctx.chatId, ctx.messageId)) {
-            this.log(`[handleMessage] skipped withdrawn file stage chat=${ctx.chatId} msg=${ctx.messageId}`);
+            this.debug(`[handleMessage] skipped withdrawn file stage chat=${ctx.chatId} msg=${ctx.messageId}`);
             return;
           }
           const staged = stageSessionFiles({
@@ -570,22 +570,24 @@ export class TelegramBot extends Bot {
             files: msg.files,
             sessionId: session.sessionId,
             title: undefined,
+            threadId: session.threadId,
           });
           session.workspacePath = staged.workspacePath;
+          session.threadId = staged.threadId;
           this.syncSelectedChats(session);
           if (!staged.importedFiles.length) throw new Error('no files persisted');
-          this.log(`[handleMessage] staged workspace files chat=${ctx.chatId} session=${staged.sessionId} files=${staged.importedFiles.length}`);
+          this.debug(`[handleMessage] staged workspace files chat=${ctx.chatId} session=${staged.sessionId} files=${staged.importedFiles.length}`);
           this.registerSessionMessage(ctx.chatId, ctx.messageId, session);
           await this.safeSetMessageReaction(ctx.chatId, ctx.messageId, ['👌']);
         } catch (e: any) {
-          this.log(`[handleMessage] stage files failed: ${e?.message || e}`);
+          this.warn(`[handleMessage] stage files failed: ${e?.message || e}`);
           await this.safeSetMessageReaction(ctx.chatId, ctx.messageId, ['⚠️']);
         }
       });
       if (hadPendingWork) {
-        void stageTask.catch(e => this.log(`[handleMessage] stage queue failed: ${e}`));
+        void stageTask.catch(e => this.warn(`[handleMessage] stage queue failed: ${e}`));
       } else {
-        await stageTask.catch(e => this.log(`[handleMessage] stage queue failed: ${e}`));
+        await stageTask.catch(e => this.warn(`[handleMessage] stage queue failed: ${e}`));
       }
       return;
     }
@@ -595,7 +597,7 @@ export class TelegramBot extends Bot {
     const start = Date.now();
     const canEditMessages = supportsChannelCapability((this as any).channel, 'editMessages');
     const canSendTyping = supportsChannelCapability((this as any).channel, 'typingIndicators');
-    this.log(`[handleMessage] queued chat=${ctx.chatId} agent=${session.agent} session=${session.sessionId || '(new)'} prompt="${prompt.slice(0, 100)}" files=${files.length}`);
+    this.debug(`[handleMessage] queued chat=${ctx.chatId} agent=${session.agent} session=${session.sessionId || '(new)'} prompt="${prompt.slice(0, 100)}" files=${files.length}`);
     const taskId = this.createTaskId(session);
     this.beginTask({
       taskId,
@@ -616,12 +618,12 @@ export class TelegramBot extends Bot {
       phId = typeof placeholderId === 'number' ? placeholderId : null;
       if (phId != null) {
         this.registerSessionMessage(ctx.chatId, phId, session);
-        this.log(`[handleMessage] placeholder sent msg_id=${phId}, task queued`);
+        this.debug(`[handleMessage] placeholder sent msg_id=${phId}, task queued`);
       } else {
-        this.log(`[handleMessage] placeholder unavailable for chat=${ctx.chatId}; continuing without live preview`);
+        this.debug(`[handleMessage] placeholder unavailable for chat=${ctx.chatId}; continuing without live preview`);
       }
     } else {
-      this.log(`[handleMessage] skipping placeholder for chat=${ctx.chatId}; channel does not support message edits`);
+      this.debug(`[handleMessage] skipping placeholder for chat=${ctx.chatId}; channel does not support message edits`);
     }
     this.registerTaskPlaceholders(taskId, [phId]);
 
@@ -635,7 +637,7 @@ export class TelegramBot extends Bot {
           if (phId != null) {
             try { await this.channel.deleteMessage(ctx.chatId, phId); } catch {}
           }
-          this.log(`[handleMessage] skipped cancelled queued task chat=${ctx.chatId} msg=${ctx.messageId}`);
+          this.debug(`[handleMessage] skipped cancelled queued task chat=${ctx.chatId} msg=${ctx.messageId}`);
           return;
         }
         // Task is now running — update keyboard from Recall/Steer to Stop
@@ -656,7 +658,7 @@ export class TelegramBot extends Bot {
             canSendTyping,
             messageThreadId,
             keyboard: runningKeyboard,
-            log: (message: string) => this.log(message),
+            log: (message: string) => this.debug(message),
           });
           livePreview.start();
         }
@@ -676,28 +678,28 @@ export class TelegramBot extends Bot {
         if (task?.freezePreviewOnAbort && result.stopReason === 'interrupted') {
           const frozenMessageIds = await this.freezeSteerHandoffPreview(ctx, phId, livePreview);
           this.registerSessionMessages(ctx.chatId, frozenMessageIds, session);
-          this.log(`[handleMessage] steer handoff preserved previous preview chat=${ctx.chatId} task=${taskId}`);
+          this.debug(`[handleMessage] steer handoff preserved previous preview chat=${ctx.chatId} task=${taskId}`);
           return;
         }
 
-        this.log(
+        this.debug(
           `[handleMessage] done agent=${session.agent} ok=${result.ok} session=${result.sessionId || '?'} elapsed=${result.elapsedS.toFixed(1)}s edits=${livePreview?.getEditCount() || 0} ` +
           `tokens=in:${fmtTokens(result.inputTokens)}/cached:${fmtTokens(result.cachedInputTokens)}/out:${fmtTokens(result.outputTokens)}`
         );
-        this.log(`[handleMessage] response preview: "${result.message.slice(0, 150)}"`);
+        this.debug(`[handleMessage] response preview: "${result.message.slice(0, 150)}"`);
 
         const finalReply = await this.sendFinalReply(ctx, phId, session.agent, result, { messageThreadId });
         this.registerSessionMessages(ctx.chatId, finalReply.messageIds, session);
-        this.log(`[handleMessage] final reply sent to chat=${ctx.chatId}`);
+        this.debug(`[handleMessage] final reply sent to chat=${ctx.chatId}`);
       } catch (e: any) {
         if (task?.freezePreviewOnAbort && abortController.signal.aborted) {
           const frozenMessageIds = await this.freezeSteerHandoffPreview(ctx, phId, livePreview);
           this.registerSessionMessages(ctx.chatId, frozenMessageIds, session);
-          this.log(`[handleMessage] steer handoff preserved preview after abort chat=${ctx.chatId} task=${taskId}`);
+          this.debug(`[handleMessage] steer handoff preserved preview after abort chat=${ctx.chatId} task=${taskId}`);
           return;
         }
         const msgText = String(e?.message || e || 'Unknown error');
-        this.log(`[handleMessage] task failed chat=${ctx.chatId} session=${session.sessionId} error=${msgText}`);
+        this.warn(`[handleMessage] task failed chat=${ctx.chatId} session=${session.sessionId} error=${msgText}`);
         const errorHtml = `<b>Error</b>\n\n<code>${escapeHtml(msgText.slice(0, 500))}</code>`;
         if (phId != null) {
           try {
@@ -718,7 +720,7 @@ export class TelegramBot extends Bot {
         this.syncSelectedChats(session);
       }
     }).catch(e => {
-      this.log(`[handleMessage] queue execution failed: ${e}`);
+      this.warn(`[handleMessage] queue execution failed: ${e}`);
       this.finishTask(taskId);
     });
   }

@@ -76,6 +76,7 @@ export interface StageFilesResult {
   ok: boolean;
   sessionId: string;
   workspacePath: string | null;
+  threadId: string | null;
   importedCount: number;
 }
 
@@ -92,10 +93,12 @@ export async function stageFilesIntoSession(
     title: undefined,
   });
   session.workspacePath = staged.workspacePath;
+  session.threadId = staged.threadId;
   return {
     ok: staged.importedFiles.length > 0,
     sessionId: staged.sessionId,
     workspacePath: staged.workspacePath,
+    threadId: staged.threadId,
     importedCount: staged.importedFiles.length,
   };
 }
@@ -146,6 +149,7 @@ export async function handleIncomingMessage<TCtx>(opts: HandleMessageOpts<TCtx>)
   cs.agent = session.agent;
   cs.sessionId = session.sessionId;
   cs.workspacePath = session.workspacePath;
+  cs.activeThreadId = session.threadId;
   cs.codexCumulative = session.codexCumulative;
   cs.modelId = session.modelId ?? null;
 

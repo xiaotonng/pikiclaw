@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import { useStore } from '../store';
 import { createT } from '../i18n';
 import { SectionLabel } from './ui';
@@ -14,8 +15,8 @@ export function ConfigTab({
   onOpenTelegram: () => void;
   onOpenFeishu: () => void;
 }) {
-  const { locale } = useStore();
-  const t = createT(locale);
+  const locale = useStore(s => s.locale);
+  const t = useMemo(() => createT(locale), [locale]);
 
   return (
     <div className="animate-in space-y-8">

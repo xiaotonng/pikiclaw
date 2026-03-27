@@ -1,3 +1,5 @@
+import { writeScopedLog } from '../logging.js';
+
 /**
  * tools/types.ts — Shared types for MCP session tools.
  */
@@ -43,6 +45,5 @@ export function toolResult(text: string, isError = false): ToolResult {
 
 /** Shared logger for tool modules — writes to stderr to avoid interfering with stdio MCP transport. */
 export function toolLog(tool: string, msg: string) {
-  const ts = new Date().toTimeString().slice(0, 8);
-  process.stderr.write(`[tool:${tool} ${ts}] ${msg}\n`);
+  writeScopedLog(`tool:${tool}`, msg, { level: 'debug', stream: 'stderr' });
 }

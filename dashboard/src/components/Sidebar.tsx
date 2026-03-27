@@ -1,11 +1,23 @@
+import { useMemo } from 'react';
+import { NavLink } from 'react-router-dom';
 import { resolveAppStatusBadge } from '../app-status';
 import { useStore } from '../store';
 import { createT } from '../i18n';
 import { getDashboardTabs } from '../tabs';
-import { Button, Dot, TabsList, TabsTrigger } from './ui';
+import { Button, Dot, TabsList } from './ui';
+import { cn } from '../utils';
 
 const IconSun = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>;
 const IconMoon = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>;
+
+const TAB_ROUTES: Record<string, string> = {
+  sessions: '/',
+  im: '/im',
+  agents: '/agents',
+  permissions: '/permissions',
+  extensions: '/extensions',
+  system: '/system',
+};
 
 export function Sidebar({
   version,
@@ -16,8 +28,12 @@ export function Sidebar({
   confirmingRestart: boolean;
   onRestartClick: () => void;
 }) {
-  const { state, tab, setTab, theme, setTheme, locale, setLocale } = useStore();
-  const t = createT(locale);
+  const state = useStore(s => s.state);
+  const theme = useStore(s => s.theme);
+  const setTheme = useStore(s => s.setTheme);
+  const locale = useStore(s => s.locale);
+  const setLocale = useStore(s => s.setLocale);
+  const t = useMemo(() => createT(locale), [locale]);
 
   const tabs = getDashboardTabs(t);
   const appStatus = resolveAppStatusBadge(state, t);
@@ -42,13 +58,18 @@ export function Sidebar({
         <nav className="order-3 w-full md:order-none md:w-auto">
           <TabsList className="w-full overflow-x-auto md:w-auto">
             {tabs.map(item => (
-              <TabsTrigger
+              <NavLink
                 key={item.key}
-                active={tab === item.key}
-                onClick={() => setTab(item.key)}
+                to={TAB_ROUTES[item.key]}
+                end={TAB_ROUTES[item.key] === '/'}
+                className={({ isActive }) => cn(
+                  'inline-flex h-8 items-center justify-center rounded-md px-3 text-sm font-medium transition-colors duration-200',
+                  'focus-visible:outline-none focus-visible:shadow-[0_0_0_4px_var(--th-glow-a)]',
+                  isActive ? 'bg-panel-h text-fg shadow-[0_1px_0_rgba(255,255,255,0.03)]' : 'text-fg-4 hover:bg-panel-alt hover:text-fg-2',
+                )}
               >
                 {item.label}
-              </TabsTrigger>
+              </NavLink>
             ))}
           </TabsList>
         </nav>

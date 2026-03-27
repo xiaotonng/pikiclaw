@@ -16,8 +16,8 @@
  * Tools are defined in src/tools/ — each module exports definitions + handlers.
  */
 
-import fs from 'node:fs';
 import path from 'node:path';
+import { createRetainedLogSink, writeScopedLog, type LogLevel } from './logging.js';
 import type { McpToolModule, ToolContext } from './tools/types.js';
 import { desktopTools } from './tools/desktop.js';
 import { workspaceTools } from './tools/workspace.js';
@@ -26,21 +26,18 @@ import { workspaceTools } from './tools/workspace.js';
 // Logging — writes to stderr + file so it doesn't interfere with stdio MCP transport
 // ---------------------------------------------------------------------------
 
-const _logFile = (() => {
+const _logSink = (() => {
   try {
     const ws = process.env.MCP_WORKSPACE_PATH || '';
     if (!ws) return null;
     const dir = path.dirname(ws);
-    const fp = path.join(dir, 'mcp-server.log');
-    return fs.openSync(fp, 'a');
+    return createRetainedLogSink(path.join(dir, 'mcp-server.log'));
   } catch { return null; }
 })();
 
-function log(msg: string) {
-  const ts = new Date().toTimeString().slice(0, 8);
-  const line = `[mcp-server ${ts}] ${msg}\n`;
-  process.stderr.write(line);
-  if (_logFile != null) try { fs.writeSync(_logFile, line); } catch {}
+function log(msg: string, level: LogLevel = 'debug') {
+  if (!writeScopedLog('mcp-server', msg, { level, stream: 'stderr' })) return;
+  _logSink?.(`[mcp-server ${new Date().toTimeString().slice(0, 8)}] ${msg}\n`);
 }
 
 function summarizeArgs(args: unknown, max = 200): string {
@@ -199,7 +196,7 @@ function handleMessage(msg: any) {
       const args = params?.arguments || {};
       const mod = TOOL_HANDLERS.get(name);
       if (!mod) {
-        log(`tools/call UNKNOWN tool="${name}"`);
+        log(`tools/call UNKNOWN tool="${name}"`, 'warn');
         respondError(id, -32601, `Unknown tool: ${name}`);
         break;
       }
@@ -215,7 +212,7 @@ function handleMessage(msg: any) {
         },
         err => {
           const elapsed = Date.now() - callStart;
-          log(`tools/call tool="${name}" EXCEPTION ${elapsed}ms args=${argsSummary} error=${err?.message || err}`);
+          log(`tools/call tool="${name}" EXCEPTION ${elapsed}ms args=${argsSummary} error=${err?.message || err}`, 'warn');
           respond(id, { content: [{ type: 'text', text: `Tool error: ${err?.message || err}` }], isError: true });
         },
       );
@@ -224,7 +221,7 @@ function handleMessage(msg: any) {
 
     default:
       if (id !== undefined) {
-        log(`unknown method="${method}"`);
+        log(`unknown method="${method}"`, 'warn');
         respondError(id, -32601, `Method not found: ${method}`);
       }
   }

@@ -2,6 +2,12 @@ import type { TgContext } from '../../src/channel-telegram.ts';
 import { TelegramBot } from '../../src/bot-telegram.ts';
 import { vi } from 'vitest';
 
+// Prevent Bot constructor from touching real filesystem (skills merge, gitignore, etc.)
+vi.mock('../../src/code-agent.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/code-agent.ts')>();
+  return { ...actual, initializeProjectSkills: vi.fn() };
+});
+
 export interface TelegramBotHarness {
   bot: TelegramBot;
   channel: any;

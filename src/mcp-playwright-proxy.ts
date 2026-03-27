@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { createRetainedLogSink, writeScopedLog, type LogLevel } from './logging.js';
 import {
   getManagedBrowserProfileDir,
   resolveManagedBrowserMcpCommand,
@@ -20,23 +21,19 @@ function envBool(name: string, fallback: boolean): boolean {
   return fallback;
 }
 
-const logFile = (() => {
+const logSink = (() => {
   try {
     const profileDir = process.env.PIKICLAW_PLAYWRIGHT_PROFILE_DIR || getManagedBrowserProfileDir();
     fs.mkdirSync(profileDir, { recursive: true });
-    return fs.openSync(path.join(profileDir, 'playwright-mcp-proxy.log'), 'a');
+    return createRetainedLogSink(path.join(profileDir, 'playwright-mcp-proxy.log'));
   } catch {
     return null;
   }
 })();
 
-function log(message: string) {
-  const ts = new Date().toTimeString().slice(0, 8);
-  const line = `[playwright-mcp-proxy ${ts}] ${message}\n`;
-  process.stderr.write(line);
-  if (logFile != null) {
-    try { fs.writeSync(logFile, line); } catch {}
-  }
+function log(message: string, level: LogLevel = 'debug') {
+  if (!writeScopedLog('playwright-mcp-proxy', message, { level, stream: 'stderr' })) return;
+  logSink?.(`[playwright-mcp-proxy ${new Date().toTimeString().slice(0, 8)}] ${message}\n`);
 }
 
 type Transport = 'framed' | 'ndjson';
@@ -132,7 +129,7 @@ const parentParser = createParser(message => {
   if (requestId != null && method) pendingMethods.set(String(requestId), method);
 
   if (method === 'tools/call' && DISABLED_TOOLS.has(String(message?.params?.name || ''))) {
-    log(`blocked disabled tool call name=${message?.params?.name || ''}`);
+    log(`blocked disabled tool call name=${message?.params?.name || ''}`, 'warn');
     sendToParent(parentTransport, {
       jsonrpc: '2.0',
       id: requestId,
@@ -185,15 +182,15 @@ child.stdout.setEncoding('utf8');
 child.stdout.on('data', chunk => childParser.push(String(chunk)));
 child.stderr.on('data', chunk => {
   const text = String(chunk).trim();
-  if (text) log(`upstream stderr: ${text}`);
+  if (text) log(`upstream stderr: ${text}`, 'warn');
 });
 
 child.on('close', code => {
-  log(`upstream exited code=${code ?? 'null'}`);
+  log(`upstream exited code=${code ?? 'null'}`, code === 0 || code == null ? 'debug' : 'warn');
   process.exit(code ?? 0);
 });
 
 child.on('error', error => {
-  log(`upstream spawn error: ${error.message}`);
+  log(`upstream spawn error: ${error.message}`, 'error');
   process.exit(1);
 });

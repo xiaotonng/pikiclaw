@@ -67,6 +67,7 @@ import {
   sleep,
 } from './channel-base.js';
 import { TELEGRAM_LIMITS } from './constants.js';
+import { formatScopedLogLine, shouldLog, writeScopedLog, type LogLevel } from './logging.js';
 
 // ---------------------------------------------------------------------------
 // Proxy support — automatically respects HTTPS_PROXY / HTTP_PROXY / NO_PROXY
@@ -329,7 +330,7 @@ class TelegramChannel extends Channel {
       } catch (e: any) {
         if (this.ac.signal.aborted || isAbortError(e)) throw e;
         if (attempt >= 10) throw e;
-        this._log(`[connect] attempt ${attempt} failed: ${e.message ?? e} — retrying in ${delay / 1000}s`);
+        this._log(`[connect] attempt ${attempt} failed: ${e.message ?? e} — retrying in ${delay / 1000}s`, 'warn');
         await sleep(delay);
         delay = Math.min(delay * 2, TELEGRAM_LIMITS.maxRetryDelay);
       }
@@ -360,11 +361,11 @@ class TelegramChannel extends Channel {
         if (isPollingConflictError(e)) {
           const err = e instanceof Error ? e : new Error(String(e));
           this.running = false;
-          this._log(`[poll] conflict: ${err.message} — stopping`);
+          this._log(`[poll] conflict: ${err.message} — stopping`, 'warn');
           this._hError?.(err);
           break;
         }
-        this._log(`[poll] error: ${e.message ?? e} — retrying in ${backoff / 1000}s`);
+        this._log(`[poll] error: ${e.message ?? e} — retrying in ${backoff / 1000}s`, 'warn');
         this._hError?.(e);
         await sleep(backoff);
         backoff = Math.min(backoff * 2, TELEGRAM_LIMITS.maxRetryDelay);
@@ -382,16 +383,16 @@ class TelegramChannel extends Channel {
   }
 
   private _logOutgoingText(action: string, meta: string, text: string) {
-    const ts = new Date().toTimeString().slice(0, 8);
-    process.stdout.write(`[telegram ${ts}] [send] ${action} ${meta}\n${text}\n`);
+    if (!shouldLog('debug')) return;
+    process.stdout.write(`${formatScopedLogLine('telegram', `[send] ${action} ${meta}`)}${text}\n`);
   }
 
   private _logOutgoingPreview(action: string, meta: string, text: string) {
-    this._log(`[send] ${action} ${meta} chars=${text.length}`);
+    this._debug(`[send] ${action} ${meta} chars=${text.length}`);
   }
 
   private _logOutgoingFile(action: string, meta: string) {
-    this._log(`[send] ${action} ${meta}`);
+    this._debug(`[send] ${action} ${meta}`);
   }
 
   private _requestSignal(timeoutMs: number): AbortSignal {
@@ -438,7 +439,7 @@ class TelegramChannel extends Channel {
           lastErr = err;
           if (attempt >= 3 || !isRetryableRequestError(err)) break;
           const delayMs = attempt * 250;
-          this._log(`[send] sendMessage transient error attempt=${attempt} chat=${chatId}: ${describeError(err)} — retrying in ${delayMs}ms`);
+          this._debug(`[send] sendMessage transient error attempt=${attempt} chat=${chatId}: ${describeError(err)} — retrying in ${delayMs}ms`);
           await sleep(delayMs);
         }
       }
@@ -772,8 +773,8 @@ class TelegramChannel extends Channel {
     if (update.callback_query) {
       const cq = update.callback_query;
       const chatId = cq.message?.chat?.id;
-      this._log(`[recv] callback_query id=${cq.id} chat=${chatId} from=${cq.from?.username || cq.from?.id} data="${cq.data}"`);
-      if (!chatId || !this._isAllowed(chatId)) { this._log(`[recv] callback blocked: chat=${chatId} not allowed`); return; }
+      this._debug(`[recv] callback_query id=${cq.id} chat=${chatId} from=${cq.from?.username || cq.from?.id} data="${cq.data}"`);
+      if (!chatId || !this._isAllowed(chatId)) { this._debug(`[recv] callback blocked: chat=${chatId} not allowed`); return; }
       this._trackChat(chatId);
       if (!this._hCallback) return;
       const ctx = this._makeCtx(chatId, cq.message?.message_id ?? 0, cq.from, cq) as TgCallbackContext;
@@ -789,10 +790,10 @@ class TelegramChannel extends Channel {
     const chatId = raw.chat.id;
     const fromUser = raw.from?.username || raw.from?.first_name || raw.from?.id || '?';
     const msgPreview = (raw.text || raw.caption || '').slice(0, 120);
-    this._log(`[recv] message chat=${chatId} from=${fromUser} msg_id=${raw.message_id} text="${msgPreview}"${raw.photo ? ' +photo' : ''}${raw.document ? ` +doc(${raw.document?.file_name})` : ''}`);
-    if (!this._isAllowed(chatId)) { this._log(`[recv] blocked: chat=${chatId} not in allowlist`); return; }
+    this._debug(`[recv] message chat=${chatId} from=${fromUser} msg_id=${raw.message_id} text="${msgPreview}"${raw.photo ? ' +photo' : ''}${raw.document ? ` +doc(${raw.document?.file_name})` : ''}`);
+    if (!this._isAllowed(chatId)) { this._debug(`[recv] blocked: chat=${chatId} not in allowlist`); return; }
     this._trackChat(chatId);
-    if (!this._shouldHandle(raw)) { this._log(`[recv] skipped: not relevant (group mention/reply check)`); return; }
+    if (!this._shouldHandle(raw)) { this._debug(`[recv] skipped: not relevant (group mention/reply check)`); return; }
 
     const from: TgFrom = { id: raw.from?.id, username: raw.from?.username, firstName: raw.from?.first_name };
     const ctx = this._makeCtx(chatId, raw.message_id, from, raw);
@@ -804,7 +805,7 @@ class TelegramChannel extends Channel {
       const full = (raw.text || '').slice(cmdEntity.offset, cmdEntity.offset + cmdEntity.length);
       const cmd = full.replace(/^\//, '').split('@')[0].toLowerCase();
       const args = (raw.text || '').slice(cmdEntity.offset + cmdEntity.length).trim();
-      this._log(`[recv] command /${cmd} args="${args.slice(0, 80)}" chat=${chatId}`);
+      this._debug(`[recv] command /${cmd} args="${args.slice(0, 80)}" chat=${chatId}`);
       if (this._hCommand) {
         await this._hCommand(cmd, args, ctx);
         return;
@@ -819,26 +820,26 @@ class TelegramChannel extends Channel {
     // download photo
     if (raw.photo?.length) {
       const best = raw.photo[raw.photo.length - 1];
-      this._log(`[recv] downloading photo file_id=${best.file_id} size=${best.width}x${best.height}`);
+      this._debug(`[recv] downloading photo file_id=${best.file_id} size=${best.width}x${best.height}`);
       try {
         const localPath = await this.downloadFile(best.file_id, `_tg_photo_${raw.message_id}.jpg`);
         files.push(localPath);
-        this._log(`[recv] photo saved: ${localPath}`);
-      } catch (e: any) { this._log(`[recv] photo download failed: ${e}`); this._hError?.(e); }
+        this._debug(`[recv] photo saved: ${localPath}`);
+      } catch (e: any) { this._log(`[recv] photo download failed: ${e}`, 'warn'); this._hError?.(e); }
     }
 
     // download document
     if (raw.document) {
       const origName = raw.document.file_name || `doc_${raw.message_id}`;
-      this._log(`[recv] downloading document "${origName}" file_id=${raw.document.file_id}`);
+      this._debug(`[recv] downloading document "${origName}" file_id=${raw.document.file_id}`);
       try {
         const localPath = await this.downloadFile(raw.document.file_id, `_tg_${origName}`);
         files.push(localPath);
-        this._log(`[recv] document saved: ${localPath}`);
-      } catch (e: any) { this._log(`[recv] document download failed: ${e}`); this._hError?.(e); }
+        this._debug(`[recv] document saved: ${localPath}`);
+      } catch (e: any) { this._log(`[recv] document download failed: ${e}`, 'warn'); this._hError?.(e); }
     }
 
-    this._log(`[dispatch] -> onMessage text="${text.slice(0, 80)}" files=${files.length} chat=${chatId}`);
+    this._debug(`[dispatch] -> onMessage text="${text.slice(0, 80)}" files=${files.length} chat=${chatId}`);
     await this._hMessage({ text, files }, ctx);
   }
 
@@ -881,8 +882,11 @@ class TelegramChannel extends Channel {
     return text.trim();
   }
 
-  _log(msg: string) {
-    const ts = new Date().toTimeString().slice(0, 8);
-    process.stdout.write(`[telegram ${ts}] ${msg}\n`);
+  private _debug(msg: string) {
+    this._log(msg, 'debug');
+  }
+
+  _log(msg: string, level: LogLevel = 'info') {
+    writeScopedLog('telegram', msg, { level });
   }
 }

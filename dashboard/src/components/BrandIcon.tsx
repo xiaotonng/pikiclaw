@@ -6,6 +6,10 @@ import telegramLogo from '../assets/brands/telegram.svg';
 import weixinLogo from '../assets/brands/weixin.svg';
 import playwrightLogo from '../assets/brands/playwright.ico';
 import appiumLogo from '../assets/brands/appium.png';
+import vscodeLogo from '../assets/brands/vscode.svg';
+import cursorLogo from '../assets/brands/cursor.svg';
+import windsurfLogo from '../assets/brands/windsurf.svg';
+import finderLogo from '../assets/brands/finder.svg';
 import { cn } from '../utils';
 
 const brandIcons: Record<string, string> = {
@@ -17,6 +21,10 @@ const brandIcons: Record<string, string> = {
   weixin: weixinLogo,
   playwright: playwrightLogo,
   appium: appiumLogo,
+  vscode: vscodeLogo,
+  cursor: cursorLogo,
+  windsurf: windsurfLogo,
+  finder: finderLogo,
 };
 
 export function BrandIcon({ brand, size = 18, className }: {

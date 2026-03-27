@@ -79,7 +79,7 @@ export function buildHostMetricItems(host: HostInfo | null, t: (key: string) => 
       label: t('system.cpuLoad'),
       value: `1m ${loadOne}`,
       detail: [`5m ${loadFive}`, `15m ${loadFifteen}`],
-      tone: loadRatio != null && loadRatio >= 85 ? 'warn' : 'muted',
+      tone: (loadRatio != null && loadRatio >= 85 ? 'warn' : 'muted') as MetricTone,
       progressPercent: loadRatio,
     }] : []),
     {
@@ -87,7 +87,7 @@ export function buildHostMetricItems(host: HostInfo | null, t: (key: string) => 
       label: t('sessions.memory'),
       value: `${fmtBytes(usedMem)} / ${fmtBytes(totalMem)}`,
       detail: memoryPercent != null ? `${memoryPercent.toFixed(0)}%` : undefined,
-      tone: memoryPercent != null && memoryPercent >= 85 ? 'warn' : 'ok',
+      tone: (memoryPercent != null && memoryPercent >= 85 ? 'warn' : 'ok') as MetricTone,
       progressPercent: memoryPercent,
     },
   ];

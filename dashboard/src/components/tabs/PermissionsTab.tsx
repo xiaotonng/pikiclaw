@@ -122,8 +122,11 @@ function getCopy(locale: 'zh-CN' | 'en'): CopyPack {
 }
 
 export function PermissionsTab() {
-  const { state, locale, reload, toast } = useStore();
-  const t = createT(locale);
+  const state = useStore(s => s.state);
+  const locale = useStore(s => s.locale);
+  const reload = useStore(s => s.reload);
+  const toast = useStore(s => s.toast);
+  const t = useMemo(() => createT(locale), [locale]);
   const copy = getCopy(locale);
   const permissions = state?.permissions || {};
   const hostApp = state?.hostApp || null;

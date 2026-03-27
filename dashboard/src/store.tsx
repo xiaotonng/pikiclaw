@@ -1,7 +1,6 @@
-import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
+import { create } from 'zustand';
 import { api } from './api';
 import { hasPendingChannelValidation } from './channel-status';
-import { DEFAULT_DASHBOARD_TAB, type DashboardTab } from './tabs';
 import type { AppState, HostInfo, SessionInfo } from './types';
 import type { Locale } from './i18n';
 
@@ -14,26 +13,7 @@ export interface Toast {
 
 export type Theme = 'dark' | 'light';
 
-/* ── Store value ── */
-interface StoreValue {
-  state: AppState | null;
-  tab: DashboardTab;
-  setTab: (t: DashboardTab) => void;
-  reload: () => Promise<AppState | null>;
-  reloadUntil: (predicate: (state: AppState) => boolean, opts?: { attempts?: number; intervalMs?: number }) => Promise<AppState | null>;
-  toasts: Toast[];
-  toast: (msg: string, ok?: boolean) => void;
-  host: HostInfo | null;
-  allSessions: Record<string, { sessions: SessionInfo[] }>;
-  loadSessions: () => void;
-  theme: Theme;
-  setTheme: (t: Theme) => void;
-  locale: Locale;
-  setLocale: (l: Locale) => void;
-}
-
-const Ctx = createContext<StoreValue>(null!);
-
+/* ── Helpers ── */
 let _toastId = 0;
 
 function getInitialTheme(): Theme {
@@ -52,98 +32,138 @@ function getInitialLocale(): Locale {
   return 'zh-CN';
 }
 
-export function StoreProvider({ children }: { children: ReactNode }) {
-  const [state, setState] = useState<AppState | null>(null);
-  const [tab, setTab] = useState<DashboardTab>(DEFAULT_DASHBOARD_TAB);
-  const [toasts, setToasts] = useState<Toast[]>([]);
-  const [host, setHost] = useState<HostInfo | null>(null);
-  const [allSessions, setAllSessions] = useState<Record<string, { sessions: SessionInfo[] }>>({});
-  const [theme, setThemeState] = useState<Theme>(getInitialTheme);
-  const [locale, setLocaleState] = useState<Locale>(getInitialLocale);
+/* ── Store shape ── */
+interface StoreState {
+  /* ── Data slices ── */
+  state: AppState | null;
+  host: HostInfo | null;
+  toasts: Toast[];
+  allSessions: Record<string, { sessions: SessionInfo[] }>;
+  theme: Theme;
+  locale: Locale;
 
-  const setTheme = useCallback((t: Theme) => {
-    setThemeState(t);
+  /* ── Actions ── */
+  toast: (msg: string, ok?: boolean) => void;
+  setTheme: (t: Theme) => void;
+  setLocale: (l: Locale) => void;
+  reload: () => Promise<AppState | null>;
+  reloadUntil: (
+    predicate: (state: AppState) => boolean,
+    opts?: { attempts?: number; intervalMs?: number },
+  ) => Promise<AppState | null>;
+  loadSessions: () => Promise<void>;
+}
+
+/* ── Apply theme to DOM once at module load ── */
+const initialTheme = getInitialTheme();
+document.documentElement.dataset.theme = initialTheme;
+
+/* ══════════════════════════════════════════════════════
+   Zustand Store — selector-based, no Provider needed.
+   Components subscribe only to the slices they read:
+     const locale = useStore(s => s.locale);
+   Actions are stable refs and never cause re-renders.
+   ══════════════════════════════════════════════════════ */
+export const useStore = create<StoreState>()((set, get) => ({
+  /* ── Initial data ── */
+  state: null,
+  host: null,
+  toasts: [],
+  allSessions: {},
+  theme: initialTheme,
+  locale: getInitialLocale(),
+
+  /* ── Toast ── */
+  toast: (message, ok = true) => {
+    const id = ++_toastId;
+    set((prev) => ({ toasts: [...prev.toasts, { id, message, ok }] }));
+    setTimeout(() => {
+      set((prev) => ({ toasts: prev.toasts.filter((t) => t.id !== id) }));
+    }, 3000);
+  },
+
+  /* ── Theme ── */
+  setTheme: (t) => {
     document.documentElement.dataset.theme = t;
     try { localStorage.setItem('pikiclaw-theme', t); } catch {}
-  }, []);
+    set({ theme: t });
+  },
 
-  const setLocale = useCallback((l: Locale) => {
-    setLocaleState(l);
+  /* ── Locale ── */
+  setLocale: (l) => {
     try { localStorage.setItem('pikiclaw-locale', l); } catch {}
-  }, []);
+    set({ locale: l });
+  },
 
-  // Apply theme on mount
-  useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-  }, []);
-
-  const reload = useCallback(async () => {
+  /* ── Reload app state + host ── */
+  reload: async () => {
     try {
-      // Load state first (fast) so UI can render immediately;
-      // host info loads in parallel but doesn't block state rendering
       const statePromise = api.getState();
-      const hostPromise = api.getHost().then(h => setHost(h)).catch(() => {});
+      const hostPromise = api.getHost().catch(() => null);
       const d = await statePromise;
-      setState(d);
-      await hostPromise;
+      const h = await hostPromise;
+      set({ state: d, ...(h ? { host: h } : {}) });
       return d;
     } catch (e) {
       console.error('loadState:', e);
       return null;
     }
-  }, []);
+  },
 
-  const reloadUntil = useCallback(async (
-    predicate: (nextState: AppState) => boolean,
-    opts?: { attempts?: number; intervalMs?: number },
-  ) => {
+  /* ── Reload with polling until predicate ── */
+  reloadUntil: async (predicate, opts) => {
     const attempts = opts?.attempts ?? 8;
     const intervalMs = opts?.intervalMs ?? 250;
     let latest: AppState | null = null;
     for (let i = 0; i < attempts; i++) {
-      latest = await reload();
+      latest = await get().reload();
       if (latest && predicate(latest)) return latest;
-      if (i < attempts - 1) await new Promise(resolve => setTimeout(resolve, intervalMs));
+      if (i < attempts - 1) await new Promise((r) => setTimeout(r, intervalMs));
     }
     return latest;
-  }, [reload]);
+  },
 
-  const toast = useCallback((message: string, ok = true) => {
-    const id = ++_toastId;
-    setToasts(prev => [...prev, { id, message, ok }]);
-    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 3000);
-  }, []);
-
-  const loadSessions = useCallback(async () => {
+  /* ── Load sessions (legacy, for non-hub tabs) ── */
+  loadSessions: async () => {
     try {
-      const [s, h, ses] = await Promise.all([api.getState(), api.getHost(), api.getSessions()]);
-      setState(s);
-      setHost(h);
-      setAllSessions(ses as Record<string, { sessions: SessionInfo[] }>);
+      const [s, h, ses] = await Promise.all([
+        api.getState(),
+        api.getHost(),
+        api.getSessions(),
+      ]);
+      set({
+        state: s,
+        host: h,
+        allSessions: ses as Record<string, { sessions: SessionInfo[] }>,
+      });
     } catch (e) {
       console.error('loadSessions:', e);
     }
-  }, []);
+  },
+}));
 
-  useEffect(() => {
-    reload();
-  }, [reload]);
+/* ── Kick off initial load ── */
+void useStore.getState().reload();
 
-  useEffect(() => {
-    if (!hasPendingChannelValidation(state?.setupState?.channels || null)) return;
-    const timer = setTimeout(() => {
-      void reload();
-    }, 1500);
-    return () => clearTimeout(timer);
-  }, [state, reload]);
+/* ══════════════════════════════════════════════════════
+   Channel validation polling — runs as a store subscription.
+   Fires when channels have pending validation.
+   Updates only the `state` slice.
+   ══════════════════════════════════════════════════════ */
+let _channelPollTimer: ReturnType<typeof setTimeout> | null = null;
 
-  return (
-    <Ctx.Provider value={{ state, tab, setTab, reload, reloadUntil, toasts, toast, host, allSessions, loadSessions, theme, setTheme, locale, setLocale }}>
-      {children}
-    </Ctx.Provider>
-  );
-}
+useStore.subscribe((cur, prev) => {
+  // Only react to state changes (channel validation results)
+  if (cur.state === prev.state) return;
 
-export function useStore() {
-  return useContext(Ctx);
-}
+  // Clear any pending timer
+  if (_channelPollTimer) { clearTimeout(_channelPollTimer); _channelPollTimer = null; }
+
+  // Skip if no channels need validation
+  if (!hasPendingChannelValidation(cur.state?.setupState?.channels || null)) return;
+
+  _channelPollTimer = setTimeout(() => {
+    _channelPollTimer = null;
+    void useStore.getState().reload();
+  }, 1500);
+});

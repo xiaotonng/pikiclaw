@@ -3,6 +3,7 @@ import { validateTelegramToken, type TelegramBotIdentity } from './setup-wizard.
 import type { ChannelSetupState } from './onboarding.js';
 import type { UserConfig } from './user-config.js';
 import { VALIDATION_TIMEOUTS } from './constants.js';
+import { writeScopedLog } from './logging.js';
 import { normalizeWeixinBaseUrl, weixinGetUpdates } from './weixin-api.js';
 
 export interface TelegramConfigCheckResult {
@@ -40,8 +41,7 @@ const DEFAULT_FEISHU_VALIDATION_TIMEOUT_MS = VALIDATION_TIMEOUTS.feishuDefault;
 const DEFAULT_WEIXIN_VALIDATION_TIMEOUT_MS = VALIDATION_TIMEOUTS.weixinDefault;
 
 function feishuValidationLog(appId: string, message: string): void {
-  const ts = new Date().toISOString().slice(11, 19);
-  process.stdout.write(`[feishu-validate ${ts}] app=${appId} ${message}\n`);
+  writeScopedLog('feishu-validate', `app=${appId} ${message}`, { level: 'debug' });
 }
 
 function maskAppId(appId: string): string {

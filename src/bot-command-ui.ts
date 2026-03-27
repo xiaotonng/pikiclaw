@@ -377,15 +377,20 @@ export async function executeCommandAction(
       const chat = bot.chat(chatId);
       if (chat.agent === action.agent) return { kind: 'noop', message: `Already using ${action.agent}` };
       bot.switchAgentForChat(chatId, action.agent);
+      const resumed = bot.selectedSession(chatId);
       return {
         kind: 'notice',
         callbackText: `Switched to ${action.agent}`,
         notice: {
           title: 'Agent',
           value: action.agent,
-          detail: 'Session reset',
+          detail: resumed?.agent === action.agent && resumed.sessionId ? 'Resumed previous session' : 'Session reset',
           valueMode: 'plain',
         },
+        session: resumed?.agent === action.agent ? resumed : undefined,
+        previewSession: resumed?.agent === action.agent
+          ? { agent: resumed.agent, sessionId: resumed.sessionId }
+          : null,
       };
     }
 

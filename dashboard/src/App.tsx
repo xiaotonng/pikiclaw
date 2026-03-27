@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import { Routes, Route, useLocation } from 'react-router-dom';
 import { useStore } from './store';
 import { createT } from './i18n';
 import { Sidebar } from './components/Sidebar';
@@ -8,13 +9,10 @@ import { PermissionsTab } from './components/tabs/PermissionsTab';
 import { ExtensionsTab } from './components/tabs/ExtensionsTab';
 import { SystemTab } from './components/tabs/SystemTab';
 import { SessionsTab } from './components/SessionsTab';
-import { TelegramModal, FeishuModal, WeixinModal, WorkdirModal, SessionDetailModal, BrowserSetupModal, DesktopSetupModal } from './components/Modals';
+import { TelegramModal, FeishuModal, WeixinModal, WorkdirModal, BrowserSetupModal, DesktopSetupModal } from './components/Modals';
 import { Toasts } from './components/ui';
 import { api } from './api';
-import { getDashboardTabMeta } from './tabs';
-import type { SessionInfo } from './types';
-
-/* eslint-disable @typescript-eslint/no-unused-vars */
+import { getDashboardTabMeta, type DashboardTab } from './tabs';
 
 type ModalState =
   | null
@@ -23,20 +21,60 @@ type ModalState =
   | { type: 'feishu' }
   | { type: 'workdir' }
   | { type: 'browser-setup' }
-  | { type: 'desktop-setup' }
-  | { type: 'session'; agent: string; sessionId: string; session: SessionInfo | null };
+  | { type: 'desktop-setup' };
+
+function locationToTab(pathname: string): DashboardTab {
+  const map: Record<string, DashboardTab> = {
+    '/': 'sessions',
+    '/im': 'im',
+    '/agents': 'agents',
+    '/permissions': 'permissions',
+    '/extensions': 'extensions',
+    '/system': 'system',
+  };
+  return map[pathname] || 'sessions';
+}
+
+function PageWrapper({ title, description, children }: { title: string; description?: string; children: React.ReactNode }) {
+  return (
+    <div className="h-full overflow-y-auto">
+      <div className="mx-auto max-w-[1120px] px-5 py-3">
+        <div className="mb-3 border-b border-edge pb-2">
+          <div className="min-w-0">
+            <h2 className="text-lg font-semibold tracking-tight text-fg">{title}</h2>
+            {description && <div className="mt-0.5 text-[13px] leading-relaxed text-fg-4">{description}</div>}
+          </div>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
 
 export function App() {
-  const { state, tab, toasts, toast, reload, locale } = useStore();
-  const t = createT(locale);
+  // Granular selectors -- each subscription triggers re-render only when its slice changes.
+  // Actions (toast, reload) are stable refs and never cause re-renders.
+  const state = useStore(s => s.state);
+  const toasts = useStore(s => s.toasts);
+  const locale = useStore(s => s.locale);
+  const toast = useStore(s => s.toast);
+  const reload = useStore(s => s.reload);
+
+  const location = useLocation();
+  const tab = locationToTab(location.pathname);
+
+  const t = useMemo(() => createT(locale), [locale]);
   const [modal, setModal] = useState<ModalState>(null);
   const closeModal = useCallback(() => setModal(null), []);
+
+  const version = state?.version || '...';
 
   const [prompted, setPrompted] = useState(false);
   useEffect(() => {
     if (
       state
       && !prompted
+      && location.pathname !== '/'
       && !state.config.weixinBotToken
       && !state.config.telegramBotToken
       && !state.config.feishuAppId
@@ -44,11 +82,7 @@ export function App() {
       setPrompted(true);
       setTimeout(() => setModal({ type: 'weixin' }), 400);
     }
-  }, [state, prompted]);
-
-  const handleOpenSession = useCallback((agent: string, sid: string, ses: SessionInfo) => {
-    setModal({ type: 'session', agent, sessionId: sid, session: ses });
-  }, []);
+  }, [state, prompted, location.pathname]);
 
   const handleRestart = useCallback(async () => {
     try {
@@ -78,40 +112,52 @@ export function App() {
 
   return (
     <div className="noise-overlay">
-      <div className="fixed inset-0 pointer-events-none overflow-hidden">
+      <div className="fixed inset-0 pointer-events-none overflow-hidden" style={{ contain: 'strict' }}>
         <div className="grid-bg absolute inset-0 opacity-50" />
-        <div className="absolute -top-36 right-0 h-[420px] w-[420px] rounded-full" style={{ background: 'radial-gradient(ellipse, var(--th-orb1), transparent 72%)', animation: 'drift 24s ease-in-out infinite' }} />
-        <div className="absolute -bottom-40 -left-20 h-[360px] w-[360px] rounded-full" style={{ background: 'radial-gradient(ellipse, var(--th-orb2), transparent 74%)', animation: 'drift 28s ease-in-out infinite reverse' }} />
+        <div className="absolute -top-36 right-0 h-[420px] w-[420px] rounded-full" style={{ background: 'radial-gradient(ellipse, var(--th-orb1), transparent 72%)', animation: 'drift 24s ease-in-out infinite', willChange: 'transform' }} />
+        <div className="absolute -bottom-40 -left-20 h-[360px] w-[360px] rounded-full" style={{ background: 'radial-gradient(ellipse, var(--th-orb2), transparent 74%)', animation: 'drift 28s ease-in-out infinite reverse', willChange: 'transform' }} />
       </div>
 
-      <div className="relative min-h-screen flex flex-col">
+      <div className="relative h-screen flex flex-col overflow-hidden">
         <Sidebar
-          version={state?.version || '...'}
+          version={version}
           confirmingRestart={confirmingRestart}
           onRestartClick={onRestartClick}
         />
 
-        <main className="flex-1 overflow-y-auto">
-          <div className="mx-auto max-w-[1120px] px-5 py-3">
-            <div className="mb-3 border-b border-edge pb-2">
-              <div className="min-w-0">
-                <h2 className="text-lg font-semibold tracking-tight text-fg">{tabMeta.title}</h2>
-                {tabMeta.description && <div className="mt-0.5 text-[13px] leading-relaxed text-fg-4">{tabMeta.description}</div>}
-              </div>
-            </div>
-            {tab === 'im' && (
-              <IMAccessTab
-                onOpenWeixin={() => setModal({ type: 'weixin' })}
-                onOpenTelegram={() => setModal({ type: 'telegram' })}
-                onOpenFeishu={() => setModal({ type: 'feishu' })}
-              />
-            )}
-            {tab === 'agents' && <AgentTab />}
-            {tab === 'permissions' && <PermissionsTab />}
-            {tab === 'extensions' && <ExtensionsTab onOpenBrowserSetup={() => setModal({ type: 'browser-setup' })} onOpenDesktopSetup={() => setModal({ type: 'desktop-setup' })} />}
-            {tab === 'sessions' && <SessionsTab onOpenSession={handleOpenSession} />}
-            {tab === 'system' && <SystemTab onOpenWorkdir={() => setModal({ type: 'workdir' })} />}
-          </div>
+        <main className="flex-1 overflow-hidden">
+          <Routes>
+            <Route path="/" element={<SessionsTab />} />
+            <Route path="/im" element={
+              <PageWrapper title={tabMeta.title} description={tabMeta.description}>
+                <IMAccessTab
+                  onOpenWeixin={() => setModal({ type: 'weixin' })}
+                  onOpenTelegram={() => setModal({ type: 'telegram' })}
+                  onOpenFeishu={() => setModal({ type: 'feishu' })}
+                />
+              </PageWrapper>
+            } />
+            <Route path="/agents" element={
+              <PageWrapper title={tabMeta.title} description={tabMeta.description}>
+                <AgentTab />
+              </PageWrapper>
+            } />
+            <Route path="/permissions" element={
+              <PageWrapper title={tabMeta.title} description={tabMeta.description}>
+                <PermissionsTab />
+              </PageWrapper>
+            } />
+            <Route path="/extensions" element={
+              <PageWrapper title={tabMeta.title} description={tabMeta.description}>
+                <ExtensionsTab onOpenBrowserSetup={() => setModal({ type: 'browser-setup' })} onOpenDesktopSetup={() => setModal({ type: 'desktop-setup' })} />
+              </PageWrapper>
+            } />
+            <Route path="/system" element={
+              <PageWrapper title={tabMeta.title} description={tabMeta.description}>
+                <SystemTab onOpenWorkdir={() => setModal({ type: 'workdir' })} />
+              </PageWrapper>
+            } />
+          </Routes>
         </main>
       </div>
 
@@ -121,13 +167,6 @@ export function App() {
       <BrowserSetupModal open={modal?.type === 'browser-setup'} onClose={closeModal} onSaved={() => reload()} />
       <DesktopSetupModal open={modal?.type === 'desktop-setup'} onClose={closeModal} onSaved={() => reload()} />
       <WorkdirModal open={modal?.type === 'workdir'} onClose={closeModal} />
-      <SessionDetailModal
-        open={modal?.type === 'session'}
-        onClose={closeModal}
-        agent={modal?.type === 'session' ? modal.agent : ''}
-        sessionId={modal?.type === 'session' ? modal.sessionId : ''}
-        session={modal?.type === 'session' ? modal.session : null}
-      />
       <Toasts items={toasts} />
     </div>
   );

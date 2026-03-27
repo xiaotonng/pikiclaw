@@ -637,7 +637,7 @@ export class FeishuBot extends Bot {
       const stageTask = this.queueSessionTask(session, async () => {
         try {
           if (this.isSourceMessageWithdrawn(ctx.chatId, ctx.messageId)) {
-            this.log(`[handleMessage] skipped withdrawn file stage chat=${ctx.chatId} msg=${ctx.messageId}`);
+            this.debug(`[handleMessage] skipped withdrawn file stage chat=${ctx.chatId} msg=${ctx.messageId}`);
             return;
           }
           const staged = stageSessionFiles({
@@ -646,21 +646,23 @@ export class FeishuBot extends Bot {
             files: msg.files,
             sessionId: session.sessionId,
             title: undefined,
+            threadId: session.threadId,
           });
           session.workspacePath = staged.workspacePath;
+          session.threadId = staged.threadId;
           this.syncSelectedChats(session);
           if (!staged.importedFiles.length) throw new Error('no files persisted');
-          this.log(`[handleMessage] staged files chat=${ctx.chatId} session=${staged.sessionId} files=${staged.importedFiles.length}`);
+          this.debug(`[handleMessage] staged files chat=${ctx.chatId} session=${staged.sessionId} files=${staged.importedFiles.length}`);
           this.registerSessionMessage(ctx.chatId, ctx.messageId, session);
           await this.safeSetMessageReaction(ctx.chatId, ctx.messageId, [FEISHU_FILE_STAGE_REACTION]);
         } catch (e: any) {
-          this.log(`[handleMessage] stage files failed: ${e?.message || e}`);
+          this.warn(`[handleMessage] stage files failed: ${e?.message || e}`);
         }
       });
       if (hadPendingWork) {
-        void stageTask.catch(e => this.log(`[handleMessage] stage queue failed: ${e}`));
+        void stageTask.catch(e => this.warn(`[handleMessage] stage queue failed: ${e}`));
       } else {
-        await stageTask.catch(e => this.log(`[handleMessage] stage queue failed: ${e}`));
+        await stageTask.catch(e => this.warn(`[handleMessage] stage queue failed: ${e}`));
       }
       return;
     }
@@ -668,7 +670,7 @@ export class FeishuBot extends Bot {
     const files = msg.files;
     const prompt = buildPrompt(text, files);
     const start = Date.now();
-    this.log(
+    this.debug(
       `[handleMessage] start chat=${ctx.chatId} agent=${session.agent} session=${session.sessionId || '(new)'} ` +
       `files=${files.length} prompt="${prompt.slice(0, 100)}"`,
     );
@@ -708,7 +710,7 @@ export class FeishuBot extends Bot {
           if (placeholderId) {
             try { await this.channel.deleteMessage(ctx.chatId, placeholderId); } catch {}
           }
-          this.log(`[handleMessage] skipped cancelled queued task chat=${ctx.chatId} msg=${ctx.messageId}`);
+          this.debug(`[handleMessage] skipped cancelled queued task chat=${ctx.chatId} msg=${ctx.messageId}`);
           return;
         }
         // Task is now running — update keyboard from Recall/Steer to Stop
@@ -732,7 +734,7 @@ export class FeishuBot extends Bot {
             canSendTyping: false,
             parseMode: 'Markdown',
             keyboard: runningKeyboard,
-            log: (message: string) => this.log(message),
+            log: (message: string) => this.debug(message),
           });
           livePreview.start();
         }
@@ -752,13 +754,13 @@ export class FeishuBot extends Bot {
         if (task?.freezePreviewOnAbort && result.stopReason === 'interrupted') {
           const frozenMessageIds = await this.freezeSteerHandoffPreview(ctx, placeholderId, livePreview);
           this.registerSessionMessages(ctx.chatId, frozenMessageIds, session);
-          this.log(`[handleMessage] steer handoff preserved previous preview chat=${ctx.chatId} task=${taskId}`);
+          this.debug(`[handleMessage] steer handoff preserved previous preview chat=${ctx.chatId} task=${taskId}`);
           return;
         }
 
         const finalReplyIds = await this.sendFinalReply(ctx, placeholderId, session.agent, result);
         this.registerSessionMessages(ctx.chatId, finalReplyIds, session);
-        this.log(
+        this.debug(
           `[handleMessage] end chat=${ctx.chatId} agent=${session.agent} ok=${result.ok} session=${result.sessionId || session.sessionId || '(new)'} ` +
           `elapsed=${result.elapsedS.toFixed(1)}s tokens=in:${fmtTokens(result.inputTokens)}/out:${fmtTokens(result.outputTokens)} ` +
           `tools=${formatToolLog(result.activity)}`,
@@ -767,11 +769,11 @@ export class FeishuBot extends Bot {
         if (task?.freezePreviewOnAbort && abortController.signal.aborted) {
           const frozenMessageIds = await this.freezeSteerHandoffPreview(ctx, placeholderId, livePreview);
           this.registerSessionMessages(ctx.chatId, frozenMessageIds, session);
-          this.log(`[handleMessage] steer handoff preserved preview after abort chat=${ctx.chatId} task=${taskId}`);
+          this.debug(`[handleMessage] steer handoff preserved preview after abort chat=${ctx.chatId} task=${taskId}`);
           return;
         }
         const msgText = String(e?.message || e || 'Unknown error');
-        this.log(
+        this.warn(
           `[handleMessage] end chat=${ctx.chatId} agent=${session.agent} ok=false session=${session.sessionId || '(new)'} ` +
           `elapsed=${((Date.now() - start) / 1000).toFixed(1)}s error="${msgText.slice(0, 240)}" tools=-`,
         );
@@ -794,7 +796,7 @@ export class FeishuBot extends Bot {
         this.syncSelectedChats(session);
       }
     }).catch(e => {
-      this.log(`[handleMessage] queue execution failed: ${e}`);
+      this.warn(`[handleMessage] queue execution failed: ${e}`);
       this.finishTask(taskId);
     });
   }

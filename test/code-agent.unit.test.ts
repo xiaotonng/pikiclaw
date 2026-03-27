@@ -11,6 +11,8 @@ import {
   doCodexStream,
   doGeminiStream,
   doStream,
+  ensureManagedSession,
+  findManagedThreadSession,
   getSessionTail,
   getUsage,
   labelFromWindowMinutes,
@@ -18,6 +20,7 @@ import {
   listModels,
   mergeManagedAndNativeSessions,
   promoteSessionId,
+  sanitizeSessionUserPreviewText,
   shutdownCodexServer,
   stageSessionFiles,
   type StreamOpts,
@@ -71,6 +74,12 @@ describe('buildCodexTurnInput and usage helpers', () => {
     expect(labelFromWindowMinutes(10081, 'Secondary')).toBe('7d');
   });
 
+  it('filters interrupted placeholder prompts out of session previews', () => {
+    expect(sanitizeSessionUserPreviewText('[Request interrupted by user]')).toBe('');
+    expect(sanitizeSessionUserPreviewText('[Request interrupted by user for tool use]')).toBe('');
+    expect(sanitizeSessionUserPreviewText('正常问题')).toBe('正常问题');
+  });
+
   it('prefers native session metadata while keeping pikiclaw workspace and run state', () => {
     const merged = mergeManagedAndNativeSessions([
       {
@@ -85,6 +94,9 @@ describe('buildCodexTurnInput and usage helpers', () => {
         runState: 'incomplete',
         runDetail: 'local detail',
         runUpdatedAt: '2026-03-16T00:02:00.000Z',
+        lastQuestion: 'local question',
+        lastAnswer: 'local answer',
+        lastMessageText: 'local answer',
       },
     ], [
       {
@@ -99,6 +111,9 @@ describe('buildCodexTurnInput and usage helpers', () => {
         runState: 'completed',
         runDetail: null,
         runUpdatedAt: '2026-03-16T00:01:30.000Z',
+        lastQuestion: 'native question',
+        lastAnswer: 'native answer',
+        lastMessageText: 'native answer',
       },
     ]);
 
@@ -113,7 +128,156 @@ describe('buildCodexTurnInput and usage helpers', () => {
       runState: 'incomplete',
       runDetail: 'local detail',
       runUpdatedAt: '2026-03-16T00:02:00.000Z',
+      lastQuestion: 'local question',
+      lastAnswer: 'local answer',
+      lastMessageText: 'local answer',
     });
+  });
+
+  it('prefers newer native previews when the native session has advanced further', () => {
+    const merged = mergeManagedAndNativeSessions([
+      {
+        sessionId: 'sess-2',
+        agent: 'claude',
+        workdir: tmpDir,
+        workspacePath: '/tmp/pikiclaw/workspace',
+        model: 'claude-opus-4-6',
+        createdAt: '2026-03-16T00:00:00.000Z',
+        title: 'stale title',
+        running: false,
+        runState: 'completed',
+        runDetail: null,
+        runUpdatedAt: '2026-03-16T00:02:00.000Z',
+        lastQuestion: 'old question',
+        lastAnswer: 'old answer',
+        lastMessageText: 'old answer',
+      },
+    ], [
+      {
+        sessionId: 'sess-2',
+        agent: 'claude',
+        workdir: tmpDir,
+        workspacePath: null,
+        model: 'claude-opus-4-6',
+        createdAt: '2026-03-16T00:00:00.000Z',
+        title: 'native title',
+        running: false,
+        runState: 'completed',
+        runDetail: null,
+        runUpdatedAt: '2026-03-16T00:05:00.000Z',
+        lastQuestion: 'new question',
+        lastAnswer: 'new answer',
+        lastMessageText: 'new answer',
+      },
+    ]);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({
+      sessionId: 'sess-2',
+      workspacePath: '/tmp/pikiclaw/workspace',
+      runUpdatedAt: '2026-03-16T00:05:00.000Z',
+      lastQuestion: 'new question',
+      lastAnswer: 'new answer',
+      lastMessageText: 'new answer',
+    });
+  });
+
+  it('keeps managed preview when managed is newer than native', () => {
+    const merged = mergeManagedAndNativeSessions([
+      {
+        sessionId: 'sess-preview-1',
+        agent: 'codex',
+        workdir: tmpDir,
+        workspacePath: '/tmp/pikiclaw/workspace',
+        model: 'o3',
+        createdAt: '2026-03-20T10:00:00.000Z',
+        title: 'managed title',
+        running: false,
+        runState: 'completed',
+        runDetail: 'managed detail',
+        runUpdatedAt: '2026-03-20T10:05:00.000Z',
+        lastQuestion: 'managed question',
+        lastAnswer: 'managed answer (latest)',
+        lastMessageText: 'managed answer (latest)',
+      },
+    ], [
+      {
+        sessionId: 'sess-preview-1',
+        agent: 'codex',
+        workdir: tmpDir,
+        workspacePath: null,
+        model: 'o3',
+        createdAt: '2026-03-20T10:00:00.000Z',
+        title: 'native title',
+        running: false,
+        runState: 'completed',
+        runDetail: 'native detail',
+        runUpdatedAt: '2026-03-20T10:03:00.000Z',
+        lastQuestion: 'native question (stale)',
+        lastAnswer: 'native answer (stale)',
+        lastMessageText: 'native answer (stale)',
+      },
+    ]);
+
+    expect(merged).toHaveLength(1);
+    const s = merged[0];
+    // managed runUpdatedAt (10:05) > native runUpdatedAt (10:03) → keep managed preview
+    expect(s.runState).toBe('completed');
+    expect(s.runDetail).toBe('managed detail');
+    expect(s.runUpdatedAt).toBe('2026-03-20T10:05:00.000Z');
+    expect(s.lastQuestion).toBe('managed question');
+    expect(s.lastAnswer).toBe('managed answer (latest)');
+    expect(s.lastMessageText).toBe('managed answer (latest)');
+  });
+
+  it('switches to native preview when native is updated after managed', () => {
+    const merged = mergeManagedAndNativeSessions([
+      {
+        sessionId: 'sess-preview-2',
+        agent: 'codex',
+        workdir: tmpDir,
+        workspacePath: '/tmp/pikiclaw/workspace',
+        model: 'o3',
+        createdAt: '2026-03-20T10:00:00.000Z',
+        title: 'managed title',
+        running: false,
+        runState: 'completed',
+        runDetail: 'managed detail',
+        runUpdatedAt: '2026-03-20T10:05:00.000Z',
+        lastQuestion: 'managed question (stale)',
+        lastAnswer: 'managed answer (stale)',
+        lastMessageText: 'managed answer (stale)',
+      },
+    ], [
+      {
+        sessionId: 'sess-preview-2',
+        agent: 'codex',
+        workdir: tmpDir,
+        workspacePath: null,
+        model: 'o3',
+        createdAt: '2026-03-20T10:00:00.000Z',
+        title: 'native title',
+        running: false,
+        runState: 'completed',
+        runDetail: 'native detail',
+        runUpdatedAt: '2026-03-20T10:08:00.000Z',
+        lastQuestion: 'native question (latest)',
+        lastAnswer: 'native answer (latest)',
+        lastMessageText: 'native answer (latest)',
+      },
+    ]);
+
+    expect(merged).toHaveLength(1);
+    const s = merged[0];
+    // native runUpdatedAt (10:08) > managed runUpdatedAt (10:05) → use native preview
+    expect(s.runState).toBe('completed');
+    expect(s.runDetail).toBe('native detail');
+    expect(s.runUpdatedAt).toBe('2026-03-20T10:08:00.000Z');
+    expect(s.lastQuestion).toBe('native question (latest)');
+    expect(s.lastAnswer).toBe('native answer (latest)');
+    expect(s.lastMessageText).toBe('native answer (latest)');
+    // but managed workspace is preserved
+    expect(s.workspacePath).toBe('/tmp/pikiclaw/workspace');
   });
 });
 
@@ -209,6 +373,37 @@ describe('stageSessionFiles', () => {
     const records = listPikiclawSessions(workdir, 'codex');
     expect(records.map(entry => entry.sessionId)).toContain('thread-native');
     expect(records.map(entry => entry.sessionId)).not.toContain(staged.sessionId);
+  });
+
+  it('keeps per-agent records distinct even when session ids match, and resolves thread bindings by agent', () => {
+    ensureManagedSession({
+      agent: 'claude',
+      workdir: tmpDir,
+      sessionId: 'shared-session',
+      title: 'Claude branch',
+      threadId: 'thread-shared',
+    });
+    ensureManagedSession({
+      agent: 'codex',
+      workdir: tmpDir,
+      sessionId: 'shared-session',
+      title: 'Codex branch',
+      threadId: 'thread-shared',
+    });
+
+    const claudeRecord = listPikiclawSessions(tmpDir, 'claude').find(entry => entry.sessionId === 'shared-session');
+    const codexRecord = listPikiclawSessions(tmpDir, 'codex').find(entry => entry.sessionId === 'shared-session');
+    const codexBinding = findManagedThreadSession(tmpDir, 'thread-shared', 'codex');
+
+    expect(claudeRecord?.agent).toBe('claude');
+    expect(codexRecord?.agent).toBe('codex');
+    expect(claudeRecord?.threadId).toBe('thread-shared');
+    expect(codexRecord?.threadId).toBe('thread-shared');
+    expect(codexBinding).toMatchObject({
+      agent: 'codex',
+      sessionId: 'shared-session',
+      threadId: 'thread-shared',
+    });
   });
 });
 

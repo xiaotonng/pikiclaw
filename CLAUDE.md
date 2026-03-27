@@ -42,8 +42,12 @@ src/
     gui.ts                      Reserved GUI tool module
     types.ts                    MCP tool definitions and helpers
 
-  dashboard.ts                  Dashboard server/API
-  dashboard-ui.ts               Dashboard frontend
+  server.ts                     Hono-based dashboard server
+  runtime.ts                    Dashboard runtime singleton (bot ref, prefs, cache)
+  routes/
+    config.ts                   Config/channel/extension/permission API routes
+    agents.ts                   Agent/model API routes
+    sessions.ts                 Session/workspace API routes
   config-validation.ts          Channel credential checks
   channel-states.ts             Channel validation caching
   session-status.ts             Runtime session helpers
@@ -63,6 +67,9 @@ src/
 - `bot-handler.ts` runs the standard placeholder -> preview -> stream -> final reply flow
 - `code-agent.ts` dispatches to registered drivers and handles session workspace mechanics
 - `mcp-bridge.ts` injects session-scoped MCP tools into each stream
+- `server.ts` is the Hono-based dashboard server; `runtime.ts` holds the singleton bot ref and dashboard state
+- `routes/*.ts` are modular Hono route handlers for all dashboard API endpoints
+- Dashboard frontend uses react-router-dom for page routing (Vite + React SPA served as static files)
 
 ## Current Product Surface
 
@@ -80,7 +87,6 @@ src/
 ```bash
 npm run dev
 npm test
-npm run test:e2e
 npx vitest run test/code-agent.unit.test.ts
 ```
 
@@ -92,4 +98,3 @@ npx vitest run test/code-agent.unit.test.ts
 - This machine always has a production/self-bootstrap communication path via `npx pikiclaw@latest`; do not kill, replace, or "clean up" that process when the task only concerns dev mode
 - `npm run dev` is the local-only development path: it runs with `--no-daemon`, stays on the checked-out source tree, and rewrites `~/.pikiclaw/dev/dev.log` from scratch on each launch
 - If a test or validation step needs a running `pikiclaw` process, use `npm run dev`
-- The one deliberate daemon exception is `test/e2e/restart.e2e.test.ts`; keep it on the local source chain and never point it at the production `npx pikiclaw@latest` runtime

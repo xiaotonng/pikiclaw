@@ -3,11 +3,16 @@ import type {
   AppState,
   BrowserSetupResponse,
   BrowserStatusResponse,
+  OpenTarget,
   HostInfo,
   LsDirResult,
   PermissionRequestResult,
+  SessionHubResult,
+  SessionMessagesResult,
+  StreamPlan,
   SessionTailMessage,
   SessionsPageResult,
+  WorkspaceEntry,
   WeixinLoginStartResult,
   WeixinLoginWaitResult,
   WeixinValidationResult,
@@ -123,7 +128,14 @@ export const api = {
   requestPermission: (permission: string) => post<PermissionRequestResult>('/api/open-preferences', { permission }),
   restart: () => post<{ ok: boolean; error?: string | null }>('/api/restart', {}),
   switchWorkdir: (path: string) => post<{ ok: boolean; workdir?: string; error?: string }>('/api/switch-workdir', { path }),
-  lsDir: (dir?: string) => json<LsDirResult>(`/api/ls-dir${dir ? '?path=' + encodeURIComponent(dir) : ''}`),
+  lsDir: (dir?: string, includeFiles?: boolean, includeHidden?: boolean) => {
+    const params = new URLSearchParams();
+    if (dir) params.set('path', dir);
+    if (includeFiles) params.set('files', '1');
+    if (includeHidden) params.set('hidden', '1');
+    const qs = params.toString();
+    return json<LsDirResult>(`/api/ls-dir${qs ? '?' + qs : ''}`);
+  },
   getBrowser: () => json<BrowserStatusResponse>('/api/browser'),
   setupBrowser: (opts?: ApiRequestOptions) =>
     post<BrowserSetupResponse>('/api/browser/setup', {}, { timeoutMs: 120_000, ...opts }),
@@ -131,4 +143,120 @@ export const api = {
     post<{ ok: boolean; installed?: boolean; error?: string }>('/api/desktop-install', {}, { timeoutMs: 300_000, ...opts }),
   desktopToggle: (enabled: boolean, opts?: ApiRequestOptions) =>
     post<{ ok: boolean; enabled?: boolean; error?: string }>('/api/desktop-toggle', { enabled }, { timeoutMs: 60_000, ...opts }),
+
+  // Session hub
+  getWorkspaces: () => json<{ ok: boolean; workspaces: WorkspaceEntry[] }>('/api/workspaces'),
+  getWorkspaceSessions: (workdir: string, opts?: ApiRequestOptions) =>
+    post<SessionHubResult>('/api/session-hub/sessions', { workdir }, opts),
+  getSessionMessages: (
+    workdir: string,
+    agent: string,
+    sessionId: string,
+    query: { lastNTurns?: number; turnOffset?: number; turnLimit?: number; rich?: boolean } = {},
+    opts?: ApiRequestOptions,
+  ) =>
+    post<SessionMessagesResult>(
+      '/api/session-hub/session/messages',
+      { workdir, agent, sessionId, rich: query.rich ?? true, lastNTurns: query.lastNTurns, turnOffset: query.turnOffset, turnLimit: query.turnLimit },
+      opts,
+    ),
+  updateSessionStatus: (
+    workdir: string,
+    agent: string,
+    sessionId: string,
+    status: 'inbox' | 'active' | 'review' | 'done' | 'parked',
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; updated?: boolean; error?: string }>(
+      '/api/session-hub/session/status',
+      { workdir, agent, sessionId, status },
+      opts,
+    ),
+  updateSessionNote: (
+    workdir: string,
+    agent: string,
+    sessionId: string,
+    note: string | null,
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; updated?: boolean; error?: string }>(
+      '/api/session-hub/session/note',
+      { workdir, agent, sessionId, note },
+      opts,
+    ),
+  addWorkspace: (wsPath: string, name?: string, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; workspace?: WorkspaceEntry; error?: string }>('/api/workspaces', { path: wsPath, name }, opts),
+  removeWorkspace: (wsPath: string, opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; removed?: boolean; error?: string }>('/api/workspaces', { ...opts, method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: wsPath }) }),
+
+  // Editor integration
+  openInEditor: (filePath: string, target?: OpenTarget) =>
+    post<{ ok: boolean; error?: string }>('/api/open-in-editor', { filePath, target }),
+
+  // Session interaction
+  sendSessionMessage: (
+    workdir: string,
+    agent: string,
+    sessionId: string,
+    prompt: string,
+    attachmentsOrOpts?: File[] | ApiRequestOptions,
+    maybeOpts?: ApiRequestOptions,
+  ) => {
+    const attachments = Array.isArray(attachmentsOrOpts) ? attachmentsOrOpts : [];
+    const opts = (Array.isArray(attachmentsOrOpts) ? maybeOpts : attachmentsOrOpts) || {};
+
+    if (!attachments.length) {
+      return post<{ ok: boolean; queued?: boolean; taskId?: string; error?: string }>(
+        '/api/session-hub/session/send',
+        { workdir, agent, sessionId, prompt },
+        { timeoutMs: 30_000, ...opts },
+      );
+    }
+
+    const body = new FormData();
+    body.set('workdir', workdir);
+    body.set('agent', agent);
+    body.set('sessionId', sessionId);
+    body.set('prompt', prompt);
+    for (const attachment of attachments) {
+      body.append('attachments', attachment, attachment.name || 'image');
+    }
+
+    return json<{ ok: boolean; queued?: boolean; taskId?: string; error?: string }>(
+      '/api/session-hub/session/send',
+      { method: 'POST', body, timeoutMs: 30_000, ...opts },
+    );
+  },
+  recallSessionMessage: (taskId: string, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; recalled?: boolean; error?: string }>(
+      '/api/session-hub/session/recall',
+      { taskId },
+      opts,
+    ),
+  steerSession: (taskId: string, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; steered?: boolean; error?: string }>(
+      '/api/session-hub/session/steer',
+      { taskId },
+      opts,
+    ),
+
+  /** Poll current streaming state for a session. */
+  getSessionStreamState: (agent: string, sessionId: string, opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; state: StreamSnapshot | null }>(
+      `/api/session-hub/session/stream-state?agent=${encodeURIComponent(agent)}&sessionId=${encodeURIComponent(sessionId)}`,
+      { timeoutMs: 5_000, ...opts },
+    ),
 };
+
+/** Snapshot of the latest streaming state for a session (returned by polling endpoint). */
+export interface StreamSnapshot {
+  phase: 'queued' | 'streaming' | 'done';
+  taskId: string;
+  text?: string;
+  thinking?: string;
+  activity?: string;
+  plan?: StreamPlan | null;
+  sessionId?: string | null;
+  error?: string;
+  updatedAt: number;
+}

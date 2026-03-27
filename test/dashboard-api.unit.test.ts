@@ -52,5 +52,40 @@ describe('dashboard api', () => {
     const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
     expect(init.method).toBe('POST');
     expect(init.body).toBe(JSON.stringify({ agent: 'gemini' }));
+
+    fetchMock.mockClear();
+    const file = new File(['image-bytes'], 'image.png', { type: 'image/png' });
+    await api.sendSessionMessage('/tmp/pikiclaw', 'codex', 'session-1', 'inspect this', [file]);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/session-hub/session/send');
+    const sendInit = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(sendInit.method).toBe('POST');
+    expect(sendInit.body).toBeInstanceOf(FormData);
+    const form = sendInit.body as FormData;
+    expect(form.get('workdir')).toBe('/tmp/pikiclaw');
+    expect(form.get('agent')).toBe('codex');
+    expect(form.get('sessionId')).toBe('session-1');
+    expect(form.get('prompt')).toBe('inspect this');
+    const attachment = form.get('attachments');
+    expect(attachment).toBeInstanceOf(File);
+    expect((attachment as File).name).toBe('image.png');
+
+    fetchMock.mockClear();
+    await api.getSessionMessages('/tmp/pikiclaw', 'claude', 'session-2', { turnOffset: 24, turnLimit: 12 });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/session-hub/session/messages');
+    const messagesInit = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(messagesInit.method).toBe('POST');
+    expect(messagesInit.body).toBe(JSON.stringify({
+      workdir: '/tmp/pikiclaw',
+      agent: 'claude',
+      sessionId: 'session-2',
+      rich: true,
+      lastNTurns: undefined,
+      turnOffset: 24,
+      turnLimit: 12,
+    }));
   });
 });

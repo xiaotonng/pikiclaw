@@ -13,6 +13,7 @@ import path from 'node:path';
 import { getDriver, allDrivers, shutdownAllDrivers, hasDriver } from './agent-driver.js';
 import { terminateProcessTree } from './process-control.js';
 import { AGENT_DETECT_TIMEOUTS, AGENT_STREAM_HARD_KILL_GRACE_MS } from './constants.js';
+import { writeScopedLog, type LogLevel } from './logging.js';
 export { type AgentDriver, registerDriver, getDriver, allDrivers, allDriverIds, hasDriver, shutdownAllDrivers } from './agent-driver.js';
 
 // Load all drivers (side-effect: each calls registerDriver)
@@ -185,9 +186,16 @@ interface AgentDetectCacheEntry {
 
 const agentDetectCache = new Map<string, AgentDetectCacheEntry>();
 
-export function agentLog(msg: string) {
-  const ts = new Date().toTimeString().slice(0, 8);
-  process.stdout.write(`[agent ${ts}] ${msg}\n`);
+export function agentLog(msg: string, level: LogLevel = 'debug') {
+  writeScopedLog('agent', msg, { level });
+}
+
+export function agentWarn(msg: string) {
+  agentLog(msg, 'warn');
+}
+
+export function agentError(msg: string) {
+  agentLog(msg, 'error');
 }
 
 export function dedupeStrings(values: string[]): string[] {
@@ -568,20 +576,39 @@ export function stripInjectedPrompts(text: string): string {
   const markers = ['\n[Session Workspace]'];
   for (const m of markers) {
     const idx = text.indexOf(m);
-    if (idx >= 0) return text.slice(0, idx).trim();
+    if (idx >= 0) text = text.slice(0, idx).trim();
+  }
+  // Strip Codex IDE context prefix ("# Context from my IDE setup: ...")
+  if (text.startsWith('# Context from')) {
+    const tag = '## My request for Codex:\n';
+    const idx = text.indexOf(tag);
+    if (idx >= 0) return text.slice(idx + tag.length).trim();
+    return '';
   }
   return text;
+}
+
+const SESSION_PREVIEW_IGNORED_USER_PATTERNS = [
+  /^\[Request interrupted by user(?: for tool use)?\]$/i,
+];
+
+export function sanitizeSessionUserPreviewText(text: string): string {
+  const cleaned = stripInjectedPrompts(text).trim();
+  if (!cleaned) return '';
+  if (SESSION_PREVIEW_IGNORED_USER_PATTERNS.some(pattern => pattern.test(cleaned))) return '';
+  return cleaned;
 }
 
 // ---------------------------------------------------------------------------
 // Session management
 // ---------------------------------------------------------------------------
 
-interface LocalSessionRecord {
+export interface ManagedSessionRecord {
   sessionId: string;
   agent: Agent;
   workdir: string;
   workspacePath: string;
+  threadId: string | null;
   createdAt: string;
   updatedAt: string;
   title: string | null;
@@ -590,11 +617,21 @@ interface LocalSessionRecord {
   runState: SessionRunState;
   runDetail: string | null;
   runUpdatedAt: string | null;
+  classification: SessionClassification | null;
+  userStatus: 'inbox' | 'active' | 'review' | 'done' | 'parked' | null;
+  userNote: string | null;
+  lastQuestion: string | null;
+  lastAnswer: string | null;
+  lastMessageText: string | null;
+  migratedFrom: { agent: Agent; sessionId: string } | null;
+  migratedTo: { agent: Agent; sessionId: string } | null;
+  linkedSessions: Array<{ agent: Agent; sessionId: string }>;
+  numTurns?: number | null;
 }
 
 interface SessionIndexData {
   version: number;
-  sessions: LocalSessionRecord[];
+  sessions: ManagedSessionRecord[];
 }
 
 interface EnsureSessionWorkspaceOpts {
@@ -602,12 +639,13 @@ interface EnsureSessionWorkspaceOpts {
   workdir: string;
   sessionId?: string | null;
   title?: string | null;
+  threadId?: string | null;
 }
 
 interface SessionWorkspaceInfo {
   sessionId: string;
   workspacePath: string;
-  record: LocalSessionRecord;
+  record: ManagedSessionRecord;
 }
 
 export type SessionRunState = 'running' | 'completed' | 'incomplete';
@@ -633,6 +671,11 @@ function legacySessionMetaPath(workspacePath: string): string { return path.join
 
 /** Generate a temporary session ID for new sessions before the agent assigns one. */
 function nextPendingSessionId(): string { return `pending_${crypto.randomBytes(6).toString('hex')}`; }
+function nextThreadId(): string { return `thread_${crypto.randomBytes(6).toString('hex')}`; }
+function legacyThreadId(agent: Agent, sessionId: string): string { return `legacy:${agent}:${sessionId}`; }
+function normalizeThreadId(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
 
 export function isPendingSessionId(sessionId: string | null | undefined): boolean {
   return typeof sessionId === 'string' && sessionId.startsWith('pending_');
@@ -640,16 +683,13 @@ export function isPendingSessionId(sessionId: string | null | undefined): boolea
 
 function normalizeSessionRunState(rawState: unknown): SessionRunState {
   const state = typeof rawState === 'string' ? rawState.trim().toLowerCase() : '';
-  if (state === 'completed' || state === 'incomplete') return state;
-  if (state === 'running') return 'incomplete';
+  if (state === 'completed' || state === 'incomplete' || state === 'running') return state;
   return 'completed';
 }
 
-function normalizeSessionRunDetail(rawState: unknown, rawDetail: unknown): string | null {
+function normalizeSessionRunDetail(_rawState: unknown, rawDetail: unknown): string | null {
   const detail = typeof rawDetail === 'string' ? rawDetail.trim() : '';
   if (detail) return shortValue(detail, 180);
-  const state = typeof rawState === 'string' ? rawState.trim().toLowerCase() : '';
-  if (state === 'running') return 'Last run stopped before completion.';
   return null;
 }
 
@@ -657,7 +697,7 @@ function normalizeSessionRunUpdatedAt(rawUpdatedAt: unknown, fallback: string): 
   return typeof rawUpdatedAt === 'string' && rawUpdatedAt.trim() ? rawUpdatedAt : fallback;
 }
 
-function setSessionRunState(record: LocalSessionRecord, runState: SessionRunState, runDetail: string | null, runUpdatedAt?: string) {
+function setSessionRunState(record: ManagedSessionRecord, runState: SessionRunState, runDetail: string | null, runUpdatedAt?: string) {
   record.runState = runState;
   record.runDetail = runDetail ? shortValue(runDetail, 180) : null;
   record.runUpdatedAt = runUpdatedAt || new Date().toISOString();
@@ -675,15 +715,26 @@ function incompleteRunDetail(result: Pick<StreamResult, 'error' | 'stopReason' |
   return message ? shortValue(message, 180) : 'Last run did not complete.';
 }
 
-function applySessionRunResult(record: LocalSessionRecord, result: Pick<StreamResult, 'ok' | 'incomplete' | 'error' | 'stopReason' | 'message'>) {
+function applySessionRunResult(
+  record: ManagedSessionRecord,
+  result: Pick<StreamResult, 'ok' | 'incomplete' | 'error' | 'stopReason' | 'message'> & { activity?: string | null },
+) {
   if (result.ok && !result.incomplete) {
     setSessionRunState(record, 'completed', null);
-    return;
+  } else {
+    setSessionRunState(record, 'incomplete', incompleteRunDetail(result));
   }
-  setSessionRunState(record, 'incomplete', incompleteRunDetail(result));
+
+  // Auto-classify the stream result
+  const classification = classifySession({ ...result, activity: result.activity ?? null });
+  record.classification = classification;
+  // Only set userStatus if not manually overridden by the user
+  if (!record.userStatus) {
+    record.userStatus = deriveUserStatus(classification.outcome);
+  }
 }
 
-function normalizeSessionRecord(raw: any, workdir: string): LocalSessionRecord | null {
+function normalizeSessionRecord(raw: any, workdir: string): ManagedSessionRecord | null {
   // Support both new format (sessionId) and legacy format (localSessionId + engineSessionId)
   const sessionId = typeof raw?.sessionId === 'string' ? raw.sessionId.trim()
     : typeof raw?.engineSessionId === 'string' && raw.engineSessionId.trim() ? raw.engineSessionId.trim()
@@ -697,6 +748,7 @@ function normalizeSessionRecord(raw: any, workdir: string): LocalSessionRecord |
   return {
     sessionId, agent, workdir,
     workspacePath,
+    threadId: normalizeThreadId(raw?.threadId) || legacyThreadId(agent, sessionId),
     createdAt: typeof raw?.createdAt === 'string' && raw.createdAt.trim() ? raw.createdAt : new Date().toISOString(),
     updatedAt: typeof raw?.updatedAt === 'string' && raw.updatedAt.trim() ? raw.updatedAt : new Date().toISOString(),
     title: typeof raw?.title === 'string' && raw.title.trim() ? raw.title.trim() : null,
@@ -705,6 +757,15 @@ function normalizeSessionRecord(raw: any, workdir: string): LocalSessionRecord |
     runState: normalizeSessionRunState(raw?.runState),
     runDetail: normalizeSessionRunDetail(raw?.runState, raw?.runDetail),
     runUpdatedAt: normalizeSessionRunUpdatedAt(raw?.runUpdatedAt, typeof raw?.updatedAt === 'string' && raw.updatedAt.trim() ? raw.updatedAt : new Date().toISOString()),
+    classification: raw?.classification ?? null,
+    userStatus: raw?.userStatus ?? null,
+    userNote: typeof raw?.userNote === 'string' ? raw.userNote : null,
+    lastQuestion: typeof raw?.lastQuestion === 'string' ? raw.lastQuestion : null,
+    lastAnswer: typeof raw?.lastAnswer === 'string' ? raw.lastAnswer : null,
+    lastMessageText: typeof raw?.lastMessageText === 'string' ? raw.lastMessageText : null,
+    migratedFrom: raw?.migratedFrom ?? null,
+    migratedTo: raw?.migratedTo ?? null,
+    linkedSessions: Array.isArray(raw?.linkedSessions) ? raw.linkedSessions : [],
   };
 }
 
@@ -715,22 +776,32 @@ function loadSessionIndex(workdir: string): SessionIndexData {
     version: 1,
     sessions: sessions
       .map((entry: any) => normalizeSessionRecord(entry, workdir))
-      .filter((entry: LocalSessionRecord | null): entry is LocalSessionRecord => !!entry)
-      .filter((entry: LocalSessionRecord) => !isPendingSessionId(entry.sessionId) || fs.existsSync(sessionRootFromWorkspacePath(entry.workspacePath))),
+      .filter((entry: ManagedSessionRecord | null): entry is ManagedSessionRecord => !!entry)
+      .filter((entry: ManagedSessionRecord) => !isPendingSessionId(entry.sessionId) || fs.existsSync(sessionRootFromWorkspacePath(entry.workspacePath))),
   };
 }
 
-function writeSessionIndex(workdir: string, sessions: LocalSessionRecord[]) {
+function writeSessionIndex(workdir: string, sessions: ManagedSessionRecord[]) {
   writeJsonFile(sessionIndexPath(workdir), { version: 1, sessions });
 }
 
-function writeSessionMeta(record: LocalSessionRecord) {
+function writeSessionMeta(record: ManagedSessionRecord) {
   writeJsonFile(sessionMetaPath(record.workspacePath), {
     sessionId: record.sessionId, agent: record.agent, workdir: record.workdir,
     workspacePath: record.workspacePath,
+    threadId: record.threadId,
     createdAt: record.createdAt, updatedAt: record.updatedAt,
     title: record.title, model: record.model, stagedFiles: record.stagedFiles,
     runState: record.runState, runDetail: record.runDetail, runUpdatedAt: record.runUpdatedAt,
+    classification: record.classification,
+    userStatus: record.userStatus,
+    userNote: record.userNote,
+    lastQuestion: record.lastQuestion,
+    lastAnswer: record.lastAnswer,
+    lastMessageText: record.lastMessageText,
+    migratedFrom: record.migratedFrom,
+    migratedTo: record.migratedTo,
+    linkedSessions: record.linkedSessions,
   });
 }
 
@@ -750,7 +821,7 @@ function createSessionDirAlias(aliasPath: string, targetPath: string) {
   } catch {}
 }
 
-function migrateSessionLayout(workdir: string, record: LocalSessionRecord): LocalSessionRecord {
+function migrateSessionLayout(workdir: string, record: ManagedSessionRecord): ManagedSessionRecord {
   const targetSessionDir = sessionDirPath(workdir, record.agent, record.sessionId);
   const targetWorkspacePath = sessionWorkspacePath(workdir, record.agent, record.sessionId);
   const currentWorkspacePath = path.resolve(record.workspacePath || targetWorkspacePath);
@@ -772,19 +843,56 @@ function migrateSessionLayout(workdir: string, record: LocalSessionRecord): Loca
   return record;
 }
 
-function saveSessionRecord(workdir: string, record: LocalSessionRecord): LocalSessionRecord {
+function saveSessionRecord(workdir: string, record: ManagedSessionRecord): ManagedSessionRecord {
   record = migrateSessionLayout(workdir, record);
   ensureDir(sessionDirPath(workdir, record.agent, record.sessionId));
   ensureDir(record.workspacePath);
   const index = loadSessionIndex(workdir);
+  record.threadId = normalizeThreadId(record.threadId) || legacyThreadId(record.agent, record.sessionId);
   record.updatedAt = new Date().toISOString();
-  const pos = index.sessions.findIndex(entry => entry.sessionId === record.sessionId);
+  const pos = index.sessions.findIndex(entry => entry.agent === record.agent && entry.sessionId === record.sessionId);
   if (pos >= 0) index.sessions[pos] = record;
   else index.sessions.unshift(record);
   index.sessions.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
   writeSessionIndex(workdir, index.sessions);
   writeSessionMeta(record);
   return record;
+}
+
+/**
+ * Update mutable session metadata (classification, userStatus, userNote, links, migration)
+ * for an existing pikiclaw-managed session. Returns true if the record was found and updated.
+ */
+export function updateSessionMeta(
+  workdir: string,
+  agent: Agent,
+  sessionId: string,
+  patch: Partial<Pick<ManagedSessionRecord, 'userStatus' | 'userNote' | 'classification' | 'migratedFrom' | 'migratedTo'>> & {
+    addLink?: { agent: Agent; sessionId: string };
+  },
+): boolean {
+  const resolvedWorkdir = path.resolve(workdir);
+  const index = loadSessionIndex(resolvedWorkdir);
+  const record = index.sessions.find(s => s.sessionId === sessionId && s.agent === agent);
+  if (!record) return false;
+
+  if (patch.userStatus !== undefined) record.userStatus = patch.userStatus;
+  if (patch.userNote !== undefined) record.userNote = patch.userNote;
+  if (patch.classification !== undefined) record.classification = patch.classification;
+  if (patch.migratedFrom !== undefined) record.migratedFrom = patch.migratedFrom;
+  if (patch.migratedTo !== undefined) record.migratedTo = patch.migratedTo;
+  if (patch.addLink) {
+    if (!record.linkedSessions) record.linkedSessions = [];
+    const exists = record.linkedSessions.some(
+      l => l.agent === patch.addLink!.agent && l.sessionId === patch.addLink!.sessionId,
+    );
+    if (!exists) record.linkedSessions.push(patch.addLink);
+  }
+
+  record.updatedAt = new Date().toISOString();
+  writeSessionIndex(resolvedWorkdir, index.sessions);
+  writeSessionMeta(record);
+  return true;
 }
 
 /**
@@ -881,41 +989,102 @@ function ensureSessionWorkspace(opts: EnsureSessionWorkspaceOpts): SessionWorksp
     || null;
   if (!record) {
     const sessionId = opts.sessionId?.trim() || nextPendingSessionId();
+    const threadId = normalizeThreadId(opts.threadId)
+      || (opts.sessionId ? legacyThreadId(opts.agent, sessionId) : nextThreadId());
     record = {
       sessionId, agent: opts.agent, workdir,
       workspacePath: sessionWorkspacePath(workdir, opts.agent, sessionId),
+      threadId,
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       title: summarizePromptTitle(opts.title) || null, model: null, stagedFiles: [],
       runState: 'completed', runDetail: null, runUpdatedAt: new Date().toISOString(),
+      classification: null, userStatus: null, userNote: null,
+      lastQuestion: null, lastAnswer: null, lastMessageText: null,
+      migratedFrom: null, migratedTo: null, linkedSessions: [],
     };
   }
+  if (!record.threadId) record.threadId = normalizeThreadId(opts.threadId) || legacyThreadId(record.agent, record.sessionId);
   if (!record.title && opts.title) record.title = summarizePromptTitle(opts.title);
   record.workspacePath = path.resolve(record.workspacePath);
   saveSessionRecord(workdir, record);
   return { sessionId: record.sessionId, workspacePath: record.workspacePath, record };
 }
 
+function managedRecordToSessionInfo(record: ManagedSessionRecord): SessionInfo {
+  return {
+    sessionId: record.sessionId,
+    agent: record.agent,
+    workdir: record.workdir,
+    workspacePath: record.workspacePath,
+    threadId: record.threadId,
+    model: record.model,
+    createdAt: record.createdAt,
+    title: record.title,
+    running: record.runState === 'running',
+    runState: record.runState,
+    runDetail: record.runDetail,
+    runUpdatedAt: record.runUpdatedAt,
+    classification: record.classification,
+    userStatus: record.userStatus,
+    userNote: record.userNote,
+    lastQuestion: record.lastQuestion,
+    lastAnswer: record.lastAnswer,
+    lastMessageText: record.lastMessageText,
+    migratedFrom: record.migratedFrom,
+    migratedTo: record.migratedTo,
+    linkedSessions: record.linkedSessions,
+    numTurns: record.numTurns ?? null,
+  };
+}
+
 // Exported for drivers
-export function listPikiclawSessions(workdir: string, agent: Agent, limit?: number): LocalSessionRecord[] {
+export function listPikiclawSessions(workdir: string, agent: Agent, limit?: number): ManagedSessionRecord[] {
   const records = loadSessionIndex(path.resolve(workdir)).sessions
     .filter(entry => entry.agent === agent)
     .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
   return typeof limit === 'number' ? records.slice(0, limit) : records;
 }
 
-export function findPikiclawSession(workdir: string, agent: Agent, sessionId: string): LocalSessionRecord | null {
+export function findPikiclawSession(workdir: string, agent: Agent, sessionId: string): ManagedSessionRecord | null {
   return listPikiclawSessions(workdir, agent).find(entry => entry.sessionId === sessionId) || null;
 }
 
+export function ensureManagedSession(opts: EnsureManagedSessionOpts): SessionInfo {
+  const session = ensureSessionWorkspace({
+    agent: opts.agent,
+    workdir: opts.workdir,
+    sessionId: opts.sessionId,
+    title: opts.title,
+    threadId: opts.threadId,
+  });
+  if (!session.record.title && opts.title) session.record.title = summarizePromptTitle(opts.title);
+  if (!session.record.model && opts.model) session.record.model = opts.model.trim() || null;
+  saveSessionRecord(opts.workdir, session.record);
+  return managedRecordToSessionInfo(session.record);
+}
+
+export function findManagedThreadSession(workdir: string, threadId: string, agent: Agent): SessionInfo | null {
+  const record = loadSessionIndex(path.resolve(workdir)).sessions
+    .filter(entry => entry.threadId === threadId && entry.agent === agent)
+    .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))[0] || null;
+  return record ? managedRecordToSessionInfo(record) : null;
+}
+
 export function stageSessionFiles(opts: StageSessionFilesOpts): StageSessionFilesResult {
-  const session = ensureSessionWorkspace({ agent: opts.agent, workdir: opts.workdir, sessionId: opts.sessionId, title: opts.title });
+  const session = ensureSessionWorkspace({
+    agent: opts.agent,
+    workdir: opts.workdir,
+    sessionId: opts.sessionId,
+    title: opts.title,
+    threadId: opts.threadId,
+  });
   const importedFiles = importFilesIntoWorkspace(session.workspacePath, opts.files);
   if (importedFiles.length) {
     session.record.stagedFiles = dedupeStrings([...session.record.stagedFiles, ...importedFiles]);
     /* title will be set when the first text prompt arrives */
     saveSessionRecord(opts.workdir, session.record);
   }
-  return { sessionId: session.sessionId, workspacePath: session.workspacePath, importedFiles };
+  return { sessionId: session.sessionId, workspacePath: session.workspacePath, threadId: session.record.threadId, importedFiles };
 }
 
 export interface StageSessionFilesOpts {
@@ -924,12 +1093,23 @@ export interface StageSessionFilesOpts {
   files: string[];
   sessionId?: string | null;
   title?: string | null;
+  threadId?: string | null;
 }
 
 export interface StageSessionFilesResult {
   sessionId: string;
   workspacePath: string;
+  threadId: string | null;
   importedFiles: string[];
+}
+
+export interface EnsureManagedSessionOpts {
+  agent: Agent;
+  workdir: string;
+  sessionId: string;
+  title?: string | null;
+  model?: string | null;
+  threadId?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -989,7 +1169,7 @@ export async function run(cmd: string[], opts: StreamOpts, parseLine: (ev: any, 
     if (Date.now() > deadline) {
       timedOut = true;
       s.stopReason = 'timeout';
-      agentLog(`[timeout] deadline exceeded, killing process tree`);
+      agentWarn('[timeout] deadline exceeded, killing process tree');
       terminateProcessTree(proc, { signal: 'SIGKILL' });
       return;
     }
@@ -1013,13 +1193,13 @@ export async function run(cmd: string[], opts: StreamOpts, parseLine: (ev: any, 
 
   const hardTimer = setTimeout(() => {
     timedOut = true; s.stopReason = 'timeout';
-    agentLog(`[timeout] hard deadline reached (${opts.timeout}s), killing process tree pid=${proc.pid}`);
+    agentWarn(`[timeout] hard deadline reached (${opts.timeout}s), killing process tree pid=${proc.pid}`);
     terminateProcessTree(proc, { signal: 'SIGTERM', forceSignal: 'SIGKILL', forceAfterMs: 5000 });
   }, opts.timeout * 1000 + AGENT_STREAM_HARD_KILL_GRACE_MS);
 
   const [procOk, code] = await new Promise<[boolean, number | null]>(resolve => {
     proc.on('close', code => { clearTimeout(hardTimer); agentLog(`[exit] code=${code} lines_parsed=${lineCount}`); resolve([code === 0, code]); });
-    proc.on('error', e => { clearTimeout(hardTimer); agentLog(`[error] ${e.message}`); stderr += e.message; resolve([false, -1]); });
+    proc.on('error', e => { clearTimeout(hardTimer); agentError(`[error] ${e.message}`); stderr += e.message; resolve([false, -1]); });
   });
   opts.abortSignal?.removeEventListener('abort', abortStream);
 
@@ -1035,9 +1215,9 @@ export async function run(cmd: string[], opts: StreamOpts, parseLine: (ev: any, 
   const incomplete = !ok || s.stopReason === 'max_tokens' || s.stopReason === 'timeout';
   const elapsed = ((Date.now() - start) / 1000).toFixed(1);
   agentLog(`[result] ok=${ok && !s.errors} elapsed=${elapsed}s text=${s.text.length}chars thinking=${s.thinking.length}chars session=${s.sessionId || '?'}`);
-  if (errorText) agentLog(`[result] errors: ${errorText}`);
+  if (errorText) agentWarn(`[result] errors: ${errorText}`);
   if (s.stopReason) agentLog(`[result] stop_reason=${s.stopReason}`);
-  if (stderr.trim() && !procOk) agentLog(`[result] stderr: ${stderr.trim().slice(0, 300)}`);
+  if (stderr.trim() && !procOk) agentWarn(`[result] stderr: ${stderr.trim().slice(0, 300)}`);
 
   return {
     ok, sessionId: s.sessionId, workspacePath: null,
@@ -1064,6 +1244,8 @@ function prepareStreamOpts(opts: StreamOpts): { prepared: StreamOpts; session: S
   const stagedFiles = [...session.record.stagedFiles];
   session.record.stagedFiles = [];
   if (!session.record.title) session.record.title = summarizePromptTitle(opts.prompt) || null;
+  session.record.lastQuestion = shortValue(opts.prompt, 500);
+  session.record.lastMessageText = shortValue(opts.prompt, 500);
   setSessionRunState(session.record, 'running', null);
   saveSessionRecord(opts.workdir, session.record);
 
@@ -1092,6 +1274,9 @@ function finalizeStreamResult(result: StreamResult, workdir: string, prompt: str
   if (result.sessionId) syncManagedSessionIdentity(session, workdir, result.sessionId);
   session.record.model = result.model || session.record.model;
   if (!session.record.title) session.record.title = summarizePromptTitle(prompt);
+  session.record.lastQuestion = shortValue(prompt, 500);
+  session.record.lastAnswer = shortValue(result.message, 500);
+  session.record.lastMessageText = shortValue(result.message, 500) || shortValue(prompt, 500);
   applySessionRunResult(session.record, result);
   saveSessionRecord(workdir, session.record);
   return { ...result, sessionId: session.sessionId, workspacePath: session.workspacePath };
@@ -1138,7 +1323,7 @@ export async function doStream(opts: StreamOpts): Promise<StreamResult> {
       else agentLog('[mcp] bridge registered with codex');
       try { agentLog(`[mcp] config content:\n${fs.readFileSync(bridge.configPath, 'utf-8')}`); } catch {};
     } catch (e: any) {
-      agentLog(`[mcp] bridge start failed: ${e.message} — proceeding without MCP`);
+      agentWarn(`[mcp] bridge start failed: ${e.message} — proceeding without MCP`);
     }
   }
 
@@ -1169,6 +1354,9 @@ export async function doStream(opts: StreamOpts): Promise<StreamResult> {
       incomplete: true,
       activity: null,
     };
+    session.record.lastQuestion = shortValue(opts.prompt, 500);
+    session.record.lastAnswer = shortValue(failedResult.message, 500);
+    session.record.lastMessageText = shortValue(failedResult.message, 500) || shortValue(opts.prompt, 500);
     applySessionRunResult(session.record, failedResult);
     saveSessionRecord(opts.workdir, session.record);
     throw error;
@@ -1189,6 +1377,7 @@ export interface SessionInfo {
   agent: Agent;
   workdir: string | null;
   workspacePath: string | null;
+  threadId?: string | null;
   model: string | null;
   createdAt: string | null;
   title: string | null;
@@ -1196,6 +1385,16 @@ export interface SessionInfo {
   runState: SessionRunState;
   runDetail: string | null;
   runUpdatedAt: string | null;
+  classification: SessionClassification | null;
+  userStatus: 'inbox' | 'active' | 'review' | 'done' | 'parked' | null;
+  userNote: string | null;
+  lastQuestion: string | null;
+  lastAnswer: string | null;
+  lastMessageText: string | null;
+  migratedFrom: { agent: Agent; sessionId: string } | null;
+  migratedTo: { agent: Agent; sessionId: string } | null;
+  linkedSessions: Array<{ agent: Agent; sessionId: string }>;
+  numTurns: number | null;
 }
 
 export interface SessionListResult {
@@ -1208,6 +1407,17 @@ export interface SessionListOpts {
   agent: Agent;
   workdir: string;
   limit?: number;
+}
+
+function sessionTimelineAt(session: Pick<SessionInfo, 'runUpdatedAt' | 'createdAt'>): number {
+  const ts = Date.parse(session.runUpdatedAt || session.createdAt || '');
+  return Number.isFinite(ts) ? ts : Number.NEGATIVE_INFINITY;
+}
+
+function preferNativeSessionTimeline(managed: SessionInfo, native: SessionInfo): boolean {
+  const managedTs = sessionTimelineAt(managed);
+  const nativeTs = sessionTimelineAt(native);
+  return nativeTs > managedTs;
 }
 
 export function mergeManagedAndNativeSessions(managedSessions: SessionInfo[], nativeSessions: SessionInfo[]): SessionInfo[] {
@@ -1228,18 +1438,38 @@ export function mergeManagedAndNativeSessions(managedSessions: SessionInfo[], na
       merged.push(native);
       continue;
     }
+    const useNativeTimeline = preferNativeSessionTimeline(managed, native);
     merged.push({
       ...managed,
       ...native,
       workdir: native.workdir || managed.workdir,
       workspacePath: managed.workspacePath || native.workspacePath,
+      threadId: managed.threadId ?? native.threadId ?? null,
       running: managed.running || native.running,
-      runState: managed.runState,
-      runDetail: managed.runDetail ?? native.runDetail,
-      runUpdatedAt: managed.runUpdatedAt ?? native.runUpdatedAt,
+      runState: managed.runState === 'running'
+        ? managed.runState
+        : (useNativeTimeline ? native.runState : managed.runState),
+      runDetail: useNativeTimeline ? (native.runDetail ?? managed.runDetail) : (managed.runDetail ?? native.runDetail),
+      runUpdatedAt: useNativeTimeline ? (native.runUpdatedAt ?? managed.runUpdatedAt) : (managed.runUpdatedAt ?? native.runUpdatedAt),
       title: native.title || managed.title,
       model: native.model || managed.model,
       createdAt: native.createdAt || managed.createdAt,
+      classification: managed.classification ?? native.classification ?? null,
+      userStatus: managed.userStatus ?? native.userStatus ?? null,
+      userNote: managed.userNote ?? native.userNote ?? null,
+      lastQuestion: useNativeTimeline
+        ? (native.lastQuestion ?? managed.lastQuestion ?? null)
+        : (managed.lastQuestion ?? native.lastQuestion ?? null),
+      lastAnswer: useNativeTimeline
+        ? (native.lastAnswer ?? managed.lastAnswer ?? null)
+        : (managed.lastAnswer ?? native.lastAnswer ?? null),
+      lastMessageText: useNativeTimeline
+        ? (native.lastMessageText ?? managed.lastMessageText ?? native.lastAnswer ?? native.lastQuestion ?? managed.lastAnswer ?? managed.lastQuestion ?? null)
+        : (managed.lastMessageText ?? native.lastMessageText ?? managed.lastAnswer ?? managed.lastQuestion ?? native.lastAnswer ?? native.lastQuestion ?? null),
+      migratedFrom: managed.migratedFrom ?? native.migratedFrom ?? null,
+      migratedTo: managed.migratedTo ?? native.migratedTo ?? null,
+      linkedSessions: managed.linkedSessions?.length ? managed.linkedSessions : (native.linkedSessions ?? []),
+      numTurns: useNativeTimeline ? (native.numTurns ?? managed.numTurns ?? null) : (managed.numTurns ?? native.numTurns ?? null),
     });
   }
 
@@ -1267,6 +1497,21 @@ export function getSessions(opts: SessionListOpts): Promise<SessionListResult> {
 
 export interface TailMessage { role: 'user' | 'assistant'; text: string; }
 
+/** A content block within a message — text, thinking, or tool activity. */
+export interface MessageBlock {
+  type: 'text' | 'thinking' | 'tool_use' | 'tool_result';
+  content: string;
+  toolName?: string;
+  toolId?: string;
+}
+
+/** Rich message with structured content blocks. */
+export interface RichMessage {
+  role: 'user' | 'assistant';
+  text: string;
+  blocks: MessageBlock[];
+}
+
 export interface SessionTailResult {
   ok: boolean;
   messages: TailMessage[];
@@ -1282,6 +1527,378 @@ export interface SessionTailOpts {
 
 export function getSessionTail(opts: SessionTailOpts): Promise<SessionTailResult> {
   return getDriver(opts.agent).getSessionTail(opts);
+}
+
+// Full session content read
+export interface SessionMessagesOpts {
+  sessionId: string;
+  workdir: string;
+  /** Only return last N turns (1 turn = user + assistant). Omit for all. */
+  lastNTurns?: number;
+  /** Number of newest turns to skip before returning the current window. */
+  turnOffset?: number;
+  /** Maximum number of turns to return in the current window. */
+  turnLimit?: number;
+  /** If true, return rich messages with content blocks instead of plain text. */
+  rich?: boolean;
+}
+
+export interface SessionMessagesWindow {
+  offset: number;
+  limit: number;
+  returnedTurns: number;
+  totalTurns: number;
+  hasOlder: boolean;
+  hasNewer: boolean;
+  startTurn: number;
+  endTurn: number;
+}
+
+export interface SessionMessagesResult {
+  ok: boolean;
+  messages: TailMessage[];
+  richMessages?: RichMessage[];
+  totalTurns: number;
+  window?: SessionMessagesWindow;
+  error: string | null;
+}
+
+// Session classification
+export interface SessionClassification {
+  outcome: 'answer' | 'proposal' | 'implementation' | 'partial' | 'blocked' | 'conversation';
+  suggestedNextAction: string | null;
+  summary: string;
+  classifiedAt: string;
+}
+
+// Export/Import
+export interface ExportSessionOpts {
+  workdir: string;
+  agent: Agent;
+  sessionId: string;
+  format: 'markdown' | 'json' | 'text';
+  lastNTurns?: number;
+}
+
+export interface ExportSessionResult {
+  ok: boolean;
+  content: string;
+  filename: string;
+  error: string | null;
+}
+
+export interface ImportSessionOpts {
+  workdir: string;
+  agent: Agent;
+  content: string;
+  format?: 'markdown' | 'json' | 'text';
+}
+
+export interface ImportSessionResult {
+  ok: boolean;
+  /** Parsed messages ready to inject as context */
+  messages: TailMessage[];
+  error: string | null;
+}
+
+// Migration
+export interface MigrateSessionOpts {
+  source: { workdir: string; agent: Agent; sessionId: string };
+  target: { workdir: string; agent: Agent };
+  lastNTurns?: number;
+}
+
+function normalizeTurnWindowValue(value: number | undefined, fallback: number): number {
+  if (!Number.isFinite(value) || value == null) return fallback;
+  return Math.max(0, Math.floor(value));
+}
+
+/** Slice messages by turn window and count total turns. Exported for drivers. */
+export function applyTurnWindow(
+  allMsgs: TailMessage[],
+  opts: Pick<SessionMessagesOpts, 'lastNTurns' | 'turnOffset' | 'turnLimit'> = {},
+  richMsgs?: RichMessage[],
+): SessionMessagesResult {
+  let totalTurns = 0;
+  const turnStartIndexes: number[] = [];
+  for (let i = 0; i < allMsgs.length; i++) {
+    if (allMsgs[i].role === 'user') {
+      turnStartIndexes.push(i);
+      totalTurns++;
+    }
+  }
+
+  // If no rich messages provided, synthesize from plain messages so the
+  // API always returns a consistent richMessages array.
+  const rich = richMsgs ?? allMsgs.map(m => ({ role: m.role, text: m.text, blocks: [{ type: 'text' as const, content: m.text }] }));
+
+  if (totalTurns <= 0) {
+    return {
+      ok: true,
+      messages: allMsgs,
+      richMessages: rich,
+      totalTurns,
+      window: {
+        offset: 0,
+        limit: 0,
+        returnedTurns: 0,
+        totalTurns: 0,
+        hasOlder: false,
+        hasNewer: false,
+        startTurn: 0,
+        endTurn: 0,
+      },
+      error: null,
+    };
+  }
+
+  const offset = normalizeTurnWindowValue(opts.turnOffset, 0);
+  const availableTurns = Math.max(0, totalTurns - offset);
+  const rawLimit = normalizeTurnWindowValue(opts.turnLimit ?? opts.lastNTurns, availableTurns);
+  const limit = rawLimit > 0 ? Math.min(rawLimit, availableTurns) : availableTurns;
+
+  if (limit <= 0 || availableTurns <= 0) {
+    const emptyTurn = Math.max(0, totalTurns - offset);
+    return {
+      ok: true,
+      messages: [],
+      richMessages: [],
+      totalTurns,
+      window: {
+        offset,
+        limit,
+        returnedTurns: 0,
+        totalTurns,
+        hasOlder: emptyTurn > 0,
+        hasNewer: offset > 0,
+        startTurn: emptyTurn,
+        endTurn: emptyTurn,
+      },
+      error: null,
+    };
+  }
+
+  const endTurn = Math.max(0, totalTurns - offset);
+  const startTurn = Math.max(0, endTurn - limit);
+  const startIdx = turnStartIndexes[startTurn] ?? 0;
+  const endIdx = endTurn < totalTurns ? (turnStartIndexes[endTurn] ?? allMsgs.length) : allMsgs.length;
+
+  return {
+    ok: true,
+    messages: allMsgs.slice(startIdx, endIdx),
+    richMessages: rich.slice(startIdx, endIdx),
+    totalTurns,
+    window: {
+      offset,
+      limit,
+      returnedTurns: endTurn - startTurn,
+      totalTurns,
+      hasOlder: startTurn > 0,
+      hasNewer: endTurn < totalTurns,
+      startTurn,
+      endTurn,
+    },
+    error: null,
+  };
+}
+
+/** Filter messages to last N turns and count total turns. Exported for drivers. */
+export function applyTurnFilter(allMsgs: TailMessage[], lastNTurns?: number, richMsgs?: RichMessage[]): SessionMessagesResult {
+  return applyTurnWindow(allMsgs, { lastNTurns }, richMsgs);
+}
+
+export function getSessionMessages(opts: SessionMessagesOpts & { agent: Agent }): Promise<SessionMessagesResult> {
+  return getDriver(opts.agent).getSessionMessages(opts);
+}
+
+// ---------------------------------------------------------------------------
+// Session classification
+// ---------------------------------------------------------------------------
+
+const PROPOSAL_PATTERNS = /方案|option[s ]?[A-C]|plan|approach|建议|recommend|alternatively|trade-?off|pros?\s+(and|&)\s+cons?|选择|比较/i;
+const IMPLEMENTATION_PATTERNS = /已完成|committed|done|implemented|fixed|created|wrote|修复|完成|写入|提交|applied|updated|modified|refactored/i;
+const BLOCKED_PATTERNS = /error|failed|permission denied|cannot|无法|失败|报错|blocked|timed?\s*out/i;
+
+export function classifySession(
+  result: Pick<StreamResult, 'ok' | 'incomplete' | 'error' | 'stopReason' | 'message' | 'activity'>,
+): SessionClassification {
+  const now = new Date().toISOString();
+  const message = result.message || '';
+  const firstLine = message.split('\n').find(l => l.trim())?.trim() || '';
+  const summaryText = firstLine.length > 120 ? firstLine.slice(0, 117) + '...' : firstLine;
+
+  // 1. Structural signals from StreamResult
+  if (result.incomplete) {
+    return {
+      outcome: 'partial',
+      suggestedNextAction: result.stopReason === 'interrupted' ? 'Resume or restart the interrupted task' : 'Continue the incomplete task',
+      summary: summaryText || 'Task did not complete',
+      classifiedAt: now,
+    };
+  }
+
+  if (!result.ok) {
+    const errorDetail = result.error || result.stopReason || 'unknown error';
+    return {
+      outcome: 'blocked',
+      suggestedNextAction: `Resolve error: ${errorDetail.slice(0, 100)}`,
+      summary: summaryText || `Failed: ${errorDetail.slice(0, 100)}`,
+      classifiedAt: now,
+    };
+  }
+
+  // 2. Activity signals (tool use indicates implementation)
+  const activity = result.activity || '';
+  if (/\b(Edit|Write|Bash)\b/.test(activity)) {
+    return {
+      outcome: 'implementation',
+      suggestedNextAction: 'Verify the changes made',
+      summary: summaryText,
+      classifiedAt: now,
+    };
+  }
+
+  // 3. Content-based classification
+  if (BLOCKED_PATTERNS.test(message.slice(0, 500))) {
+    return {
+      outcome: 'blocked',
+      suggestedNextAction: 'Review the error and provide guidance',
+      summary: summaryText,
+      classifiedAt: now,
+    };
+  }
+
+  if (PROPOSAL_PATTERNS.test(message.slice(0, 1000))) {
+    return {
+      outcome: 'proposal',
+      suggestedNextAction: 'Review the proposal and decide on next steps',
+      summary: summaryText,
+      classifiedAt: now,
+    };
+  }
+
+  if (IMPLEMENTATION_PATTERNS.test(message.slice(0, 500))) {
+    return {
+      outcome: 'implementation',
+      suggestedNextAction: 'Verify the changes made',
+      summary: summaryText,
+      classifiedAt: now,
+    };
+  }
+
+  // 4. Default: informational answer
+  return {
+    outcome: 'answer',
+    suggestedNextAction: null,
+    summary: summaryText,
+    classifiedAt: now,
+  };
+}
+
+/** Derive a default userStatus from classification outcome */
+export function deriveUserStatus(outcome: SessionClassification['outcome']): 'review' | 'done' | 'active' {
+  switch (outcome) {
+    case 'answer': return 'done';
+    case 'partial': return 'active';
+    default: return 'review';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Session export/import
+// ---------------------------------------------------------------------------
+
+export async function exportSession(opts: ExportSessionOpts): Promise<ExportSessionResult> {
+  try {
+    const result = await getSessionMessages({ ...opts, agent: opts.agent });
+    if (!result.ok) return { ok: false, content: '', filename: '', error: result.error };
+
+    const messages = result.messages;
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    let content: string;
+    let ext: string;
+
+    switch (opts.format) {
+      case 'json':
+        content = JSON.stringify({ agent: opts.agent, sessionId: opts.sessionId, exportedAt: new Date().toISOString(), messages }, null, 2);
+        ext = 'json';
+        break;
+      case 'text':
+        content = messages.map(m => `[${m.role}]\n${m.text}`).join('\n\n---\n\n');
+        ext = 'txt';
+        break;
+      case 'markdown':
+      default:
+        content = `# Session Export (${opts.agent}, ${timestamp})\n\n` +
+          messages.map(m => `## ${m.role === 'user' ? 'User' : 'Assistant'}\n\n${m.text}`).join('\n\n---\n\n');
+        ext = 'md';
+        break;
+    }
+
+    const filename = `session-${opts.agent}-${opts.sessionId.slice(0, 8)}-${timestamp}.${ext}`;
+    return { ok: true, content, filename, error: null };
+  } catch (e: any) {
+    return { ok: false, content: '', filename: '', error: e.message };
+  }
+}
+
+export function importSession(opts: ImportSessionOpts): ImportSessionResult {
+  try {
+    const format = opts.format || detectImportFormat(opts.content);
+    let messages: TailMessage[];
+
+    switch (format) {
+      case 'json': {
+        const parsed = JSON.parse(opts.content);
+        messages = Array.isArray(parsed.messages) ? parsed.messages : Array.isArray(parsed) ? parsed : [];
+        break;
+      }
+      case 'markdown': {
+        messages = parseMarkdownConversation(opts.content);
+        break;
+      }
+      case 'text':
+      default: {
+        messages = parseTextConversation(opts.content);
+        break;
+      }
+    }
+
+    return { ok: true, messages, error: null };
+  } catch (e: any) {
+    return { ok: false, messages: [], error: e.message };
+  }
+}
+
+function detectImportFormat(content: string): 'json' | 'markdown' | 'text' {
+  const trimmed = content.trimStart();
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) return 'json';
+  if (trimmed.startsWith('#')) return 'markdown';
+  return 'text';
+}
+
+function parseMarkdownConversation(content: string): TailMessage[] {
+  const messages: TailMessage[] = [];
+  const sections = content.split(/^## /m).slice(1);
+  for (const section of sections) {
+    const firstLine = section.split('\n')[0].trim().toLowerCase();
+    const role: 'user' | 'assistant' = firstLine.includes('user') ? 'user' : 'assistant';
+    const text = section.split('\n').slice(1).join('\n').replace(/^---\s*$/m, '').trim();
+    if (text) messages.push({ role, text });
+  }
+  return messages;
+}
+
+function parseTextConversation(content: string): TailMessage[] {
+  const messages: TailMessage[] = [];
+  const blocks = content.split(/\n---\n/).map(b => b.trim()).filter(Boolean);
+  for (const block of blocks) {
+    const match = block.match(/^\[(user|assistant)\]\n([\s\S]+)$/i);
+    if (match) {
+      messages.push({ role: match[1].toLowerCase() as 'user' | 'assistant', text: match[2].trim() });
+    }
+  }
+  return messages;
 }
 
 // ---------------------------------------------------------------------------
@@ -1383,10 +2000,6 @@ function ensureDirSymlink(linkPath: string, targetDir: string) {
   fs.symlinkSync(desiredTarget, linkPath, 'dir');
 }
 
-function resetDir(dirPath: string) {
-  try { fs.rmSync(dirPath, { recursive: true, force: true }); } catch {}
-  fs.mkdirSync(dirPath, { recursive: true });
-}
 
 function copyMergedTree(
   sourceRoot: string,
@@ -1409,26 +2022,21 @@ export function initializeProjectSkills(workdir: string, opts: { log?: (message:
   const canonicalRoot = path.join(workdir, '.pikiclaw', 'skills');
   const claudeRoot = path.join(workdir, '.claude', 'skills');
   const agentsRoot = path.join(workdir, '.agents', 'skills');
-  const mergeRoot = path.join(workdir, '.pikiclaw', '.skills-merge-tmp');
-  const sourceRoots = [canonicalRoot, claudeRoot, agentsRoot];
-  const seenSourceReals = new Set<string>();
+  const canonicalReal = realPathOrNull(canonicalRoot);
 
-  resetDir(mergeRoot);
+  // Ensure canonical directory exists (never delete it).
+  fs.mkdirSync(canonicalRoot, { recursive: true });
 
-  // Merge order defines precedence: existing canonical content wins first,
-  // then legacy Claude skills, then legacy agents skills.
-  for (const sourceRoot of sourceRoots) {
-    if (!hasDir(sourceRoot)) continue;
-    const realSource = realPathOrNull(sourceRoot);
-    if (realSource && seenSourceReals.has(realSource)) continue;
-    if (realSource) seenSourceReals.add(realSource);
-    copyMergedTree(sourceRoot, mergeRoot, opts);
+  // Merge legacy roots into canonical — only copy files that don't already exist.
+  // Skip roots that are already symlinks pointing back to canonical.
+  for (const legacyRoot of [claudeRoot, agentsRoot]) {
+    if (!hasDir(legacyRoot)) continue;
+    const legacyReal = realPathOrNull(legacyRoot);
+    if (legacyReal && canonicalReal && legacyReal === canonicalReal) continue;
+    copyMergedTree(legacyRoot, canonicalRoot, opts);
   }
 
-  resetDir(canonicalRoot);
-  copyMergedTree(mergeRoot, canonicalRoot, opts);
-  try { fs.rmSync(mergeRoot, { recursive: true, force: true }); } catch {}
-
+  // Replace legacy dirs with symlinks to canonical.
   for (const linkRoot of [claudeRoot, agentsRoot]) {
     ensureDirSymlink(linkRoot, canonicalRoot);
   }

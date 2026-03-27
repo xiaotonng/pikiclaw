@@ -12,16 +12,18 @@ import {
   type StreamPreviewMeta, type StreamPreviewPlan, type StreamPreviewPlanStep,
   type CodexCumulativeUsage, type CodexInteractionRequest,
   type SessionListResult, type SessionInfo, type SessionTailOpts, type SessionTailResult,
+  type SessionMessagesOpts, type SessionMessagesResult,
+  type TailMessage,
   type ModelListOpts, type ModelListResult, type ModelInfo,
   type UsageOpts, type UsageResult, type UsageWindowInfo,
   // shared helpers
-  agentLog, detectAgentBin,
+  agentLog, agentWarn, detectAgentBin,
   buildStreamPreviewMeta, pushRecentActivity, normalizeActivityLine,
   firstNonEmptyLine, shortValue, numberOrNull,
   IMAGE_EXTS,
   listPikiclawSessions, findPikiclawSession, isPendingSessionId,
   mergeManagedAndNativeSessions,
-  stripInjectedPrompts, computeContext, readTailLines,
+  stripInjectedPrompts, sanitizeSessionUserPreviewText, computeContext, readTailLines, applyTurnWindow,
   roundPercent, toIsoFromEpochSeconds, labelFromWindowMinutes,
   usageWindowFromRateLimit, parseJsonTail, emptyUsage,
   Q,
@@ -98,7 +100,7 @@ export class CodexAppServer {
             Promise.resolve(handler(msg.method, msg.params ?? {}, String(msg.id)))
               .then(result => this.respond(msg.id, result ?? {}))
               .catch(error => {
-                agentLog(`[codex-rpc] request handler error method=${msg.method} error=${error?.message || error}`);
+                agentWarn(`[codex-rpc] request handler error method=${msg.method} error=${error?.message || error}`);
                 this.respond(msg.id, {});
               });
             continue;
@@ -127,7 +129,7 @@ export class CodexAppServer {
       this.call('initialize', { clientInfo: { name: 'pikiclaw', version: '0.2.0' } })
         .then(resp => {
           clearTimeout(timer);
-          if (resp.error) { agentLog(`[codex-rpc] init error: ${resp.error.message}`); resolve(false); return; }
+          if (resp.error) { agentWarn(`[codex-rpc] init error: ${resp.error.message}`); resolve(false); return; }
           this.ready = true;
           agentLog(`[codex-rpc] initialized`);
           resolve(true);
@@ -791,7 +793,7 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
             }, 30_000);
             if (steerResp.error) {
               const errMsg = steerResp.error.message || 'turn/steer failed';
-              agentLog(`[codex-rpc] turn/steer error: ${errMsg}`);
+              agentWarn(`[codex-rpc] turn/steer error: ${errMsg}`);
               pushRecentActivity(s.recentFailures, `Steer failed: ${shortValue(errMsg, 120)}`, 4);
               emitPreview();
               return false;
@@ -805,7 +807,7 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
         opts.onSteerReady?.(control.steer);
         opts.onCodexTurnReady?.(control);
       } catch (error: any) {
-        agentLog(`[codex-rpc] onCodexTurnReady error: ${error?.message || error}`);
+        agentWarn(`[codex-rpc] onCodexTurnReady error: ${error?.message || error}`);
       }
     };
 
@@ -828,7 +830,7 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
 
     if (threadResp.error) {
       const errMsg = threadResp.error.message || 'thread/start failed';
-      agentLog(`[codex-rpc] thread error: ${errMsg}`);
+      agentWarn(`[codex-rpc] thread error: ${errMsg}`);
       return codexErrorResult(errMsg, start, opts.sessionId, opts.model, opts.thinkingEffort);
     }
 
@@ -837,7 +839,7 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
     s.model = threadResult.model ?? s.model;
     if (s.sessionId) {
       try { opts.onSessionId?.(s.sessionId); } catch (error: any) {
-        agentLog(`[codex-rpc] onSessionId error: ${error?.message || error}`);
+        agentWarn(`[codex-rpc] onSessionId error: ${error?.message || error}`);
       }
     }
     agentLog(`[codex-rpc] thread ready: id=${s.sessionId} model=${s.model}`);
@@ -856,7 +858,7 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
       };
       const hardTimer = setTimeout(() => {
         timedOut = true;
-        agentLog(`[codex-rpc] timeout: interrupting turn`);
+        agentWarn('[codex-rpc] timeout: interrupting turn');
         if (s.turnId && s.sessionId) srv.call('turn/interrupt', { threadId: s.sessionId, turnId: s.turnId }).catch(() => {});
         settleTurnDone?.();
       }, opts.timeout * 1000 + CODEX_STREAM_HARD_KILL_GRACE_MS);
@@ -880,7 +882,7 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
       interrupted = true;
       s.turnStatus = s.turnStatus || 'interrupted';
       s.turnError = s.turnError || 'Interrupted by user.';
-      agentLog(`[codex-rpc] abort requested thread=${s.sessionId || '?'} turn=${s.turnId || '?'}`);
+      agentWarn(`[codex-rpc] abort requested thread=${s.sessionId || '?'} turn=${s.turnId || '?'}`);
       if (s.turnId && s.sessionId) {
         // Send turn/interrupt and wait for Codex to acknowledge before settling.
         // Don't kill the process here — let the finally block handle it after
@@ -918,7 +920,7 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
       unsubscribeNotifications();
       unsubscribeRequests();
       const errMsg = turnResp.error.message || 'turn/start failed';
-      agentLog(`[codex-rpc] turn/start error: ${errMsg}`);
+      agentWarn(`[codex-rpc] turn/start error: ${errMsg}`);
       return codexErrorResult(errMsg, start, s.sessionId, s.model, s.thinkingEffort);
     }
     s.turnId = turnResp.result?.turn?.id ?? null;
@@ -985,6 +987,34 @@ function loadCodexSessionIndex(): Map<string, { threadName: string; updatedAt: s
 }
 
 /** Scan ~/.codex/sessions/ rollout files to find sessions matching the given workdir. */
+function extractCodexTailQA(filePath: string): { lastQuestion: string | null; lastAnswer: string | null; lastMessageText: string | null } {
+  const lines = readTailLines(filePath, 128 * 1024);
+  let lastQuestion: string | null = null;
+  let lastAnswer: string | null = null;
+  let lastMessageText: string | null = null;
+  for (const raw of lines) {
+    if (!raw || raw[0] !== '{' || !raw.includes('"event_msg"')) continue;
+    try {
+      const ev = JSON.parse(raw);
+      if (ev?.type !== 'event_msg' || !ev.payload || typeof ev.payload !== 'object') continue;
+      if (ev.payload.type === 'user_message' && typeof ev.payload.message === 'string') {
+        const text = sanitizeSessionUserPreviewText(ev.payload.message);
+        if (text) {
+          lastQuestion = shortValue(text, 500);
+          lastMessageText = shortValue(text, 500);
+        }
+      } else if (ev.payload.type === 'agent_message' && typeof ev.payload.message === 'string') {
+        const text = ev.payload.message.trim();
+        if (text) {
+          lastAnswer = shortValue(text, 500);
+          lastMessageText = shortValue(text, 500);
+        }
+      }
+    } catch { /* skip */ }
+  }
+  return { lastQuestion, lastAnswer, lastMessageText };
+}
+
 function getNativeCodexSessions(workdir: string): SessionInfo[] {
   const home = process.env.HOME || '';
   if (!home) return [];
@@ -1029,6 +1059,7 @@ function getNativeCodexSessions(workdir: string): SessionInfo[] {
         const idx = titleIndex.get(metaId);
         const title = idx?.threadName || null;
         const updatedAt = idx?.updatedAt || stat.mtime.toISOString();
+        const tailQA = extractCodexTailQA(fullPath);
 
         sessions.push({
           sessionId: metaId,
@@ -1042,6 +1073,16 @@ function getNativeCodexSessions(workdir: string): SessionInfo[] {
           runState: Date.now() - Date.parse(updatedAt) < SESSION_RUNNING_THRESHOLD_MS ? 'running' : 'completed',
           runDetail: null,
           runUpdatedAt: updatedAt,
+          classification: null,
+          userStatus: null,
+          userNote: null,
+          lastQuestion: tailQA.lastQuestion,
+          lastAnswer: tailQA.lastAnswer,
+          lastMessageText: tailQA.lastMessageText,
+          migratedFrom: null,
+          migratedTo: null,
+          linkedSessions: [],
+          numTurns: null,
         });
       } catch { /* skip */ }
     }
@@ -1133,6 +1174,7 @@ function getCodexSessions(workdir: string, limit?: number): SessionListResult {
     agent: 'codex' as const,
     workdir: record.workdir,
     workspacePath: record.workspacePath,
+    threadId: record.threadId,
     model: record.model,
     createdAt: record.createdAt,
     title: record.title,
@@ -1140,6 +1182,16 @@ function getCodexSessions(workdir: string, limit?: number): SessionListResult {
     runState: record.runState,
     runDetail: record.runDetail,
     runUpdatedAt: record.runUpdatedAt,
+    classification: record.classification,
+    userStatus: record.userStatus,
+    userNote: record.userNote,
+    lastQuestion: record.lastQuestion,
+    lastAnswer: record.lastAnswer,
+    lastMessageText: record.lastMessageText,
+    migratedFrom: record.migratedFrom,
+    migratedTo: record.migratedTo,
+    linkedSessions: record.linkedSessions,
+    numTurns: record.numTurns ?? null,
   }));
   const nativeSessions = getNativeCodexSessions(resolvedWorkdir);
   const merged = mergeManagedAndNativeSessions(pikiclawSessions, nativeSessions);
@@ -1186,8 +1238,75 @@ async function getCodexSessionTail(opts: SessionTailOpts): Promise<SessionTailRe
 }
 
 // ---------------------------------------------------------------------------
-// Models
+// Session messages (full content)
 // ---------------------------------------------------------------------------
+
+async function getCodexSessionMessages(opts: SessionMessagesOpts): Promise<SessionMessagesResult> {
+  // Try RPC first
+  const srv = getSharedServer();
+  if (await srv.ensureRunning()) {
+    try {
+      const resp = await srv.call('thread/read', { threadId: opts.sessionId, includeTurns: true });
+      if (!resp.error && resp.result?.thread) {
+        const thread = resp.result.thread;
+        const allMsgs: TailMessage[] = [];
+        for (const turn of (thread.turns ?? [])) {
+          for (const item of (turn.items ?? [])) {
+            if (item.type === 'userMessage') {
+              const parts: string[] = [];
+              for (const c of (item.content ?? [])) { if (c.type === 'text' && c.text) parts.push(c.text); }
+              if (parts.length) allMsgs.push({ role: 'user', text: stripInjectedPrompts(parts.join('\n')) });
+            } else if (item.type === 'agentMessage') {
+              if (item.text) allMsgs.push({ role: 'assistant', text: item.text });
+            }
+          }
+        }
+        if (allMsgs.length > 0) {
+          return applyTurnWindow(allMsgs, opts);
+        }
+      }
+    } catch { /* fall through to rollout */ }
+  }
+
+  // Fallback: read full rollout file
+  return getCodexSessionMessagesFromRollout(opts);
+}
+
+function getCodexSessionMessagesFromRollout(opts: SessionMessagesOpts): SessionMessagesResult {
+  const rolloutPath = findCodexRolloutPath(opts.sessionId, opts.workdir);
+  if (!rolloutPath) return { ok: false, messages: [], totalTurns: 0, error: 'Session history file not found' };
+
+  try {
+    // Read FULL file
+    const content = fs.readFileSync(rolloutPath, 'utf-8');
+    const lines = content.split('\n');
+    const allMsgs: TailMessage[] = [];
+    for (const raw of lines) {
+      if (!raw || raw[0] !== '{' || !raw.includes('"event_msg"')) continue;
+      let ev: any;
+      try { ev = JSON.parse(raw); } catch { continue; }
+      if (ev?.type !== 'event_msg' || !ev.payload || typeof ev.payload !== 'object') continue;
+      if (ev.payload.type === 'user_message' && typeof ev.payload.message === 'string') {
+        const text = stripInjectedPrompts(ev.payload.message).trim();
+        if (text) allMsgs.push({ role: 'user', text });
+      } else if (ev.payload.type === 'agent_message' && typeof ev.payload.message === 'string') {
+        const text = ev.payload.message.trim();
+        if (text) allMsgs.push({ role: 'assistant', text });
+      }
+    }
+    return applyTurnWindow(allMsgs, opts);
+  } catch (e: any) {
+    return { ok: false, messages: [], totalTurns: 0, error: e?.message || 'Failed to read session history' };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Models (with TTL cache + stale fallback)
+// ---------------------------------------------------------------------------
+
+const MODEL_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+let modelCache: { result: ModelListResult; fetchedAt: number } | null = null;
 
 function pushModel(models: ModelInfo[], seen: Set<string>, id: string, alias: string | null) {
   const cleanId = id.trim();
@@ -1196,12 +1315,32 @@ function pushModel(models: ModelInfo[], seen: Set<string>, id: string, alias: st
   models.push({ id: cleanId, alias: alias?.trim() || null });
 }
 
+/** Merge currentModel into a cached result so the selected model always appears first. */
+function withCurrentModel(cached: ModelListResult, currentModel: string | null | undefined): ModelListResult {
+  if (!currentModel?.trim()) return cached;
+  const cm = currentModel.trim();
+  if (cached.models.some(m => m.id === cm)) return cached;
+  return { ...cached, models: [{ id: cm, alias: null }, ...cached.models] };
+}
+
 async function discoverCodexModels(opts: ModelListOpts): Promise<ModelListResult> {
+  // Return cached result if still fresh
+  if (modelCache && Date.now() - modelCache.fetchedAt < MODEL_CACHE_TTL_MS) {
+    return withCurrentModel(modelCache.result, opts.currentModel);
+  }
+
+  // Try fetching fresh
   const srv = getSharedServer();
-  if (!(await srv.ensureRunning())) return { agent: 'codex', models: [], sources: [], note: 'Failed to start codex app-server.' };
+  if (!(await srv.ensureRunning())) {
+    if (modelCache) return withCurrentModel(modelCache.result, opts.currentModel);
+    return { agent: 'codex', models: [], sources: [], note: 'Failed to start codex app-server.' };
+  }
 
   const resp = await srv.call('model/list', { includeHidden: false });
-  if (resp.error) return { agent: 'codex', models: [], sources: [], note: resp.error.message || 'model/list failed' };
+  if (resp.error) {
+    if (modelCache) return withCurrentModel(modelCache.result, opts.currentModel);
+    return { agent: 'codex', models: [], sources: [], note: resp.error.message || 'model/list failed' };
+  }
 
   const data: any[] = resp.result?.data ?? [];
   const models: ModelInfo[] = [];
@@ -1213,7 +1352,9 @@ async function discoverCodexModels(opts: ModelListOpts): Promise<ModelListResult
     pushModel(models, seen, id, entry.displayName && entry.displayName !== id ? entry.displayName : null);
   }
 
-  return { agent: 'codex', models, sources: ['app-server model/list'], note: null };
+  const result: ModelListResult = { agent: 'codex', models, sources: ['app-server model/list'], note: null };
+  modelCache = { result, fetchedAt: Date.now() };
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -1360,6 +1501,10 @@ class CodexDriver implements AgentDriver {
 
   async getSessionTail(opts: SessionTailOpts): Promise<SessionTailResult> {
     return getCodexSessionTail(opts);
+  }
+
+  async getSessionMessages(opts: SessionMessagesOpts): Promise<SessionMessagesResult> {
+    return getCodexSessionMessages(opts);
   }
 
   async listModels(opts: ModelListOpts): Promise<ModelListResult> { return discoverCodexModels(opts); }

@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildAgentsCommandView } from '../src/bot-command-ui.ts';
 import { buildSwitchWorkdirView, resolveRegisteredPath } from '../src/bot-telegram-directory.ts';
 import {
@@ -17,6 +17,12 @@ import { makeTmpDir } from './support/env.ts';
 import { createTelegramBotHarness } from './support/telegram-bot-harness.ts';
 
 describe('bot-telegram render helpers', () => {
+  beforeEach(() => {
+    process.env.TELEGRAM_BOT_TOKEN = 'test-token';
+    process.env.PIKICLAW_WORKDIR = makeTmpDir('bot-tg-ui-');
+    process.env.DEFAULT_AGENT = 'claude';
+  });
+
   // NOTE: renderSessionTurnHtml and buildFinalReplyRender are covered by
   // bot-telegram.unit.test.ts ("renders resumed history" and "compresses warnings").
   // Tests here focus on helpers not exercised through the bot integration tests.
