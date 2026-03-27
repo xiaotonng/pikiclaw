@@ -51,7 +51,7 @@ describe('dashboard startup', () => {
   });
 
   it('opens the browser once when falling back to the next port', async () => {
-    const { startDashboard } = await import('../src/dashboard.ts');
+    const { startDashboard } = await import('../src/server.ts');
     const { basePort, servers } = await reserveConsecutivePorts(1);
 
     try {
@@ -68,7 +68,7 @@ describe('dashboard startup', () => {
   });
 
   it('keeps searching for a free port when multiple dashboard ports are occupied', async () => {
-    const { startDashboard } = await import('../src/dashboard.ts');
+    const { startDashboard } = await import('../src/server.ts');
     const { basePort, servers } = await reserveConsecutivePorts(2);
 
     try {

@@ -11,6 +11,7 @@ vi.mock('../src/code-agent.ts', async importOriginal => {
 });
 
 import { doStream } from '../src/code-agent.ts';
+import { ensureManagedSession } from '../src/code-agent.ts';
 import { Bot } from '../src/bot.ts';
 import { captureEnv, makeTmpDir, restoreEnv } from './support/env.ts';
 import { makeStreamResult } from './support/stream-result.ts';
@@ -168,6 +169,55 @@ describe('Bot steering handoff', () => {
     expect(runningAbort).toHaveBeenCalledTimes(1);
     expect(bot.activeTasks.get('run-1')?.freezePreviewOnAbort).toBe(true);
     expect(bot.activeTasks.get('queued-1')?.cancelled).toBe(false);
+  });
+});
+
+describe('Bot thread-aware agent switching', () => {
+  it('resumes the existing session for the target agent inside the same thread', () => {
+    const workdir = process.env.PIKICLAW_WORKDIR!;
+    ensureManagedSession({
+      agent: 'codex',
+      workdir,
+      sessionId: 'sess-codex',
+      title: 'codex side',
+      threadId: 'thread-shared',
+    });
+    ensureManagedSession({
+      agent: 'claude',
+      workdir,
+      sessionId: 'sess-claude',
+      title: 'claude side',
+      threadId: 'thread-shared',
+    });
+
+    const bot = new Bot();
+    bot.adoptExistingSessionForChat(1, {
+      agent: 'codex',
+      sessionId: 'sess-codex',
+      workdir,
+      workspacePath: null,
+      model: 'gpt-5.4',
+      title: 'codex side',
+      threadId: 'thread-shared',
+    });
+
+    const switched = bot.switchAgentForChat(1, 'claude');
+    const selected = bot.selectedSession(1);
+
+    expect(switched).toBe(true);
+    expect(selected).toMatchObject({
+      agent: 'claude',
+      sessionId: 'sess-claude',
+      threadId: 'thread-shared',
+    });
+    expect(bot.chat(1).activeThreadId).toBe('thread-shared');
+
+    bot.switchAgentForChat(1, 'codex');
+    expect(bot.selectedSession(1)).toMatchObject({
+      agent: 'codex',
+      sessionId: 'sess-codex',
+      threadId: 'thread-shared',
+    });
   });
 });
 

@@ -1,4 +1,5 @@
 export type Agent = 'claude' | 'codex' | 'gemini';
+export type OpenTarget = 'vscode' | 'cursor' | 'windsurf' | 'finder' | 'default';
 
 export interface AgentInfo {
   agent: Agent;
@@ -187,6 +188,38 @@ export interface SessionInfo {
   runState: 'running' | 'completed' | 'incomplete';
   runDetail?: string | null;
   runUpdatedAt?: string | null;
+  agent?: string;
+  lastQuestion?: string | null;
+  lastAnswer?: string | null;
+  lastMessageText?: string | null;
+  classification?: {
+    outcome: 'answer' | 'proposal' | 'implementation' | 'partial' | 'blocked' | 'conversation';
+    summary: string;
+    suggestedNextAction?: string | null;
+    classifiedAt?: string;
+  } | null;
+  userStatus?: 'inbox' | 'active' | 'review' | 'done' | 'parked' | null;
+  userNote?: string | null;
+  workspacePath?: string | null;
+  migratedFrom?: { agent: Agent; sessionId: string } | null;
+  migratedTo?: { agent: Agent; sessionId: string } | null;
+  linkedSessions?: Array<{ agent: Agent; sessionId: string }>;
+  numTurns?: number | null;
+}
+
+export interface WorkspaceEntry {
+  path: string;
+  name: string;
+}
+
+export interface SessionHubResult {
+  ok: boolean;
+  workdir: string;
+  workspaceName: string;
+  sessions: SessionInfo[];
+  statusCounts: Record<string, number>;
+  total: number;
+  errors: string[];
 }
 
 export interface SessionsPageResult {
@@ -203,6 +236,54 @@ export interface SessionsPageResult {
 export interface SessionTailMessage {
   role: 'user' | 'assistant';
   text: string;
+}
+
+export interface SessionMessage {
+  role: 'user' | 'assistant';
+  text: string;
+}
+
+export interface MessageBlock {
+  type: 'text' | 'thinking' | 'tool_use' | 'tool_result';
+  content: string;
+  toolName?: string;
+  toolId?: string;
+}
+
+export interface RichMessage {
+  role: 'user' | 'assistant';
+  text: string;
+  blocks: MessageBlock[];
+}
+
+export interface StreamPlanStep {
+  step: string;
+  status: 'pending' | 'inProgress' | 'completed';
+}
+
+export interface StreamPlan {
+  explanation: string | null;
+  steps: StreamPlanStep[];
+}
+
+export interface SessionMessagesWindow {
+  offset: number;
+  limit: number;
+  returnedTurns: number;
+  totalTurns: number;
+  hasOlder: boolean;
+  hasNewer: boolean;
+  startTurn: number;
+  endTurn: number;
+}
+
+export interface SessionMessagesResult {
+  ok: boolean;
+  messages: SessionMessage[];
+  richMessages?: RichMessage[];
+  totalTurns?: number;
+  window?: SessionMessagesWindow;
+  error: string | null;
 }
 
 export type BrowserProfileStatus = 'disabled' | 'ready' | 'needs_setup' | 'chrome_missing';
@@ -238,6 +319,7 @@ export interface BrowserSetupResponse {
 export interface DirEntry {
   name: string;
   path: string;
+  isDir?: boolean;
 }
 
 export interface LsDirResult {

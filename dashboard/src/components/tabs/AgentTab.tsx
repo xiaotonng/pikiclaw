@@ -3,18 +3,12 @@ import { api } from '../../api';
 import { createT, type Locale } from '../../i18n';
 import { useStore } from '../../store';
 import type { Agent, AgentRuntimeStatus, AgentStatusResponse, ModelInfo } from '../../types';
-import { cn, getAgentMeta } from '../../utils';
+import { cn, EFFORT_OPTIONS, getAgentMeta } from '../../utils';
 import { BrandIcon } from '../BrandIcon';
 import { Badge, Button, Label, Modal, ModalHeader, Select, Spinner } from '../ui';
 import { SectionCard } from './shared';
 
 const AGENT_ORDER: Agent[] = ['claude', 'codex', 'gemini'];
-
-const EFFORT_OPTIONS: Record<Agent, string[]> = {
-  claude: ['low', 'medium', 'high'],
-  codex: ['minimal', 'low', 'medium', 'high', 'xhigh'],
-  gemini: [],
-};
 
 type SnapshotState = {
   defaultAgent: Agent;
@@ -368,8 +362,9 @@ function AgentRow({
 }
 
 export function AgentTab() {
-  const { locale, toast } = useStore();
-  const t = createT(locale);
+  const locale = useStore(s => s.locale);
+  const toast = useStore(s => s.toast);
+  const t = useMemo(() => createT(locale), [locale]);
   const copy = getCopy(locale);
   const [snapshot, setSnapshot] = useState<SnapshotState | null>(null);
   const [loading, setLoading] = useState(true);

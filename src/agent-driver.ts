@@ -8,6 +8,7 @@
 import type {
   AgentInfo, StreamOpts, StreamResult,
   SessionListResult, SessionTailOpts, SessionTailResult,
+  SessionMessagesOpts, SessionMessagesResult,
   ModelListOpts, ModelListResult,
   UsageOpts, UsageResult,
 } from './code-agent.js';
@@ -23,6 +24,7 @@ export interface AgentDriver {
   doStream(opts: StreamOpts): Promise<StreamResult>;
   getSessions(workdir: string, limit?: number): Promise<SessionListResult>;
   getSessionTail(opts: SessionTailOpts): Promise<SessionTailResult>;
+  getSessionMessages(opts: SessionMessagesOpts): Promise<SessionMessagesResult>;
   listModels(opts: ModelListOpts): Promise<ModelListResult>;
   getUsage(opts: UsageOpts): UsageResult;
   /** Optional live/async usage (e.g. codex app-server). Falls back to getUsage. */

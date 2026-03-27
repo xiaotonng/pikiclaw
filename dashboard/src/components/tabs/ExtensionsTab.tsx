@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../../api';
 import { createT } from '../../i18n';
 import { useStore } from '../../store';
@@ -97,8 +97,10 @@ export function ExtensionsTab({
   onOpenBrowserSetup: () => void;
   onOpenDesktopSetup: () => void;
 }) {
-  const { locale, toast, state } = useStore();
-  const t = createT(locale);
+  const locale = useStore(s => s.locale);
+  const toast = useStore(s => s.toast);
+  const state = useStore(s => s.state);
+  const t = useMemo(() => createT(locale), [locale]);
   const [snapshot, setSnapshot] = useState<BrowserStatusResponse | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 

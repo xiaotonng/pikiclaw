@@ -36,7 +36,7 @@ export function buildKnownChatEnv(
 
 export type SessionMessageRef = Pick<
   SessionRuntime,
-  'key' | 'workdir' | 'agent' | 'sessionId' | 'workspacePath' | 'codexCumulative' | 'modelId'
+  'key' | 'workdir' | 'agent' | 'sessionId' | 'workspacePath' | 'threadId' | 'codexCumulative' | 'modelId'
 >;
 
 export class SessionMessageRegistry<ChatKey extends ChatId, MessageId extends ChatId> {
@@ -69,6 +69,7 @@ export class SessionMessageRegistry<ChatKey extends ChatId, MessageId extends Ch
       agent: session.agent,
       sessionId: session.sessionId,
       workspacePath: session.workspacePath ?? null,
+      threadId: session.threadId ?? null,
       codexCumulative: session.codexCumulative,
       modelId: session.modelId ?? null,
     });

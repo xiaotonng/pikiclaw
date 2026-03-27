@@ -10,12 +10,17 @@ import path from 'node:path';
 import { execSync, spawn } from 'node:child_process';
 import { getActiveUserConfig, onUserConfigChange, resolveUserWorkdir, setUserWorkdir } from './user-config.js';
 import {
-  doStream, getSessions, getSessionTail, getUsage, initializeProjectSkills, listAgents, listModels, listSkills, stageSessionFiles,
+  doStream, ensureManagedSession, findManagedThreadSession, getUsage, initializeProjectSkills, listAgents, listModels, listSkills, stageSessionFiles,
   type Agent, type CodexCumulativeUsage, type StreamOpts, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type SessionInfo, type UsageResult,
   type CodexInteractionRequest, type CodexTurnControl,
   type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult,
   type SkillInfo, type SkillListResult, type AgentDetectOptions, isPendingSessionId, normalizeClaudeModelId,
+  type SessionClassification, type SessionMessagesOpts, type SessionMessagesResult,
 } from './code-agent.js';
+import {
+  querySessions, querySessionTail, updateSession,
+  type SessionQueryResult,
+} from './session-hub.js';
 import { getDriver, hasDriver, allDriverIds } from './agent-driver.js';
 import { resolveGuiIntegrationConfig } from './mcp-bridge.js';
 import { terminateProcessTree } from './process-control.js';
@@ -25,8 +30,9 @@ import {
   buildHumanLoopResponse, createEmptyHumanLoopAnswer, currentHumanLoopQuestion,
   isHumanLoopAwaitingText, setHumanLoopOption, setHumanLoopText, skipHumanLoopQuestion,
 } from './human-loop.js';
+import { writeScopedLog, type LogLevel } from './logging.js';
 
-export { type Agent, type CodexCumulativeUsage, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type SessionInfo, type UsageResult, type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult, type SkillInfo, type SkillListResult };
+export { updateSession, type Agent, type CodexCumulativeUsage, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type SessionInfo, type UsageResult, type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult, type SkillInfo, type SkillListResult, type SessionClassification, type SessionMessagesOpts, type SessionMessagesResult, type SessionQueryResult };
 import { BOT_TIMEOUTS } from './constants.js';
 
 export type ChatId = number | string;
@@ -453,6 +459,7 @@ export interface ChatState {
   codexCumulative?: CodexCumulativeUsage;
   modelId?: string | null;
   activeSessionKey?: string | null;
+  activeThreadId?: string | null;
   /** Per-chat workdir override; null = use global bot.workdir. */
   workdir?: string | null;
 }
@@ -463,9 +470,31 @@ export interface SessionRuntime {
   agent: Agent;
   sessionId: string | null;
   workspacePath: string | null;
+  threadId: string | null;
   codexCumulative?: CodexCumulativeUsage;
   modelId?: string | null;
   runningTaskIds: Set<string>;
+}
+
+/** Events emitted to dashboard listeners during a stream. */
+export type StreamEvent =
+  | { type: 'start'; taskId: string; agent: string; sessionId: string | null }
+  | { type: 'text'; text: string; thinking: string; activity?: string; plan?: StreamPreviewPlan | null }
+  | { type: 'done'; taskId: string; sessionId: string | null; error?: string }
+  | { type: 'queued'; taskId: string; position: number }
+  | { type: 'cancelled'; taskId: string };
+
+/** Snapshot of the latest streaming state for a session (used by polling endpoint). */
+export interface StreamSnapshot {
+  phase: 'queued' | 'streaming' | 'done';
+  taskId: string;
+  text?: string;
+  thinking?: string;
+  activity?: string;
+  plan?: StreamPreviewPlan | null;
+  sessionId?: string | null;
+  error?: string;
+  updatedAt: number;
 }
 
 export interface RunningTask {
@@ -536,6 +565,66 @@ export class Bot {
   connected = false;
   stats = { totalTurns: 0, totalInputTokens: 0, totalOutputTokens: 0, totalCachedTokens: 0 };
 
+  /* ── Dashboard stream state (polling-friendly snapshots) ── */
+  private streamSnapshots = new Map<string, StreamSnapshot>();
+  private snapshotCleanupTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  /** Get the current streaming snapshot for a session (used by polling endpoint). */
+  getStreamSnapshot(sessionKey: string): StreamSnapshot | null {
+    return this.streamSnapshots.get(sessionKey) ?? null;
+  }
+
+  /** Emit a streaming event — updates the polling snapshot. */
+  emitStream(sessionKey: string, event: StreamEvent) {
+    // Clear any pending cleanup timer
+    const pending = this.snapshotCleanupTimers.get(sessionKey);
+    if (pending) { clearTimeout(pending); this.snapshotCleanupTimers.delete(sessionKey); }
+
+    const now = Date.now();
+    switch (event.type) {
+      case 'queued':
+        this.streamSnapshots.set(sessionKey, { phase: 'queued', taskId: event.taskId, updatedAt: now });
+        break;
+      case 'start':
+        this.streamSnapshots.set(sessionKey, {
+          phase: 'streaming', taskId: event.taskId,
+          text: '', thinking: '', activity: '', plan: null, sessionId: event.sessionId, updatedAt: now,
+        });
+        break;
+      case 'text': {
+        const snap = this.streamSnapshots.get(sessionKey);
+        if (snap) {
+          snap.text = event.text;
+          snap.thinking = event.thinking;
+          snap.activity = event.activity;
+          snap.plan = event.plan?.steps?.length ? event.plan : null;
+          snap.updatedAt = now;
+        }
+        break;
+      }
+      case 'done': {
+        const prev = this.streamSnapshots.get(sessionKey);
+        this.streamSnapshots.set(sessionKey, {
+          phase: 'done',
+          taskId: event.taskId,
+          sessionId: event.sessionId,
+          error: event.error,
+          plan: prev?.plan ?? null,
+          updatedAt: now,
+        });
+        // Auto-clean 'done' snapshot after 10s so stale state doesn't linger
+        this.snapshotCleanupTimers.set(sessionKey, setTimeout(() => {
+          this.streamSnapshots.delete(sessionKey);
+          this.snapshotCleanupTimers.delete(sessionKey);
+        }, 10_000));
+        break;
+      }
+      case 'cancelled':
+        this.streamSnapshots.delete(sessionKey);
+        break;
+    }
+  }
+
   private keepAliveProc: ReturnType<typeof spawn> | null = null;
   private keepAlivePulseTimer: ReturnType<typeof setInterval> | null = null;
   private sessionChains = new Map<string, Promise<void>>();
@@ -583,14 +672,25 @@ export class Bot {
     this.userConfigUnsubscribe = onUserConfigChange(config => this.refreshManagedConfig(config));
   }
 
-  log(msg: string) {
-    const ts = new Date().toTimeString().slice(0, 8);
-    process.stdout.write(`[pikiclaw ${ts}] ${msg}\n`);
+  log(msg: string, level: LogLevel = 'info') {
+    writeScopedLog('pikiclaw', msg, { level });
+  }
+
+  debug(msg: string) {
+    this.log(msg, 'debug');
+  }
+
+  warn(msg: string) {
+    this.log(msg, 'warn');
+  }
+
+  error(msg: string) {
+    this.log(msg, 'error');
   }
 
   chat(chatId: ChatId): ChatState {
     let s = this.chats.get(chatId);
-    if (!s) { s = { agent: this.defaultAgent, sessionId: null, activeSessionKey: null, modelId: null }; this.chats.set(chatId, s); }
+    if (!s) { s = { agent: this.defaultAgent, sessionId: null, activeSessionKey: null, activeThreadId: null, modelId: null }; this.chats.set(chatId, s); }
     return s;
   }
 
@@ -620,6 +720,7 @@ export class Bot {
     sessionId: string | null;
     workdir?: string | null;
     workspacePath?: string | null;
+    threadId?: string | null;
     codexCumulative?: CodexCumulativeUsage;
     modelId?: string | null;
   }): SessionRuntime | null {
@@ -629,6 +730,7 @@ export class Bot {
       sessionId: session.sessionId,
       workdir: session.workdir || this.workdir,
       workspacePath: session.workspacePath ?? null,
+      threadId: session.threadId ?? null,
       codexCumulative: session.codexCumulative,
       modelId: session.modelId ?? null,
     });
@@ -638,6 +740,7 @@ export class Bot {
     agent: Agent;
     sessionId: string;
     workspacePath?: string | null;
+    threadId?: string | null;
     codexCumulative?: CodexCumulativeUsage;
     modelId?: string | null;
     workdir?: string;
@@ -650,6 +753,7 @@ export class Bot {
       existing.agent = session.agent;
       existing.sessionId = session.sessionId;
       if (session.workspacePath !== undefined) existing.workspacePath = session.workspacePath ?? null;
+      if (session.threadId !== undefined) existing.threadId = session.threadId ?? null;
       if (session.codexCumulative !== undefined) existing.codexCumulative = session.codexCumulative;
       if (session.modelId !== undefined) existing.modelId = session.modelId ?? null;
       return existing;
@@ -661,6 +765,7 @@ export class Bot {
       agent: session.agent,
       sessionId: session.sessionId,
       workspacePath: session.workspacePath ?? null,
+      threadId: session.threadId ?? null,
       codexCumulative: session.codexCumulative,
       modelId: session.modelId ?? null,
       runningTaskIds: new Set<string>(),
@@ -669,13 +774,14 @@ export class Bot {
     return runtime;
   }
 
-  protected applySessionSelection(cs: ChatState, session: SessionRuntime | null) {
+  protected applySessionSelection(cs: ChatState, session: SessionRuntime | null, opts: { preserveThread?: boolean } = {}) {
     const previousSessionKey = cs.activeSessionKey ?? null;
     cs.activeSessionKey = session?.key ?? null;
     if (session) {
       cs.agent = session.agent;
       cs.sessionId = session.sessionId;
       cs.workspacePath = session.workspacePath;
+      cs.activeThreadId = session.threadId;
       cs.codexCumulative = session.codexCumulative;
       cs.modelId = session.modelId ?? null;
       cs.workdir = session.workdir;
@@ -684,27 +790,37 @@ export class Bot {
     }
     cs.sessionId = null;
     cs.workspacePath = null;
+    if (!opts.preserveThread) cs.activeThreadId = null;
     cs.codexCumulative = undefined;
     cs.modelId = null;
     if (previousSessionKey) this.maybeEvictSessionRuntime(previousSessionKey);
   }
 
-  protected resetChatConversation(cs: ChatState, opts?: { clearWorkdir?: boolean }) {
-    this.applySessionSelection(cs, null);
+  protected resetChatConversation(cs: ChatState, opts?: { clearWorkdir?: boolean; clearThread?: boolean }) {
+    this.applySessionSelection(cs, null, { preserveThread: opts?.clearThread === false });
     if (opts?.clearWorkdir) cs.workdir = null;
   }
 
-  protected adoptSession(cs: ChatState, session: Pick<SessionInfo, 'agent' | 'sessionId' | 'workdir' | 'workspacePath' | 'model'>) {
+  protected adoptSession(cs: ChatState, session: Pick<SessionInfo, 'agent' | 'sessionId' | 'workdir' | 'workspacePath' | 'model' | 'title' | 'threadId'>) {
     if (!session.sessionId) {
       this.applySessionSelection(cs, null);
       return;
     }
+    const managed = ensureManagedSession({
+      agent: session.agent,
+      sessionId: session.sessionId,
+      workdir: 'workdir' in session && session.workdir ? session.workdir : this.workdir,
+      title: session.title ?? null,
+      model: session.model ?? null,
+      threadId: session.threadId ?? null,
+    });
     const runtime = this.hydrateSessionRuntime({
       agent: session.agent,
       sessionId: session.sessionId,
       workdir: 'workdir' in session ? session.workdir : null,
-      workspacePath: session.workspacePath ?? null,
-      modelId: session.model ?? null,
+      workspacePath: managed.workspacePath ?? session.workspacePath ?? null,
+      threadId: managed.threadId ?? session.threadId ?? null,
+      modelId: session.model ?? managed.model ?? null,
     });
     if (!runtime) {
       this.applySessionSelection(cs, null);
@@ -737,10 +853,30 @@ export class Bot {
     this.sessionStates.delete(session.key);
   }
 
+  protected findThreadSessionRuntime(chatId: ChatId, threadId: string | null | undefined, agent: Agent): SessionRuntime | null {
+    if (!threadId) return null;
+    const managed = findManagedThreadSession(this.chatWorkdir(chatId), threadId, agent);
+    if (!managed?.sessionId) return null;
+    return this.hydrateSessionRuntime({
+      agent: managed.agent,
+      sessionId: managed.sessionId,
+      workdir: managed.workdir || this.chatWorkdir(chatId),
+      workspacePath: managed.workspacePath ?? null,
+      threadId: managed.threadId ?? threadId,
+      modelId: managed.model ?? null,
+    });
+  }
+
   protected ensureSessionForChat(chatId: ChatId, title: string, files: string[]): SessionRuntime {
     const cs = this.chat(chatId);
     const selected = this.getSelectedSession(cs);
     if (selected) return selected;
+
+    const resumed = this.findThreadSessionRuntime(chatId, cs.activeThreadId, cs.agent);
+    if (resumed) {
+      this.applySessionSelection(cs, resumed);
+      return resumed;
+    }
 
     const wd = this.chatWorkdir(chatId);
     const staged = stageSessionFiles({
@@ -749,11 +885,13 @@ export class Bot {
       files: [],
       sessionId: null,
       title: title || 'New session',
+      threadId: cs.activeThreadId ?? null,
     });
     const runtime = this.upsertSessionRuntime({
       agent: cs.agent,
       sessionId: staged.sessionId,
       workspacePath: staged.workspacePath,
+      threadId: staged.threadId,
       modelId: this.modelForAgent(cs.agent),
     });
     this.applySessionSelection(cs, runtime);
@@ -1075,7 +1213,7 @@ export class Bot {
 
   adoptExistingSessionForChat(
     chatId: ChatId,
-    session: Pick<SessionInfo, 'agent' | 'sessionId' | 'workdir' | 'workspacePath' | 'model'>,
+    session: Pick<SessionInfo, 'agent' | 'sessionId' | 'workdir' | 'workspacePath' | 'model' | 'title' | 'threadId'>,
   ): SessionRuntime | null {
     const cs = this.chat(chatId);
     this.adoptSession(cs, session);
@@ -1086,7 +1224,13 @@ export class Bot {
     const cs = this.chat(chatId);
     if (cs.agent === agent) return false;
     cs.agent = agent;
-    this.resetChatConversation(cs);
+    const resumed = this.findThreadSessionRuntime(chatId, cs.activeThreadId, agent);
+    if (resumed) {
+      this.applySessionSelection(cs, resumed);
+      this.log(`agent switched to ${agent} chat=${chatId} resumed=${resumed.sessionId}`);
+      return true;
+    }
+    this.resetChatConversation(cs, { clearThread: false });
     this.log(`agent switched to ${agent} chat=${chatId}`);
     return true;
   }
@@ -1108,12 +1252,12 @@ export class Bot {
     return this.agentConfigs[agent]?.model || '';
   }
 
-  fetchSessions(agent: Agent, workdir?: string) {
-    return getSessions({ agent, workdir: workdir || this.workdir });
+  fetchSessions(agent: Agent, workdir?: string): Promise<SessionQueryResult> {
+    return querySessions({ agent, workdir: workdir || this.workdir });
   }
 
   fetchSessionTail(agent: Agent, sessionId: string, limit?: number, workdir = this.workdir) {
-    return getSessionTail({ agent, sessionId, workdir, limit });
+    return querySessionTail({ agent, sessionId, workdir, limit });
   }
 
   fetchAgents(options: AgentDetectOptions = {}) {
@@ -1279,8 +1423,8 @@ export class Bot {
     const sessionWorkdir = 'workdir' in cs && typeof cs.workdir === 'string' && cs.workdir
       ? path.resolve(cs.workdir)
       : this.workdir;
-    this.log(`[runStream] agent=${cs.agent} session=${cs.sessionId || '(new)'} workdir=${sessionWorkdir} timeout=${this.runTimeout}s attachments=${attachments.length}`);
-    this.log(`[runStream] ${cs.agent} config: model=${resolvedModel} extraArgs=[${extraArgs.join(' ')}]`);
+    this.debug(`[runStream] agent=${cs.agent} session=${cs.sessionId || '(new)'} workdir=${sessionWorkdir} timeout=${this.runTimeout}s attachments=${attachments.length}`);
+    this.debug(`[runStream] ${cs.agent} config: model=${resolvedModel} extraArgs=[${extraArgs.join(' ')}]`);
     const isFirstTurnOfSession = !cs.sessionId || isPendingSessionId(cs.sessionId);
     const mcpSystemPrompt = mcpSendFile
       ? appendExtraPrompt(buildMcpDeliveryPrompt(), buildBrowserAutomationPrompt(browserEnabled))
@@ -1341,7 +1485,7 @@ export class Bot {
       }
       if (runtime) this.syncSelectedChats(runtime);
     }
-    this.log(`[runStream] completed turn=${this.stats.totalTurns} cumulative: in=${fmtTokens(this.stats.totalInputTokens)} out=${fmtTokens(this.stats.totalOutputTokens)} cached=${fmtTokens(this.stats.totalCachedTokens)}`);
+    this.debug(`[runStream] completed turn=${this.stats.totalTurns} cumulative: in=${fmtTokens(this.stats.totalInputTokens)} out=${fmtTokens(this.stats.totalOutputTokens)} cached=${fmtTokens(this.stats.totalCachedTokens)}`);
     return result;
   }
 

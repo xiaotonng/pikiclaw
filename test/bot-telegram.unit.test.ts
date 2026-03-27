@@ -14,6 +14,7 @@ import { TelegramBot } from '../src/bot-telegram.ts';
 import { TelegramChannel } from '../src/channel-telegram.ts';
 import * as agentDriver from '../src/agent-driver.ts';
 import type { Agent, StreamResult } from '../src/code-agent.ts';
+import { ensureManagedSession } from '../src/code-agent.ts';
 import { makeTmpDir } from './support/env.ts';
 import { makeStreamResult } from './support/stream-result.ts';
 import { createTelegramBotHarness } from './support/telegram-bot-harness.ts';
@@ -414,6 +415,54 @@ describe('TelegramBot status and session previews', () => {
         '<b>Model</b>\n<code>claude-sonnet-4-6</code>\n<i>claude · session reset</i>',
         { parseMode: 'HTML' },
       );
+    }
+
+    // --- Sub-scenario 5: reports when switching agents resumes an existing thread binding ---
+    {
+      const { bot, ctx, sends } = createBot();
+      const workdir = process.env.PIKICLAW_WORKDIR!;
+      ensureManagedSession({
+        agent: 'claude',
+        workdir,
+        sessionId: 'sess-claude-thread',
+        title: 'claude thread',
+        threadId: 'thread-im',
+      });
+      ensureManagedSession({
+        agent: 'codex',
+        workdir,
+        sessionId: 'sess-codex-thread',
+        title: 'codex thread',
+        threadId: 'thread-im',
+      });
+      vi.spyOn(bot, 'fetchSessionTail').mockResolvedValue({
+        ok: true,
+        messages: [
+          { role: 'user', text: 'keep context' },
+          { role: 'assistant', text: 'restored answer' },
+        ],
+        error: null,
+      });
+      bot.adoptExistingSessionForChat(ctx.chatId, {
+        agent: 'claude',
+        sessionId: 'sess-claude-thread',
+        workdir,
+        workspacePath: null,
+        model: 'claude-opus-4-6',
+        title: 'claude thread',
+        threadId: 'thread-im',
+      });
+
+      await bot.handleCallback('ag:codex', ctx as any);
+
+      expect(ctx.editReply).toHaveBeenLastCalledWith(
+        ctx.messageId,
+        '<b>Agent</b>\ncodex\n<i>Resumed previous session</i>',
+        { parseMode: 'HTML' },
+      );
+      expect(bot.chat(ctx.chatId).sessionId).toBe('sess-codex-thread');
+      expect(sends).toHaveLength(1);
+      expect(sends[0].text).toContain('<b>Recent Context</b>');
     }
   });
 });

@@ -9,8 +9,9 @@
  */
 
 import { ensureGitignore, formatThinkingForDisplay, DEFAULT_RUN_TIMEOUT_S } from './bot.js';
-import { initializeProjectSkills, listAgents, listModels, listSkills, getUsage, doStream, getSessions, getSessionTail } from './code-agent.js';
+import { initializeProjectSkills, listAgents, listModels, listSkills, getUsage, doStream } from './code-agent.js';
 import type { Agent, StreamOpts } from './code-agent.js';
+import { querySessions, querySessionTail } from './session-hub.js';
 import { getDriver } from './agent-driver.js';
 import { loadUserConfig, resolveUserWorkdir } from './user-config.js';
 import { VERSION } from './version.js';
@@ -174,9 +175,9 @@ async function main() {
           ? 'gemini'
           : 'claude';
       const limit = 20;
-      const result = await getSessions({ agent, workdir, limit });
+      const result = await querySessions({ agent, workdir, limit });
       if (!result.ok) {
-        process.stderr.write(`Error: ${result.error}\n`);
+        process.stderr.write(`Error: ${result.errors.join('; ')}\n`);
         process.exit(1);
       }
       if (!result.sessions.length) {
@@ -205,7 +206,7 @@ async function main() {
 
       // Default: find the latest session
       if (!sessionId) {
-        const sessions = await getSessions({ agent, workdir, limit: 1 });
+        const sessions = await querySessions({ agent, workdir, limit: 1 });
         if (!sessions.ok || !sessions.sessions.length) {
           process.stderr.write(`No ${agent} sessions found for ${workdir}\n`);
           process.exit(1);
@@ -217,7 +218,7 @@ async function main() {
         }
       }
 
-      const tail = await getSessionTail({ agent, sessionId, workdir, limit: args.n });
+      const tail = await querySessionTail({ agent, sessionId, workdir, limit: args.n });
       if (!tail.ok) {
         process.stderr.write(`Error: ${tail.error}\n`);
         process.exit(1);

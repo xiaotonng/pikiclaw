@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import { createT } from '../../i18n';
 import { useStore } from '../../store';
 import { buildHostMetricItems, formatHostSummary, SystemInfoGrid } from '../SystemInfoPanel';
@@ -9,8 +10,10 @@ export function SystemTab({
 }: {
   onOpenWorkdir: () => void;
 }) {
-  const { state, host, locale } = useStore();
-  const t = createT(locale);
+  const state = useStore(s => s.state);
+  const host = useStore(s => s.host);
+  const locale = useStore(s => s.locale);
+  const t = useMemo(() => createT(locale), [locale]);
   const currentWorkdir = state?.bot?.workdir || state?.runtimeWorkdir || state?.config.workdir || '';
   const hostSummary = formatHostSummary(host);
 

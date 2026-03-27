@@ -10,17 +10,19 @@ import { registerDriver, type AgentDriver } from './agent-driver.js';
 import {
   type AgentInfo, type StreamOpts, type StreamResult,
   type SessionListResult, type SessionTailOpts, type SessionTailResult,
+  type SessionMessagesOpts, type SessionMessagesResult,
+  type TailMessage, type RichMessage, type MessageBlock,
   type ModelListOpts, type ModelListResult, type ModelInfo,
   type UsageOpts, type UsageResult, type UsageWindowInfo,
   type SessionInfo,
   // shared helpers
-  Q, run, agentLog, detectAgentBin,
+  Q, run, agentError, agentLog, agentWarn, detectAgentBin,
   appendSystemPrompt, buildStreamPreviewMeta, pushRecentActivity,
   summarizeClaudeToolUse, summarizeClaudeToolResult, joinErrorMessages,
   IMAGE_EXTS, mimeForExt,
   listPikiclawSessions, findPikiclawSession, isPendingSessionId,
   mergeManagedAndNativeSessions,
-  readTailLines, stripInjectedPrompts,
+  readTailLines, stripInjectedPrompts, sanitizeSessionUserPreviewText, applyTurnWindow, shortValue,
   roundPercent, toIsoFromEpochSeconds, modelFamily, normalizeClaudeModelId, emptyUsage, normalizeUsageStatus,
 } from './code-agent.js';
 import { AGENT_STREAM_HARD_KILL_GRACE_MS, SESSION_RUNNING_THRESHOLD_MS } from './constants.js';
@@ -42,7 +44,7 @@ function buildClaudeUserMessage(prompt: string, attachments: string[]): string {
           source: { type: 'base64', media_type: mimeForExt(ext), data: data.toString('base64') },
         });
       } catch (e: any) {
-        agentLog(`[attach] failed to read image ${filePath}: ${e.message}`);
+        agentWarn(`[attach] failed to read image ${filePath}: ${e.message}`);
       }
     } else {
       content.push({ type: 'text', text: `[Attached file: ${filePath}]` });
@@ -284,7 +286,7 @@ async function doClaudeInteractiveStream(opts: StreamOpts): Promise<StreamResult
     interrupted = true;
     s.stopReason = 'interrupted';
     closeInput();
-    agentLog(`[abort] user interrupt, killing process tree pid=${proc.pid}`);
+    agentWarn(`[abort] user interrupt, killing process tree pid=${proc.pid}`);
     terminateProcessTree(proc, { signal: 'SIGTERM', forceSignal: 'SIGKILL', forceAfterMs: 5000 });
   };
   if (opts.abortSignal?.aborted) abortStream();
@@ -331,7 +333,7 @@ async function doClaudeInteractiveStream(opts: StreamOpts): Promise<StreamResult
       }
       return true;
     } catch (error: any) {
-      agentLog(`[stdin] failed to write Claude input: ${error?.message || error}`);
+      agentWarn(`[stdin] failed to write Claude input: ${error?.message || error}`);
       return false;
     }
   };
@@ -345,7 +347,7 @@ async function doClaudeInteractiveStream(opts: StreamOpts): Promise<StreamResult
       return true;
     });
   } catch (error: any) {
-    agentLog(`[stdin] onSteerReady error: ${error?.message || error}`);
+    agentWarn(`[stdin] onSteerReady error: ${error?.message || error}`);
   }
 
   proc.stderr?.on('data', (c: Buffer) => {
@@ -360,7 +362,7 @@ async function doClaudeInteractiveStream(opts: StreamOpts): Promise<StreamResult
       timedOut = true;
       s.stopReason = 'timeout';
       closeInput();
-      agentLog('[timeout] deadline exceeded, killing process tree');
+      agentWarn('[timeout] deadline exceeded, killing process tree');
       terminateProcessTree(proc, { signal: 'SIGKILL' });
       return;
     }
@@ -410,7 +412,7 @@ async function doClaudeInteractiveStream(opts: StreamOpts): Promise<StreamResult
     timedOut = true;
     s.stopReason = 'timeout';
     closeInput();
-    agentLog(`[timeout] hard deadline reached (${opts.timeout}s), killing process tree pid=${proc.pid}`);
+    agentWarn(`[timeout] hard deadline reached (${opts.timeout}s), killing process tree pid=${proc.pid}`);
     terminateProcessTree(proc, { signal: 'SIGTERM', forceSignal: 'SIGKILL', forceAfterMs: 5000 });
   }, opts.timeout * 1000 + AGENT_STREAM_HARD_KILL_GRACE_MS);
 
@@ -430,7 +432,7 @@ async function doClaudeInteractiveStream(opts: StreamOpts): Promise<StreamResult
         clearTimeout(idleCloseTimer);
         idleCloseTimer = null;
       }
-      agentLog(`[error] ${e.message}`);
+      agentError(`[error] ${e.message}`);
       stderr += e.message;
       resolve([false, -1]);
     });
@@ -449,9 +451,9 @@ async function doClaudeInteractiveStream(opts: StreamOpts): Promise<StreamResult
   const incomplete = !ok || s.stopReason === 'max_tokens' || s.stopReason === 'timeout';
   const elapsed = ((Date.now() - start) / 1000).toFixed(1);
   agentLog(`[result] ok=${ok && !s.errors} elapsed=${elapsed}s text=${s.text.length}chars thinking=${s.thinking.length}chars session=${s.sessionId || '?'}`);
-  if (errorText) agentLog(`[result] errors: ${errorText}`);
+  if (errorText) agentWarn(`[result] errors: ${errorText}`);
   if (s.stopReason) agentLog(`[result] stop_reason=${s.stopReason}`);
-  if (stderr.trim() && !procOk) agentLog(`[result] stderr: ${stderr.trim().slice(0, 300)}`);
+  if (stderr.trim() && !procOk) agentWarn(`[result] stderr: ${stderr.trim().slice(0, 300)}`);
 
   return {
     ok,
@@ -501,6 +503,36 @@ function claudeProjectDirName(workdir: string): string {
 }
 
 /** Read native Claude Code sessions from ~/.claude/projects/{dirName}/*.jsonl */
+function extractClaudeTailQA(filePath: string): { lastQuestion: string | null; lastAnswer: string | null; lastMessageText: string | null } {
+  // Use a larger tail (1 MB) so we can reach past tool-result / assistant
+  // exchanges that follow the last real user question (which may be multi-MB
+  // due to embedded images).
+  const lines = readTailLines(filePath, 1024 * 1024);
+  let lastQuestion: string | null = null;
+  let lastAnswer: string | null = null;
+  let lastMessageText: string | null = null;
+  for (const raw of lines) {
+    if (!raw || raw[0] !== '{') continue;
+    try {
+      const ev = JSON.parse(raw);
+      if (ev.type === 'user') {
+        const text = sanitizeSessionUserPreviewText(extractClaudeText(ev.message?.content, true));
+        if (text) {
+          lastQuestion = shortValue(text, 500);
+          lastMessageText = shortValue(text, 500);
+        }
+      } else if (ev.type === 'assistant') {
+        const text = extractClaudeText(ev.message?.content).trim();
+        if (text) {
+          lastAnswer = shortValue(text, 500);
+          lastMessageText = shortValue(text, 500);
+        }
+      }
+    } catch { /* skip */ }
+  }
+  return { lastQuestion, lastAnswer, lastMessageText };
+}
+
 function getNativeClaudeSessions(workdir: string): SessionInfo[] {
   const home = process.env.HOME || '';
   if (!home) return [];
@@ -533,7 +565,7 @@ function getNativeClaudeSessions(workdir: string): SessionInfo[] {
         try {
           const ev = JSON.parse(line);
           if (!title && ev.type === 'user') {
-            const text = extractClaudeText(ev.message?.content, true).replace(/\s+/g, ' ').trim();
+            const text = stripInjectedPrompts(extractClaudeText(ev.message?.content, true)).replace(/\s+/g, ' ').trim();
             if (text) title = text.length <= 120 ? text : `${text.slice(0, 117).trimEnd()}...`;
           }
           if (!model && ev.type === 'assistant' && ev.message?.model) {
@@ -542,7 +574,46 @@ function getNativeClaudeSessions(workdir: string): SessionInfo[] {
           if (title && model) break;
         } catch { /* skip */ }
       }
+      // Fallback: if the first user message line is too large (e.g. contains
+      // base64 images) JSON.parse above will fail.  Read a bigger chunk and
+      // regex-extract text blocks to find the actual user question.
+      if (!title) {
+        let scanStr = head;
+        if (stat.size > 65536) {
+          try {
+            const fd2 = fs.openSync(filePath, 'r');
+            const bigBuf = Buffer.alloc(Math.min(4 * 1024 * 1024, stat.size));
+            const bigRead = fs.readSync(fd2, bigBuf, 0, bigBuf.length, 0);
+            fs.closeSync(fd2);
+            scanStr = bigBuf.toString('utf8', 0, bigRead);
+          } catch { /* keep using head */ }
+        }
+        const re = /"type":"text","text":"((?:[^"\\]|\\.)*)"/g;
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(scanStr)) !== null) {
+          let raw = m[1]
+            .replace(/\\n/g, ' ').replace(/\\t/g, ' ')
+            .replace(/\\"/g, '"').replace(/\\\\/g, '\\')
+            .replace(/\s+/g, ' ').trim();
+          if (!raw || raw.startsWith('<')) continue;
+          raw = stripInjectedPrompts(raw);
+          if (!raw) continue;
+          title = raw.length <= 120 ? raw : `${raw.slice(0, 117).trimEnd()}...`;
+          break;
+        }
+      }
 
+      // Quick turn count: count real user messages (exclude tool_result)
+      let numTurns = 0;
+      try {
+        const raw = fs.readFileSync(filePath, 'utf8');
+        const rawLines = raw.split('\n');
+        for (const rl of rawLines) {
+          if (rl.length > 2 && rl.includes('"type":"user"') && !rl.includes('"tool_result"')) numTurns++;
+        }
+      } catch { /* ignore count errors */ }
+
+      const tailQA = extractClaudeTailQA(filePath);
       sessions.push({
         sessionId,
         agent: 'claude',
@@ -555,6 +626,16 @@ function getNativeClaudeSessions(workdir: string): SessionInfo[] {
         runState: Date.now() - stat.mtimeMs < SESSION_RUNNING_THRESHOLD_MS ? 'running' : 'completed',
         runDetail: null,
         runUpdatedAt: stat.mtime.toISOString(),
+        classification: null,
+        userStatus: null,
+        userNote: null,
+        lastQuestion: tailQA.lastQuestion,
+        lastAnswer: tailQA.lastAnswer,
+        lastMessageText: tailQA.lastMessageText,
+        migratedFrom: null,
+        migratedTo: null,
+        linkedSessions: [],
+        numTurns: numTurns || null,
       });
     } catch { /* skip unreadable files */ }
   }
@@ -569,6 +650,7 @@ function getClaudeSessions(workdir: string, limit?: number): SessionListResult {
     agent: 'claude' as const,
     workdir: record.workdir,
     workspacePath: record.workspacePath,
+    threadId: record.threadId,
     model: record.model,
     createdAt: record.createdAt,
     title: record.title,
@@ -576,6 +658,16 @@ function getClaudeSessions(workdir: string, limit?: number): SessionListResult {
     runState: record.runState,
     runDetail: record.runDetail,
     runUpdatedAt: record.runUpdatedAt,
+    classification: record.classification,
+    userStatus: record.userStatus,
+    userNote: record.userNote,
+    lastQuestion: record.lastQuestion,
+    lastAnswer: record.lastAnswer,
+    lastMessageText: record.lastMessageText,
+    migratedFrom: record.migratedFrom,
+    migratedTo: record.migratedTo,
+    linkedSessions: record.linkedSessions,
+    numTurns: record.numTurns ?? null,
   }));
   const nativeSessions = getNativeClaudeSessions(resolvedWorkdir);
   const merged = mergeManagedAndNativeSessions(pikiclawSessions, nativeSessions);
@@ -634,6 +726,130 @@ function getClaudeSessionTail(opts: SessionTailOpts): SessionTailResult {
     return { ok: true, messages: allMsgs.slice(-limit), error: null };
   } catch (e: any) {
     return { ok: false, messages: [], error: e.message };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Session messages (full content)
+// ---------------------------------------------------------------------------
+
+/** Extract structured content blocks from Claude message content. */
+function extractClaudeBlocks(content: any, skipSystemBlocks = false): MessageBlock[] {
+  if (typeof content === 'string') return [{ type: 'text', content }];
+  if (!Array.isArray(content)) return [];
+  const blocks: MessageBlock[] = [];
+  for (const block of content) {
+    if (!block || typeof block !== 'object') continue;
+    if (block.type === 'text' && typeof block.text === 'string') {
+      if (skipSystemBlocks && block.text.startsWith('<')) continue;
+      blocks.push({ type: 'text', content: block.text });
+    } else if (block.type === 'thinking' && typeof block.thinking === 'string') {
+      blocks.push({ type: 'thinking', content: block.thinking });
+    } else if (block.type === 'tool_use') {
+      const inputStr = block.input ? JSON.stringify(block.input, null, 2) : '';
+      blocks.push({ type: 'tool_use', content: inputStr, toolName: block.name || 'unknown', toolId: block.id });
+    } else if (block.type === 'tool_result') {
+      const resultText = typeof block.content === 'string'
+        ? block.content
+        : Array.isArray(block.content)
+          ? block.content.filter((c: any) => c?.type === 'text').map((c: any) => c.text).join('\n')
+          : '';
+      blocks.push({ type: 'tool_result', content: resultText, toolId: block.tool_use_id });
+    }
+  }
+  return blocks;
+}
+
+function getClaudeSessionMessages(opts: SessionMessagesOpts): SessionMessagesResult {
+  const home = process.env.HOME || '';
+  const projectDir = path.join(home, '.claude', 'projects', claudeProjectDirName(opts.workdir));
+  const filePath = path.join(projectDir, `${opts.sessionId}.jsonl`);
+
+  if (!fs.existsSync(filePath)) {
+    return { ok: false, messages: [], totalTurns: 0, error: 'Session file not found' };
+  }
+
+  try {
+    const content = fs.readFileSync(filePath, 'utf-8');
+    const lines = content.split('\n').filter(l => l.trim());
+
+    // Parse raw events, merging consecutive same-role events into one message.
+    // Claude JSONL writes one event per content block (thinking, text, tool_use, tool_result).
+    // Consecutive assistant events form a single assistant message.
+    // User events with tool_result are system-injected and should be hidden;
+    // only user events with actual user text start a new user message.
+    const allMsgs: TailMessage[] = [];
+    const richMsgs: RichMessage[] = [];
+
+    let pendingRole: 'user' | 'assistant' | null = null;
+    let pendingTextParts: string[] = [];
+    let pendingBlocks: MessageBlock[] = [];
+
+    const flush = () => {
+      if (!pendingRole) return;
+      const text = pendingTextParts.join('\n');
+      if (text || pendingBlocks.length) {
+        allMsgs.push({ role: pendingRole, text });
+        richMsgs.push({ role: pendingRole, text, blocks: [...pendingBlocks] });
+      }
+      pendingRole = null;
+      pendingTextParts = [];
+      pendingBlocks = [];
+    };
+
+    for (const raw of lines) {
+      if (!raw || raw[0] !== '{') continue;
+      try {
+        const ev = JSON.parse(raw);
+        if (ev.type === 'user') {
+          // Check if this is a tool_result (system-injected) or actual user message
+          const contentArr = ev.message?.content;
+          const isToolResult = Array.isArray(contentArr)
+            && contentArr.length > 0
+            && contentArr.every((b: any) => b?.type === 'tool_result');
+
+          if (isToolResult) {
+            // Tool results belong to the preceding assistant turn — append as blocks
+            if (pendingRole === 'assistant') {
+              for (const block of contentArr) {
+                const resultText = typeof block.content === 'string'
+                  ? block.content
+                  : Array.isArray(block.content)
+                    ? block.content.filter((c: any) => c?.type === 'text').map((c: any) => c.text).join('\n')
+                    : '';
+                if (resultText) {
+                  pendingBlocks.push({ type: 'tool_result', content: resultText, toolId: block.tool_use_id });
+                }
+              }
+            }
+            continue;
+          }
+
+          // Actual user message — flush previous and start new
+          flush();
+          const text = stripInjectedPrompts(extractClaudeText(ev.message?.content, true));
+          if (text) {
+            pendingRole = 'user';
+            pendingTextParts = [text];
+            pendingBlocks = [{ type: 'text', content: text }];
+          }
+        } else if (ev.type === 'assistant') {
+          // If we were accumulating a user message, flush it
+          if (pendingRole === 'user') flush();
+          // Start or continue accumulating assistant blocks
+          pendingRole = 'assistant';
+          const text = extractClaudeText(ev.message?.content, true);
+          if (text) pendingTextParts.push(text);
+          const blocks = extractClaudeBlocks(ev.message?.content, true);
+          pendingBlocks.push(...blocks);
+        }
+      } catch { /* skip malformed lines */ }
+    }
+    flush();
+
+    return applyTurnWindow(allMsgs, opts, opts.rich ? richMsgs : undefined);
+  } catch (e: any) {
+    return { ok: false, messages: [], totalTurns: 0, error: e.message };
   }
 }
 
@@ -795,6 +1011,10 @@ class ClaudeDriver implements AgentDriver {
 
   async getSessionTail(opts: SessionTailOpts): Promise<SessionTailResult> {
     return getClaudeSessionTail(opts);
+  }
+
+  async getSessionMessages(opts: SessionMessagesOpts): Promise<SessionMessagesResult> {
+    return getClaudeSessionMessages(opts);
   }
 
   async listModels(_opts: ModelListOpts): Promise<ModelListResult> {

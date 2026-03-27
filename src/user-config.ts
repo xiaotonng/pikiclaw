@@ -6,6 +6,19 @@ import { USER_CONFIG_SYNC_DEFAULT_INTERVAL_MS } from './constants.js';
 
 export type ChannelName = 'telegram' | 'feishu' | 'weixin' | 'whatsapp';
 
+export interface WorkspaceEntry {
+  /** Absolute path to project directory */
+  path: string;
+  /** User-defined display name */
+  name: string;
+  /** Sort order (lower = higher priority) */
+  order?: number;
+  /** Preferred default agent for this workspace */
+  preferredAgent?: string;
+  /** When the workspace was registered */
+  addedAt: string;
+}
+
 export interface UserConfig {
   version: 1;
   channel?: ChannelName;
@@ -19,6 +32,7 @@ export interface UserConfig {
   codexReasoningEffort?: string;
   geminiModel?: string;
   workdir?: string;
+  workspaces?: WorkspaceEntry[];
   telegramBotToken?: string;
   telegramAllowedChatIds?: string;
   feishuAppId?: string;
@@ -72,6 +86,36 @@ function expandHomeDir(value: string): string {
   return value.replace(/^~/, process.env.HOME || '');
 }
 
+/** Normalize workspace entries — resolve paths, deduplicate, sort by order. */
+function normalizeWorkspaces(raw: unknown): WorkspaceEntry[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const entries: WorkspaceEntry[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const rawPath = typeof (item as any).path === 'string' ? (item as any).path.trim() : '';
+    if (!rawPath) continue;
+    const resolved = path.resolve(rawPath.replace(/^~/, process.env.HOME || ''));
+    if (seen.has(resolved)) continue;
+    seen.add(resolved);
+    entries.push({
+      path: resolved,
+      name: typeof (item as any).name === 'string' && (item as any).name.trim()
+        ? (item as any).name.trim()
+        : path.basename(resolved),
+      order: typeof (item as any).order === 'number' ? (item as any).order : entries.length,
+      preferredAgent: typeof (item as any).preferredAgent === 'string' && (item as any).preferredAgent.trim()
+        ? (item as any).preferredAgent.trim()
+        : undefined,
+      addedAt: typeof (item as any).addedAt === 'string' && (item as any).addedAt.trim()
+        ? (item as any).addedAt
+        : new Date().toISOString(),
+    });
+  }
+  entries.sort((a, b) => (a.order ?? 999) - (b.order ?? 999));
+  return entries;
+}
+
 /**
  * Single canonical config path: ~/.pikiclaw/setting.json
  * Both CLI and dashboard read/write this file exclusively.
@@ -114,6 +158,11 @@ function normalizeUserConfig(config: Partial<UserConfig>): Partial<UserConfig> {
   delete next.browserGuiIsolated;
   delete next.browserGuiUseExtension;
   delete next.browserGuiExtensionToken;
+  if (Array.isArray(next.workspaces)) {
+    next.workspaces = normalizeWorkspaces(next.workspaces);
+  } else {
+    delete next.workspaces;
+  }
   return next as Partial<UserConfig>;
 }
 
@@ -286,4 +335,112 @@ export function startUserConfigSync(options: SyncUserConfigOptions = {}): () => 
     userConfigSyncRaw = '';
     userConfigSyncOverrides = {};
   };
+}
+
+// ---------------------------------------------------------------------------
+// Workspace registry
+// ---------------------------------------------------------------------------
+
+/** Load registered workspaces from config. Returns empty array if none. */
+export function loadWorkspaces(): WorkspaceEntry[] {
+  const config = loadUserConfig();
+  return normalizeWorkspaces(config.workspaces);
+}
+
+/** Add a workspace. Returns the new entry. Deduplicates by resolved path. */
+export function addWorkspace(workspacePath: string, name?: string): WorkspaceEntry {
+  const resolved = path.resolve(workspacePath.replace(/^~/, process.env.HOME || ''));
+  const config = loadUserConfig();
+  const workspaces = normalizeWorkspaces(config.workspaces);
+
+  const existing = workspaces.find(w => w.path === resolved);
+  if (existing) {
+    if (name) existing.name = name;
+    saveUserConfig({ ...config, workspaces });
+    return existing;
+  }
+
+  const entry: WorkspaceEntry = {
+    path: resolved,
+    name: name?.trim() || path.basename(resolved),
+    order: workspaces.length,
+    addedAt: new Date().toISOString(),
+  };
+  workspaces.push(entry);
+  saveUserConfig({ ...config, workspaces });
+  return entry;
+}
+
+/** Remove a workspace by path. Returns true if removed. */
+export function removeWorkspace(workspacePath: string): boolean {
+  const resolved = path.resolve(workspacePath.replace(/^~/, process.env.HOME || ''));
+  const config = loadUserConfig();
+  const workspaces = normalizeWorkspaces(config.workspaces);
+  const before = workspaces.length;
+  const filtered = workspaces.filter(w => w.path !== resolved);
+  if (filtered.length === before) return false;
+  saveUserConfig({ ...config, workspaces: filtered });
+  return true;
+}
+
+/** Rename a workspace. Returns the updated entry or null if not found. */
+export function renameWorkspace(workspacePath: string, newName: string): WorkspaceEntry | null {
+  const resolved = path.resolve(workspacePath.replace(/^~/, process.env.HOME || ''));
+  const config = loadUserConfig();
+  const workspaces = normalizeWorkspaces(config.workspaces);
+  const entry = workspaces.find(w => w.path === resolved);
+  if (!entry) return null;
+  entry.name = newName.trim() || entry.name;
+  saveUserConfig({ ...config, workspaces });
+  return entry;
+}
+
+/** Reorder workspaces by providing paths in desired order. */
+export function reorderWorkspaces(orderedPaths: string[]): WorkspaceEntry[] {
+  const config = loadUserConfig();
+  const workspaces = normalizeWorkspaces(config.workspaces);
+  const byPath = new Map(workspaces.map(w => [w.path, w]));
+  const reordered: WorkspaceEntry[] = [];
+  const seen = new Set<string>();
+
+  for (let i = 0; i < orderedPaths.length; i++) {
+    const resolved = path.resolve(orderedPaths[i].replace(/^~/, process.env.HOME || ''));
+    const entry = byPath.get(resolved);
+    if (entry && !seen.has(resolved)) {
+      entry.order = i;
+      reordered.push(entry);
+      seen.add(resolved);
+    }
+  }
+
+  // Append any workspaces not in the ordered list
+  for (const entry of workspaces) {
+    if (!seen.has(entry.path)) {
+      entry.order = reordered.length;
+      reordered.push(entry);
+    }
+  }
+
+  saveUserConfig({ ...config, workspaces: reordered });
+  return reordered;
+}
+
+/** Update workspace preferences (preferredAgent, etc.) */
+export function updateWorkspace(workspacePath: string, patch: Partial<Pick<WorkspaceEntry, 'name' | 'preferredAgent' | 'order'>>): WorkspaceEntry | null {
+  const resolved = path.resolve(workspacePath.replace(/^~/, process.env.HOME || ''));
+  const config = loadUserConfig();
+  const workspaces = normalizeWorkspaces(config.workspaces);
+  const entry = workspaces.find(w => w.path === resolved);
+  if (!entry) return null;
+  if (patch.name !== undefined) entry.name = patch.name.trim() || entry.name;
+  if (patch.preferredAgent !== undefined) entry.preferredAgent = patch.preferredAgent || undefined;
+  if (patch.order !== undefined) entry.order = patch.order;
+  saveUserConfig({ ...config, workspaces });
+  return entry;
+}
+
+/** Find a workspace entry by path. */
+export function findWorkspace(workspacePath: string): WorkspaceEntry | null {
+  const resolved = path.resolve(workspacePath.replace(/^~/, process.env.HOME || ''));
+  return loadWorkspaces().find(w => w.path === resolved) || null;
 }

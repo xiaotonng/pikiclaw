@@ -23,6 +23,7 @@ import {
 } from './channel-base.js';
 import { adaptMarkdownForFeishu } from './bot-feishu-render.js';
 import { FEISHU_LIMITS } from './constants.js';
+import { writeScopedLog, type LogLevel } from './logging.js';
 
 export { FeishuChannel };
 export type FeishuCardActionItem = lark.InteractiveCardActionItem;
@@ -434,17 +435,17 @@ class FeishuChannel extends Channel {
         autoReconnect: true,
       });
 
-      this._log('[ws] starting SDK WSClient...');
+      this._debug('[ws] starting SDK WSClient...');
       try {
         await this.wsClient.start({ eventDispatcher: this.eventDispatcher });
-        this._log('[ws] WSClient started, listening for events');
+        this._debug('[ws] WSClient started, listening for events');
         break;
       } catch (err) {
         try { this.wsClient.close({ force: true }); } catch {}
         this.wsClient = null;
         if (!this.running) return;
         if (!isRetryableWsStartError(err)) throw err;
-        this._log(`[ws] start failed: ${describeError(err)} — retrying in ${Math.ceil(retryDelayMs / 1000)}s`);
+        this._log(`[ws] start failed: ${describeError(err)} — retrying in ${Math.ceil(retryDelayMs / 1000)}s`, 'warn');
         await sleep(retryDelayMs);
         retryDelayMs = Math.min(retryDelayMs * 2, FEISHU_WS_START_RETRY_MAX_DELAY_MS);
       }
@@ -479,26 +480,26 @@ class FeishuChannel extends Channel {
         try {
           await this._handleMessageEvent(data);
         } catch (e: any) {
-          this._log(`[dispatch] error: ${e}`);
+          this._log(`[dispatch] error: ${e}`, 'warn');
           this._hError?.(e instanceof Error ? e : new Error(String(e)));
         }
       },
       'card.action.trigger': (data: any) => {
         void this._dispatchCardAction(data).catch(e => {
-          this._log(`[card-action] error: ${e}`);
+          this._log(`[card-action] error: ${e}`, 'warn');
           this._hError?.(e instanceof Error ? e : new Error(String(e)));
         });
         return {};
       },
       'application.bot.menu_v6': (data: any) => {
         void this._dispatchMenuEvent(data).catch(e => {
-          this._log(`[menu] error: ${e}`);
+          this._log(`[menu] error: ${e}`, 'warn');
           this._hError?.(e instanceof Error ? e : new Error(String(e)));
         });
       },
       'im.message.recalled_v1': (data: any) => {
         void this._dispatchMessageRecalled(data).catch(e => {
-          this._log(`[message-recalled] error: ${e}`);
+          this._log(`[message-recalled] error: ${e}`, 'warn');
           this._hError?.(e instanceof Error ? e : new Error(String(e)));
         });
       },
@@ -515,7 +516,7 @@ class FeishuChannel extends Channel {
     const msgType = msg.message_type as string;
 
     if (!chatId || !messageId) return;
-    if (!this._isAllowed(chatId)) { this._log(`[recv] blocked: chat=${chatId} not allowed`); return; }
+    if (!this._isAllowed(chatId)) { this._debug(`[recv] blocked: chat=${chatId} not allowed`); return; }
     this.knownChats.add(chatId);
 
     const sender = event.sender;
@@ -533,7 +534,7 @@ class FeishuChannel extends Channel {
 
     // Group: require @mention
     if (chatType === 'group' && !this._isBotMentioned(msg)) {
-      this._log(`[recv] skipped: not mentioned in group ${chatId}`);
+      this._debug(`[recv] skipped: not mentioned in group ${chatId}`);
       return;
     }
 
@@ -554,14 +555,14 @@ class FeishuChannel extends Channel {
           try {
             const localPath = await this._downloadResource(messageId, content.image_key, 'image');
             files.push(localPath);
-          } catch (e: any) { this._log(`[recv] image download failed: ${e}`); }
+          } catch (e: any) { this._log(`[recv] image download failed: ${e}`, 'warn'); }
         }
       } else if (msgType === 'file') {
         if (content.file_key) {
           try {
             const localPath = await this._downloadResource(messageId, content.file_key, 'file', content.file_name);
             files.push(localPath);
-          } catch (e: any) { this._log(`[recv] file download failed: ${e}`); }
+          } catch (e: any) { this._log(`[recv] file download failed: ${e}`, 'warn'); }
         }
       } else if (msgType === 'post') {
         text = this._cleanMention(this._extractPostText(content));
@@ -569,7 +570,7 @@ class FeishuChannel extends Channel {
         text = this._cleanMention(content.text || '');
       }
     } catch (e: any) {
-      this._log(`[recv] content parse error: ${e.message || e}`);
+      this._log(`[recv] content parse error: ${e.message || e}`, 'warn');
       return;
     }
 
@@ -594,7 +595,7 @@ class FeishuChannel extends Channel {
       await this._hMessage({ text: trimmedText, files }, ctx);
     });
     const settled = current.catch(e => {
-      this._log(`[dispatch] handler error: ${e}`);
+      this._log(`[dispatch] handler error: ${e}`, 'warn');
       this._hError?.(e instanceof Error ? e : new Error(String(e)));
     }).finally(() => {
       if (this.messageChains.get(key) === settled) this.messageChains.delete(key);
@@ -608,13 +609,13 @@ class FeishuChannel extends Channel {
     const messageId = event.context?.open_message_id;
     const actionStr = event.action?.value?.action;
     if (!chatId || !actionStr || !this._hCardAction) return;
-    if (!this._isAllowed(chatId)) { this._log(`[card-action] blocked: chat=${chatId}`); return; }
+    if (!this._isAllowed(chatId)) { this._debug(`[card-action] blocked: chat=${chatId}`); return; }
 
     const from: FeishuFrom = {
       openId: event.operator?.open_id || '',
       userId: event.operator?.user_id,
     };
-    this._log(`[recv] card_action chat=${chatId} msg=${messageId} action="${actionStr}"`);
+    this._debug(`[recv] card_action chat=${chatId} msg=${messageId} action="${actionStr}"`);
     await this._hCardAction(actionStr, {
       chatId,
       messageId,
@@ -634,12 +635,12 @@ class FeishuChannel extends Channel {
     const chatId = this._openIdToChat.get(openId)
       ?? await this._resolveP2pChatId(openId);
     if (!chatId) {
-      this._log(`[menu] cannot resolve chat_id for open_id=${openId}, event_key=${eventKey}`);
+      this._log(`[menu] cannot resolve chat_id for open_id=${openId}, event_key=${eventKey}`, 'warn');
       return;
     }
     if (!this._isAllowed(chatId)) return;
 
-    this._log(`[recv] menu event_key=${eventKey} open_id=${openId} chat=${chatId}`);
+    this._debug(`[recv] menu event_key=${eventKey} open_id=${openId} chat=${chatId}`);
     const from: FeishuFrom = { openId, userId: event.operator?.operator_id?.user_id };
     const ctx = this._makeCtx(chatId, '', from, 'p2p', event);
     await this._hCommand(eventKey, '', ctx);
@@ -649,9 +650,9 @@ class FeishuChannel extends Channel {
     const chatId = String(event?.chat_id || '').trim();
     const messageId = String(event?.message_id || '').trim();
     if (!chatId || !messageId || !this._hRecall) return;
-    if (!this._isAllowed(chatId)) { this._log(`[message-recalled] blocked: chat=${chatId}`); return; }
+    if (!this._isAllowed(chatId)) { this._debug(`[message-recalled] blocked: chat=${chatId}`); return; }
     this.knownChats.add(chatId);
-    this._log(`[recv] message_recalled chat=${chatId} msg=${messageId}`);
+    this._debug(`[recv] message_recalled chat=${chatId} msg=${messageId}`);
     await this._hRecall(messageId, chatId, event);
   }
 
@@ -678,11 +679,11 @@ class FeishuChannel extends Channel {
       if (chatId) {
         this._openIdToChat.set(openId, chatId);
         this.knownChats.add(chatId);
-        this._log(`[menu] resolved chat_id=${chatId} for open_id=${openId}`);
+        this._debug(`[menu] resolved chat_id=${chatId} for open_id=${openId}`);
       }
       return chatId;
     } catch (e: any) {
-      this._log(`[menu] resolve chat_id failed for open_id=${openId}: ${e?.message || e}`);
+      this._log(`[menu] resolve chat_id failed for open_id=${openId}: ${e?.message || e}`, 'warn');
       return null;
     }
   }
@@ -692,14 +693,14 @@ class FeishuChannel extends Channel {
   // ========================================================================
 
   override async setMenu(commands: MenuCommand[]) {
-    this._log(`[menu] ${commands.length} commands. Configure in Feishu Developer Console → Bot → Custom Menu:`);
+    this._debug(`[menu] ${commands.length} commands. Configure in Feishu Developer Console → Bot → Custom Menu:`);
     for (const c of commands) {
-      this._log(`[menu]   event_key="${c.command}"  name="${c.description}"`);
+      this._debug(`[menu]   event_key="${c.command}"  name="${c.description}"`);
     }
   }
 
   override async clearMenu() {
-    this._log(`[menu] cleared (remove items in Feishu Developer Console)`);
+    this._debug('[menu] cleared (remove items in Feishu Developer Console)');
   }
 
   async sendCard(chatId: number | string, view: FeishuCardView): Promise<string | null> {
@@ -770,11 +771,11 @@ class FeishuChannel extends Channel {
     const cardState = this.cardStates.get(String(msgId));
     if (cardState?.streaming) {
       if (cardState.lastContent && !text.startsWith(cardState.lastContent)) {
-        this._log(`[edit] CardKit preview lost append-only shape for msg=${msgId}; switching to regular card edits`);
+        this._debug(`[edit] CardKit preview lost append-only shape for msg=${msgId}; switching to regular card edits`);
         await this.replaceStreamingCardWithRegularCard(chatId, msgId, text, opts, 'Streaming preview stabilized.');
         return;
       } else if (text.length > FEISHU_CARD_MAX) {
-        this._log(`[edit] CardKit preview length cap reached for msg=${msgId}; switching to regular card edits`);
+        this._debug(`[edit] CardKit preview length cap reached for msg=${msgId}; switching to regular card edits`);
         await this.replaceStreamingCardWithRegularCard(chatId, msgId, text, opts, 'Preview truncated.');
         return;
       } else {
@@ -788,7 +789,7 @@ class FeishuChannel extends Channel {
           });
         } catch (e: any) {
           if (isCardKitCapabilityError(e)) this.disableCardKit(describeFeishuApiError(e));
-          this._log(`[edit] CardKit push error: ${describeFeishuApiError(e)}`);
+          this._log(`[edit] CardKit push error: ${describeFeishuApiError(e)}`, 'warn');
         }
         return;
       }
@@ -900,7 +901,7 @@ class FeishuChannel extends Channel {
       cardId = nextCardId;
     } catch (e: any) {
       if (isCardKitCapabilityError(e)) this.disableCardKit(describeFeishuApiError(e));
-      this._log(`[streaming] CardKit create failed: ${describeFeishuApiError(e)}, falling back to regular card`);
+      this._log(`[streaming] CardKit create failed: ${describeFeishuApiError(e)}, falling back to regular card`, 'warn');
       return sendRegularCard(initialContent);
     }
 
@@ -927,7 +928,7 @@ class FeishuChannel extends Channel {
       this.cardStates.set(messageId, { cardId, sequence: 1, lastContent: '', streaming: true });
       return messageId;
     } catch (e: any) {
-      this._log(`[streaming] send card message failed: ${e?.message || e}`);
+      this._log(`[streaming] send card message failed: ${e?.message || e}`, 'warn');
       return sendRegularCard(initialContent);
     }
   }
@@ -965,7 +966,7 @@ class FeishuChannel extends Channel {
       });
     } catch (e: any) {
       if (isCardKitCapabilityError(e)) this.disableCardKit(describeFeishuApiError(e));
-      this._log(`[streaming] end streaming error: ${describeFeishuApiError(e)}`);
+      this._log(`[streaming] end streaming error: ${describeFeishuApiError(e)}`, 'warn');
     }
     state.streaming = false;
     state.lastContent = '';
@@ -1215,19 +1216,21 @@ class FeishuChannel extends Channel {
     return parts.join('\n');
   }
 
-  _log(msg: string) {
-    const ts = new Date().toTimeString().slice(0, 8);
-    process.stdout.write(`[feishu ${ts}] ${msg}\n`);
+  private _debug(msg: string) {
+    this._log(msg, 'debug');
+  }
+
+  _log(msg: string, level: LogLevel = 'info') {
+    writeScopedLog('feishu', msg, { level });
   }
 
   private _logOutgoing(action: string, meta: string) {
-    void action;
-    void meta;
+    this._debug(`[send] ${action} ${meta}`);
   }
 
   private disableCardKit(reason: string) {
     if (!this.cardKitEnabled) return;
     this.cardKitEnabled = false;
-    this._log(`[streaming] CardKit disabled for this process: ${reason}`);
+    this._log(`[streaming] CardKit disabled for this process: ${reason}`, 'warn');
   }
 }

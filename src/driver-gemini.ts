@@ -13,12 +13,15 @@ import { GEMINI_USAGE_TIMEOUTS, SESSION_RUNNING_THRESHOLD_MS } from './constants
 import {
   type AgentInfo, type StreamOpts, type StreamResult,
   type SessionListResult, type SessionInfo, type SessionTailOpts, type SessionTailResult,
+  type SessionMessagesOpts, type SessionMessagesResult,
+  type TailMessage,
   type ModelListOpts, type ModelListResult,
   type UsageOpts, type UsageResult, type UsageWindowInfo,
   run, agentLog, detectAgentBin, buildStreamPreviewMeta,
   appendSystemPrompt, pushRecentActivity, firstNonEmptyLine, shortValue, normalizeErrorMessage,
+  sanitizeSessionUserPreviewText,
   listPikiclawSessions, findPikiclawSession, isPendingSessionId,
-  mergeManagedAndNativeSessions,
+  mergeManagedAndNativeSessions, applyTurnWindow,
   roundPercent, emptyUsage, Q,
 } from './code-agent.js';
 
@@ -329,15 +332,29 @@ function getNativeGeminiSessionsFromFiles(workdir: string): SessionInfo[] {
     try {
       const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
       if (!data.sessionId) continue;
-      // Extract title from first user message
+      // Extract title from first user message + last Q&A from tail
       let title: string | null = null;
+      let lastQuestion: string | null = null;
+      let lastAnswer: string | null = null;
+      let lastMessageText: string | null = null;
       const messages = Array.isArray(data.messages) ? data.messages : [];
       for (const msg of messages) {
         if (msg.type === 'user') {
-          title = normalizeGeminiSessionTitle(extractGeminiText(msg.content));
-          break;
+          const text = sanitizeSessionUserPreviewText(extractGeminiText(msg.content));
+          if (!title) title = normalizeGeminiSessionTitle(text);
+          if (text) {
+            lastQuestion = shortValue(text, 500);
+            lastMessageText = shortValue(text, 500);
+          }
+        } else if (msg.type === 'model' || msg.type === 'assistant') {
+          const text = extractGeminiText(msg.content);
+          if (text) {
+            lastAnswer = shortValue(text, 500);
+            lastMessageText = shortValue(text, 500);
+          }
         }
       }
+      const numTurns = messages.filter((m: any) => m.type === 'user' && extractGeminiText(m.content)).length;
       sessions.push({
         sessionId: data.sessionId,
         agent: 'gemini',
@@ -350,6 +367,16 @@ function getNativeGeminiSessionsFromFiles(workdir: string): SessionInfo[] {
         runState: data.lastUpdated && Date.now() - Date.parse(data.lastUpdated) < SESSION_RUNNING_THRESHOLD_MS ? 'running' : 'completed',
         runDetail: null,
         runUpdatedAt: data.lastUpdated || data.startTime || null,
+        classification: null,
+        userStatus: null,
+        userNote: null,
+        lastQuestion,
+        lastAnswer,
+        lastMessageText,
+        migratedFrom: null,
+        migratedTo: null,
+        linkedSessions: [],
+        numTurns: numTurns || null,
       });
     } catch { /* skip */ }
   }
@@ -368,6 +395,7 @@ function getGeminiSessions(workdir: string, limit?: number): SessionListResult {
     agent: 'gemini' as const,
     workdir: record.workdir,
     workspacePath: record.workspacePath,
+    threadId: record.threadId,
     model: record.model,
     createdAt: record.createdAt,
     title: record.title,
@@ -375,6 +403,16 @@ function getGeminiSessions(workdir: string, limit?: number): SessionListResult {
     runState: record.runState,
     runDetail: record.runDetail,
     runUpdatedAt: record.runUpdatedAt,
+    classification: record.classification,
+    userStatus: record.userStatus,
+    userNote: record.userNote,
+    lastQuestion: record.lastQuestion,
+    lastAnswer: record.lastAnswer,
+    lastMessageText: record.lastMessageText,
+    migratedFrom: record.migratedFrom,
+    migratedTo: record.migratedTo,
+    linkedSessions: record.linkedSessions,
+    numTurns: record.numTurns ?? null,
   }));
   const nativeSessions = getNativeGeminiSessions(resolvedWorkdir);
   const merged = mergeManagedAndNativeSessions(pikiclawSessions, nativeSessions);
@@ -407,6 +445,31 @@ function getGeminiSessionTail(opts: SessionTailOpts): SessionTailResult {
     return { ok: true, messages: allMsgs.slice(-limit), error: null };
   } catch (e: any) {
     return { ok: false, messages: [], error: e.message };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Session messages (full content)
+// ---------------------------------------------------------------------------
+
+function getGeminiSessionMessages(opts: SessionMessagesOpts): SessionMessagesResult {
+  const filePath = findGeminiSessionFile(opts.workdir, opts.sessionId);
+  if (!filePath) return { ok: false, messages: [], totalTurns: 0, error: 'Session file not found' };
+
+  try {
+    const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    const messages = Array.isArray(data?.messages) ? data.messages : [];
+    const allMsgs: TailMessage[] = [];
+    for (const msg of messages) {
+      const type = typeof msg?.type === 'string' ? msg.type.trim().toLowerCase() : '';
+      const role = type === 'user' ? 'user' : type === 'gemini' ? 'assistant' : null;
+      if (!role) continue;
+      const text = extractGeminiText(msg?.content);
+      if (text) allMsgs.push({ role, text });
+    }
+    return applyTurnWindow(allMsgs, opts);
+  } catch (e: any) {
+    return { ok: false, messages: [], totalTurns: 0, error: e.message };
   }
 }
 
@@ -604,6 +667,10 @@ class GeminiDriver implements AgentDriver {
 
   async getSessionTail(opts: SessionTailOpts): Promise<SessionTailResult> {
     return getGeminiSessionTail(opts);
+  }
+
+  async getSessionMessages(opts: SessionMessagesOpts): Promise<SessionMessagesResult> {
+    return getGeminiSessionMessages(opts);
   }
 
   async listModels(_opts: ModelListOpts): Promise<ModelListResult> {

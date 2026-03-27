@@ -249,7 +249,8 @@ export function IMAccessTab({
   onOpenTelegram,
   onOpenFeishu,
 }: IMAccessTabProps) {
-  const { state, locale } = useStore();
+  const state = useStore(s => s.state);
+  const locale = useStore(s => s.locale);
   const copy = getCopy(locale);
   const loading = !state;
   const channels = state?.setupState?.channels || [];

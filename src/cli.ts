@@ -15,7 +15,7 @@ import { DAEMON_TIMEOUTS } from './constants.js';
 import { TelegramBot } from './bot-telegram.js';
 import { hasConfiguredChannelToken, resolveConfiguredChannels } from './cli-channels.js';
 import { listAgents } from './code-agent.js';
-import { startDashboard, type DashboardServer } from './dashboard.js';
+import { startDashboard, type DashboardServer } from './server.js';
 import { buildSetupGuide, collectSetupState, hasReadyAgent, isSetupReady } from './onboarding.js';
 import {
   buildRestartCommand,

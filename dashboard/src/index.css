@@ -277,3 +277,21 @@ button:disabled { cursor: not-allowed; }
   background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
   background-size: 256px 256px;
 }
+
+/* ── Layout containment: each panel is an independent compositing layer
+   so re-renders in one panel don't cause reflow/repaint in siblings ── */
+.panel-isolated {
+  contain: layout style paint;
+  will-change: transform;  /* promote to own GPU layer */
+}
+
+.panel-scroll-safe {
+  contain: layout style;
+}
+
+@supports (content-visibility: auto) {
+  .session-turn {
+    content-visibility: auto;
+    contain-intrinsic-size: 1px 320px;
+  }
+}
