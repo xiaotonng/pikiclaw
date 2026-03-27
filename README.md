@@ -16,6 +16,8 @@ npx pikiclaw@latest
 <a href="https://nodejs.org"><img src="https://img.shields.io/badge/Node.js-18+-green.svg" alt="Node.js 18+"></a>
 </p>
 
+<img src="docs/workspace.png" alt="Workspace" width="700">
+
 </div>
 
 ## Demo
@@ -121,10 +123,6 @@ npx pikiclaw@latest --doctor  # check environment only
 **Sessions** — Per-agent session list and runtime status
 
 <img src="docs/promo-dashboard-sessions.png" alt="Sessions" width="700">
-
-**Workspace** — Live session workspace with message streaming, plan progress, and directory browser
-
-<img src="docs/workspace.png" alt="Workspace" width="700">
 
 **System Info** — Working directory, CPU / memory / disk monitoring
 

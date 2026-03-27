@@ -51,9 +51,9 @@ Run multiple queries in parallel to maximize coverage:
 - `"coding agent 微信" --state open`
 - `"coding agent 飞书" --state open`
 
-Example command (filters out trending/news bots):
+Example command (filters out aggregator/bot repos and our own repo):
 ```bash
-gh search issues "claude code telegram" --state open --limit 30 --json url,title,state,repository | jq '.[] | select(.repository.name | test("trending|news|weekly|github-daily") | not)'
+gh search issues "claude code telegram" --state open --limit 30 --json url,title,repository | jq -r '[.[] | select(.repository.name | test("trending|news|weekly|github-daily|awesome|digest|bulletin|pikiclaw"; "i") | not) | select(.repository.nameWithOwner | test("xiaotonng/") | not)] | .[] | "\(.url) | \(.title) | \(.repository.nameWithOwner)"'
 ```
 
 ## 3. Filter and Select the Best Issues

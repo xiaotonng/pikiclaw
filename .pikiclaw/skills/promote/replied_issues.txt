@@ -18,3 +18,6 @@ https://github.com/anthropics/claude-code/issues/25115
 https://github.com/anthropics/claude-code/issues/28571
 https://github.com/bug-ops/zeph/issues/2186
 https://github.com/Johnixr/claude-code-wechat-channel/issues/12
+https://github.com/anthropics/claude-code/issues/38739
+https://github.com/anthropics/claude-code/issues/28758
+https://github.com/RichardAtCT/claude-code-telegram/issues/102
