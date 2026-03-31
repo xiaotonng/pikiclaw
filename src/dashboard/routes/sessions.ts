@@ -155,6 +155,8 @@ async function parseSessionSendRequest(c: any): Promise<{
   agent: string;
   sessionId: string;
   prompt: string;
+  model: string;
+  effort: string;
   attachments: string[];
   cleanup: () => Promise<void>;
 }> {
@@ -167,6 +169,8 @@ async function parseSessionSendRequest(c: any): Promise<{
       agent: readStringField(form.get('agent')),
       sessionId: readStringField(form.get('sessionId')),
       prompt: readStringField(form.get('prompt')),
+      model: readStringField(form.get('model')),
+      effort: readStringField(form.get('effort')).toLowerCase(),
       attachments: uploads.attachments,
       cleanup: uploads.cleanup,
     };
@@ -178,6 +182,8 @@ async function parseSessionSendRequest(c: any): Promise<{
     agent: readStringField(body?.agent),
     sessionId: readStringField(body?.sessionId),
     prompt: readStringField(body?.prompt),
+    model: readStringField(body?.model),
+    effort: readStringField(body?.effort).toLowerCase(),
     attachments: [],
     cleanup: async () => {},
   };
@@ -500,12 +506,14 @@ app.post('/api/session-hub/import', async (c) => {
 
 app.post('/api/session-hub/session/send', async (c) => {
   try {
-    const { workdir, agent, sessionId, prompt, attachments, cleanup } = await parseSessionSendRequest(c);
+    const { workdir, agent, sessionId, prompt, model, effort, attachments, cleanup } = await parseSessionSendRequest(c);
     const queued = queueDashboardSessionTask({
       workdir,
-      agent: agent as Agent,
+      agent,
       sessionId,
       prompt,
+      model,
+      effort,
       attachments,
     });
     await cleanup();

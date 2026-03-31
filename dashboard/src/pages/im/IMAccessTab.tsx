@@ -2,10 +2,10 @@ import { useMemo } from 'react';
 import { isChannelValidationPending } from '../../channel-status';
 import { type Locale } from '../../i18n';
 import { useStore } from '../../store';
-import { BrandIcon } from '../BrandIcon';
+import { BrandIcon } from '../../components/BrandIcon';
 import type { ChannelSetupState, UserConfig } from '../../types';
-import { Badge, Button, Spinner } from '../ui';
-import { SettingRowAction, SettingRowCard, SettingRowField, SettingRowLead } from './shared';
+import { Badge, Button, Spinner } from '../../components/ui';
+import { SettingRowAction, SettingRowCard, SettingRowField, SettingRowLead } from '../shared';
 
 type IMAccessTabProps = {
   onOpenWeixin: () => void;

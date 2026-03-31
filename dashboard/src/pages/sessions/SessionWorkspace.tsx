@@ -1,19 +1,30 @@
-import { Suspense, lazy, useState, useEffect, useCallback, useRef, memo, useMemo } from 'react';
-import { useStore } from '../store';
-import { createT } from '../i18n';
-import { api } from '../api';
-import { cn, fmtRelative, getAgentMeta, shortenModel, sessionDisplayState, shouldPollSessionStreamState, sessionListContextText, sessionListDisplayText } from '../utils';
-import { Badge, Dot, Spinner, Modal, ModalHeader, Button, Select, IconPicker } from './ui';
-import { BrandIcon } from './BrandIcon';
-import { DirBrowser } from './DirBrowser';
-import { PlanProgressCard, hasPlan } from './PlanProgressCard';
-import type { SessionInfo, WorkspaceEntry, DirEntry, StreamPlan, OpenTarget } from '../types';
+import { Suspense, lazy, startTransition, useDeferredValue, useState, useEffect, useCallback, useRef, memo, useMemo } from 'react';
+import { useStore } from '../../store';
+import { createT } from '../../i18n';
+import { api } from '../../api';
+import { loadWorkspaceSessions, prefetchSessionMessages } from '../../session-preload';
+import { cn, fmtRelative, getAgentMeta, shortenModel, sessionDisplayState, shouldPollSessionStreamState, sessionListContextText, sessionListDisplayText } from '../../utils';
+import { Badge, Dot, Spinner, Modal, ModalHeader, Button, Select, IconPicker } from '../../components/ui';
+import { BrandIcon } from '../../components/BrandIcon';
+import { DirBrowser } from '../../components/DirBrowser';
+import { PlanProgressCard, hasPlan } from '../../components/PlanProgressCard';
+import type { SessionInfo, WorkspaceEntry, DirEntry, StreamPlan, OpenTarget } from '../../types';
 
-const SessionPanel = lazy(async () => ({ default: (await import('./SessionPanel')).SessionPanel }));
+let sessionPanelModulePromise: Promise<typeof import('./SessionPanel')> | null = null;
+
+function preloadSessionPanel() {
+  sessionPanelModulePromise ??= import('./SessionPanel');
+  return sessionPanelModulePromise;
+}
+
+const SessionPanel = lazy(async () => ({ default: (await preloadSessionPanel()).SessionPanel }));
 
 /* ── Constants ── */
 const PAGE_SIZE = 5;
 const SIDEBAR_POLL_MS = 5_000;
+const AUTO_PREFETCH_DELAY_MS = 240;
+const HOVER_PREFETCH_DELAY_MS = 120;
+const SESSION_PREFETCH_TURNS = 12;
 const sKey = (agent: string, id: string) => `${agent}:${id}`;
 
 type FilterMode = 'all' | 'running' | 'review';
@@ -65,10 +76,20 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const [loadingMap, setLoadingMap] = useState<Record<string, boolean>>({});
   const [selectedSession, setSelectedSession] = useState<{ agent: string; sessionId: string; workdir: string } | null>(null);
   const [showAddDialog, setShowAddDialog] = useState(false);
+  const [showNewSession, setShowNewSession] = useState(false);
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<FilterMode>('all');
+  const deferredSearch = useDeferredValue(search);
   const initializedRef = useRef(false);
   const inflightLoadsRef = useRef<Record<string, boolean>>({});
+  const autoPrefetchedSessionsRef = useRef<Set<string>>(new Set());
+  const hoverPrefetchTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+
+  useEffect(() => () => {
+    for (const timer of Object.values(hoverPrefetchTimersRef.current)) {
+      clearTimeout(timer);
+    }
+  }, []);
 
   /* ── Load workspaces (API already includes runtimeWorkdir) ── */
   const loadWorkspaces = useCallback(async () => {
@@ -87,7 +108,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   /* ── Load sessions for a workspace ── */
   const loadSessionsForWorkspace = useCallback(async (
     wsPath: string,
-    opts: { background?: boolean } = {},
+    opts: { background?: boolean; force?: boolean } = {},
   ) => {
     if (inflightLoadsRef.current[wsPath]) return;
     inflightLoadsRef.current[wsPath] = true;
@@ -95,11 +116,15 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       setLoadingMap(prev => ({ ...prev, [wsPath]: true }));
     }
     try {
-      const res = await api.getWorkspaceSessions(wsPath);
-      setSessionsMap(prev => ({ ...prev, [wsPath]: res.sessions || [] }));
+      const res = await loadWorkspaceSessions(wsPath, { force: opts.force });
+      startTransition(() => {
+        setSessionsMap(prev => ({ ...prev, [wsPath]: res.sessions || [] }));
+      });
     } catch {
       if (!opts.background) {
-        setSessionsMap(prev => ({ ...prev, [wsPath]: [] }));
+        startTransition(() => {
+          setSessionsMap(prev => ({ ...prev, [wsPath]: [] }));
+        });
       }
     } finally {
       inflightLoadsRef.current[wsPath] = false;
@@ -109,13 +134,59 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     }
   }, []);
 
+  const warmSession = useCallback((session: SessionInfo, workdir: string) => {
+    const agent = session.agent || '';
+    if (!agent || !session.sessionId) return;
+    void preloadSessionPanel();
+    prefetchSessionMessages({
+      workdir,
+      agent,
+      sessionId: session.sessionId,
+      rich: true,
+      turnOffset: 0,
+      turnLimit: SESSION_PREFETCH_TURNS,
+    });
+  }, []);
+
+  const scheduleSessionWarmup = useCallback((session: SessionInfo, workdir: string, delayMs = HOVER_PREFETCH_DELAY_MS) => {
+    const key = `${workdir}:${sKey(session.agent || '', session.sessionId)}`;
+    const existing = hoverPrefetchTimersRef.current[key];
+    if (existing) clearTimeout(existing);
+    hoverPrefetchTimersRef.current[key] = setTimeout(() => {
+      delete hoverPrefetchTimersRef.current[key];
+      warmSession(session, workdir);
+    }, delayMs);
+  }, [warmSession]);
+
+  const cancelScheduledWarmup = useCallback((session: SessionInfo, workdir: string) => {
+    const key = `${workdir}:${sKey(session.agent || '', session.sessionId)}`;
+    const existing = hoverPrefetchTimersRef.current[key];
+    if (!existing) return;
+    clearTimeout(existing);
+    delete hoverPrefetchTimersRef.current[key];
+  }, []);
+
   useEffect(() => {
     if (!active) return;
-    for (const ws of workspaces) {
-      if (!sessionsMap[ws.path] && !loadingMap[ws.path]) {
+    const timer = setTimeout(() => {
+      void preloadSessionPanel();
+    }, AUTO_PREFETCH_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [active]);
+
+  useEffect(() => {
+    if (!active) return;
+    const timers: Array<ReturnType<typeof setTimeout>> = [];
+    workspaces.forEach((ws, index) => {
+      if (sessionsMap[ws.path] || loadingMap[ws.path]) return;
+      const timer = setTimeout(() => {
         void loadSessionsForWorkspace(ws.path);
-      }
-    }
+      }, index * 90);
+      timers.push(timer);
+    });
+    return () => {
+      for (const timer of timers) clearTimeout(timer);
+    };
   }, [active, loadSessionsForWorkspace, loadingMap, sessionsMap, workspaces]);
 
   useEffect(() => {
@@ -123,7 +194,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     const tick = () => {
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
       for (const ws of workspaces) {
-        void loadSessionsForWorkspace(ws.path, { background: true });
+        void loadSessionsForWorkspace(ws.path, { background: true, force: true });
       }
     };
     const id = setInterval(tick, SIDEBAR_POLL_MS);
@@ -136,7 +207,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     const refreshVisibleWorkspaces = () => {
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
       for (const ws of workspaces) {
-        void loadSessionsForWorkspace(ws.path, { background: true });
+        void loadSessionsForWorkspace(ws.path, { background: true, force: true });
       }
     };
 
@@ -157,6 +228,25 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     };
   }, [active, loadSessionsForWorkspace, workspaces]);
 
+  useEffect(() => {
+    if (!active) return;
+    const timers: Array<ReturnType<typeof setTimeout>> = [];
+    workspaces.forEach((ws, index) => {
+      const candidate = (sessionsMap[ws.path] || [])[0];
+      if (!candidate) return;
+      const key = `${ws.path}:${sKey(candidate.agent || '', candidate.sessionId)}`;
+      if (autoPrefetchedSessionsRef.current.has(key)) return;
+      const timer = setTimeout(() => {
+        autoPrefetchedSessionsRef.current.add(key);
+        warmSession(candidate, ws.path);
+      }, AUTO_PREFETCH_DELAY_MS + index * 120);
+      timers.push(timer);
+    });
+    return () => {
+      for (const timer of timers) clearTimeout(timer);
+    };
+  }, [active, sessionsMap, warmSession, workspaces]);
+
   /* ── Add / remove workspace — stable callbacks ── */
   const handleAddWorkspace = useCallback(async (wsPath: string) => {
     try {
@@ -174,18 +264,53 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     } catch {}
   }, []);
 
+  const handleRefreshWorkspace = useCallback((wsPath: string) => {
+    void loadSessionsForWorkspace(wsPath, { force: true });
+  }, [loadSessionsForWorkspace]);
+
+  /* ── New session — create and auto-select ── */
+  const handleNewSession = useCallback(async (workdir: string, agent: string, prompt: string) => {
+    try {
+      const res = await api.sendSessionMessage(workdir, agent, '', prompt);
+      if (res.ok && res.sessionKey) {
+        setShowNewSession(false);
+        // sessionKey is "agent:sessionId"
+        const colonIdx = res.sessionKey.indexOf(':');
+        const newSessionId = colonIdx >= 0 ? res.sessionKey.slice(colonIdx + 1) : '';
+        if (newSessionId) {
+          startTransition(() => {
+            setSelectedSession({ agent, sessionId: newSessionId, workdir });
+          });
+        }
+        // Refresh workspace sessions to include the new one
+        void loadSessionsForWorkspace(workdir, { force: true });
+      }
+    } catch {}
+  }, [loadSessionsForWorkspace]);
+
   /* ── Select session — stable callback that takes wsPath ── */
   const handleSelectSession = useCallback((session: SessionInfo, workdir: string) => {
-    setSelectedSession({ agent: session.agent || '', sessionId: session.sessionId, workdir });
-  }, []);
+    warmSession(session, workdir);
+    startTransition(() => {
+      setSelectedSession({ agent: session.agent || '', sessionId: session.sessionId, workdir });
+    });
+  }, [warmSession]);
+
+  const handlePanelSessionChange = useCallback((next: { agent: string; sessionId: string; workdir: string }) => {
+    warmSession({ agent: next.agent, sessionId: next.sessionId, runState: 'completed' }, next.workdir);
+    startTransition(() => {
+      setSelectedSession(next);
+    });
+    void loadSessionsForWorkspace(next.workdir, { force: true });
+  }, [loadSessionsForWorkspace, warmSession]);
 
   /* ── Filter sessions — memoized per workspace to avoid new-array-on-every-render ── */
   const filterFn = useCallback((sessions: SessionInfo[]): SessionInfo[] => {
     let result = sessions;
     if (filter === 'running') result = result.filter(s => sessionDisplayState(s) === 'running');
     else if (filter === 'review') result = result.filter(s => sessionDisplayState(s) === 'incomplete');
-    if (search.trim()) {
-      const q = search.toLowerCase();
+    if (deferredSearch.trim()) {
+      const q = deferredSearch.toLowerCase();
       result = result.filter(s =>
         (s.lastMessageText || '').toLowerCase().includes(q)
         || (s.lastQuestion || '').toLowerCase().includes(q)
@@ -195,7 +320,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       );
     }
     return result;
-  }, [filter, search]);
+  }, [deferredSearch, filter]);
 
   const filteredByWs = useMemo(() => {
     const out: Record<string, SessionInfo[]> = {};
@@ -273,25 +398,40 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                 loading={!!loadingMap[ws.path]}
                 selectedKey={selectedKey}
                 onSelectSession={handleSelectSession}
-                onRefresh={loadSessionsForWorkspace}
+                onRefresh={handleRefreshWorkspace}
                 onRemove={handleRemoveWorkspace}
+                onWarmSession={scheduleSessionWarmup}
+                onCancelWarmSession={cancelScheduledWarmup}
                 t={t}
               />
             ))
           )}
         </div>
 
-        {/* Add workspace button */}
-        <div className="shrink-0 px-3 py-2 border-t border-edge/20">
-          <button
+        {/* Footer actions */}
+        <div className="shrink-0 px-3 py-2 border-t border-edge/20 space-y-1.5">
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => setShowNewSession(true)}
+            className="w-full"
+          >
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+              <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+            </svg>
+            {t('hub.newSession')}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
             onClick={() => setShowAddDialog(v => !v)}
-            className="flex items-center justify-center gap-1.5 w-full px-2 py-1.5 rounded-lg text-[11px] font-medium text-fg-5/60 hover:text-fg-3 hover:bg-panel-h/60 border border-transparent hover:border-edge/20 transition-all duration-200"
+            className="w-full"
           >
             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
               <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
             </svg>
             {t('hub.addWorkspace')}
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -320,6 +460,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               session={selectedSessionInfo}
               workdir={selectedSession.workdir}
               active={active}
+              onSessionChange={handlePanelSessionChange}
             />
           </Suspense>
         )}
@@ -339,6 +480,15 @@ export const SessionWorkspace = memo(function SessionWorkspace({
         initialPath={runtimeWorkdir || undefined}
         onAdd={handleAddWorkspace}
         onClose={() => setShowAddDialog(false)}
+        t={t}
+      />
+
+      {/* New session modal */}
+      <NewSessionDialog
+        open={showNewSession}
+        workspaces={workspaces}
+        onStart={handleNewSession}
+        onClose={() => setShowNewSession(false)}
         t={t}
       />
     </div>
@@ -395,6 +545,118 @@ function AddWorkspaceModal({
 }
 
 /* ══════════════════════════════════════════════════════
+   New Session Dialog — pick workspace + agent, enter prompt
+   ══════════════════════════════════════════════════════ */
+function NewSessionDialog({
+  open,
+  workspaces,
+  onStart,
+  onClose,
+  t,
+}: {
+  open: boolean;
+  workspaces: WorkspaceEntry[];
+  onStart: (workdir: string, agent: string, prompt: string) => void;
+  onClose: () => void;
+  t: (key: string) => string;
+}) {
+  const appState = useStore(s => s.state);
+  const installedAgents = useMemo(
+    () => (appState?.setupState?.agents || []).filter(a => a.installed),
+    [appState],
+  );
+  const defaultAgent = appState?.config?.defaultAgent || installedAgents[0]?.agent || '';
+
+  const [workdir, setWorkdir] = useState('');
+  const [agent, setAgent] = useState('');
+  const [prompt, setPrompt] = useState('');
+  const [sending, setSending] = useState(false);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Reset state when dialog opens
+  useEffect(() => {
+    if (open) {
+      setWorkdir(workspaces[0]?.path || '');
+      setAgent(defaultAgent);
+      setPrompt('');
+      setSending(false);
+      setTimeout(() => textareaRef.current?.focus(), 50);
+    }
+  }, [open, workspaces, defaultAgent]);
+
+  const canSubmit = !!workdir && !!agent && !!prompt.trim() && !sending;
+
+  const handleSubmit = () => {
+    if (!canSubmit) return;
+    setSending(true);
+    onStart(workdir, agent, prompt.trim());
+  };
+
+  const workspaceOptions = useMemo(
+    () => workspaces.map(ws => ({ value: ws.path, label: ws.name || ws.path.split('/').pop() || ws.path })),
+    [workspaces],
+  );
+  const agentOptions = useMemo(
+    () => installedAgents.map(a => ({ value: a.agent, label: getAgentMeta(a.agent).label })),
+    [installedAgents],
+  );
+
+  return (
+    <Modal open={open} onClose={onClose}>
+      <ModalHeader title={t('hub.newSession')} description={t('hub.newSessionHint')} onClose={onClose} />
+
+      <div className="space-y-3">
+        {/* Workspace picker */}
+        {workspaceOptions.length > 1 && (
+          <div className="space-y-1">
+            <label className="text-[11px] font-medium text-fg-4">{t('hub.workspace')}</label>
+            <Select value={workdir} options={workspaceOptions} onChange={setWorkdir} />
+          </div>
+        )}
+
+        {/* Agent picker */}
+        <div className="space-y-1">
+          <label className="text-[11px] font-medium text-fg-4">{t('hub.selectAgent')}</label>
+          {agentOptions.length > 0 ? (
+            <Select value={agent} options={agentOptions} onChange={setAgent} />
+          ) : (
+            <div className="text-[12px] text-fg-5">{t('sessions.noAgent')}</div>
+          )}
+        </div>
+
+        {/* Prompt input */}
+        <div className="space-y-1">
+          <label className="text-[11px] font-medium text-fg-4">{t('hub.inputPlaceholder')}</label>
+          <textarea
+            ref={textareaRef}
+            value={prompt}
+            onChange={e => setPrompt(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && canSubmit) {
+                e.preventDefault();
+                handleSubmit();
+              }
+            }}
+            rows={3}
+            className="w-full rounded-lg border border-edge/40 bg-inset/50 px-3 py-2 text-[13px] text-fg outline-none placeholder:text-fg-5/30 focus:border-primary/30 focus:bg-inset focus:shadow-[0_0_0_3px_rgba(99,102,241,0.06)] transition-all duration-200 resize-none"
+            placeholder={t('hub.inputPlaceholder')}
+          />
+        </div>
+      </div>
+
+      <div className="flex gap-2 mt-4">
+        <Button disabled={!canSubmit} onClick={handleSubmit} className="flex-1">
+          {sending ? <Spinner className="h-3 w-3" /> : t('hub.startSession')}
+        </Button>
+        <Button variant="secondary" onClick={onClose} className="flex-1">
+          {t('hub.cancel')}
+        </Button>
+      </div>
+    </Modal>
+  );
+}
+
+/* ══════════════════════════════════════════════════════
    Workspace Group — collapsible, paginated (5 per page)
    Callbacks now take wsPath as a parameter so parent can
    pass stable function refs instead of inline closures.
@@ -407,6 +669,8 @@ const WorkspaceGroup = memo(function WorkspaceGroup({
   onSelectSession,
   onRefresh,
   onRemove,
+  onWarmSession,
+  onCancelWarmSession,
   t,
 }: {
   workspace: WorkspaceEntry;
@@ -416,6 +680,8 @@ const WorkspaceGroup = memo(function WorkspaceGroup({
   onSelectSession: (s: SessionInfo, wsPath: string) => void;
   onRefresh: (wsPath: string) => void;
   onRemove: (wsPath: string) => void;
+  onWarmSession: (s: SessionInfo, wsPath: string) => void;
+  onCancelWarmSession: (s: SessionInfo, wsPath: string) => void;
   t: (key: string) => string;
 }) {
   const [expanded, setExpanded] = useState(true);
@@ -488,6 +754,8 @@ const WorkspaceGroup = memo(function WorkspaceGroup({
                   session={session}
                   isSelected={selectedKey === sKey(session.agent || '', session.sessionId)}
                   onClick={() => onSelectSession(session, wsPath)}
+                  onWarm={() => onWarmSession(session, wsPath)}
+                  onCancelWarm={() => onCancelWarmSession(session, wsPath)}
                 />
               ))}
               {remaining > 0 && (
@@ -516,10 +784,14 @@ const SessionCard = memo(function SessionCard({
   session,
   isSelected,
   onClick,
+  onWarm,
+  onCancelWarm,
 }: {
   session: SessionInfo;
   isSelected: boolean;
   onClick: () => void;
+  onWarm: () => void;
+  onCancelWarm: () => void;
 }) {
   const meta = getAgentMeta(session.agent || '');
   const displayState = sessionDisplayState(session);
@@ -530,6 +802,10 @@ const SessionCard = memo(function SessionCard({
   return (
     <button
       onClick={onClick}
+      onMouseEnter={onWarm}
+      onFocus={onWarm}
+      onMouseLeave={onCancelWarm}
+      onBlur={onCancelWarm}
       className={cn(
         'w-full px-3 py-2 text-left transition-all duration-100',
         'hover:bg-panel-h/60',

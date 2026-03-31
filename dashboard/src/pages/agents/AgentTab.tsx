@@ -4,9 +4,9 @@ import { createT, type Locale } from '../../i18n';
 import { useStore } from '../../store';
 import type { Agent, AgentRuntimeStatus, AgentStatusResponse, ModelInfo } from '../../types';
 import { cn, EFFORT_OPTIONS, getAgentMeta } from '../../utils';
-import { BrandIcon } from '../BrandIcon';
-import { Badge, Button, Label, Modal, ModalHeader, Select, Spinner } from '../ui';
-import { SectionCard } from './shared';
+import { BrandIcon } from '../../components/BrandIcon';
+import { Badge, Button, Label, Modal, ModalHeader, Select, Spinner } from '../../components/ui';
+import { SectionCard } from '../shared';
 
 const AGENT_ORDER: Agent[] = ['claude', 'codex', 'gemini'];
 

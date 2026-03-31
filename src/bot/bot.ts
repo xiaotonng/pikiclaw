@@ -128,6 +128,7 @@ export interface SessionRuntime {
   threadId: string | null;
   codexCumulative?: CodexCumulativeUsage;
   modelId?: string | null;
+  thinkingEffort?: string | null;
   runningTaskIds: Set<string>;
 }
 
@@ -191,6 +192,8 @@ export interface SubmitSessionTaskOpts {
   workdir: string;
   prompt: string;
   attachments?: string[];
+  modelId?: string | null;
+  thinkingEffort?: string | null;
   sourceMessageId?: number | string;
   chatId?: ChatId;
   onText?: (
@@ -405,6 +408,7 @@ export class Bot {
     threadId?: string | null;
     codexCumulative?: CodexCumulativeUsage;
     modelId?: string | null;
+    thinkingEffort?: string | null;
   }): SessionRuntime | null {
     if (!session.sessionId) return null;
     return this.upsertSessionRuntime({
@@ -415,6 +419,7 @@ export class Bot {
       threadId: session.threadId ?? null,
       codexCumulative: session.codexCumulative,
       modelId: session.modelId ?? null,
+      thinkingEffort: session.thinkingEffort ?? null,
     });
   }
 
@@ -425,6 +430,7 @@ export class Bot {
     threadId?: string | null;
     codexCumulative?: CodexCumulativeUsage;
     modelId?: string | null;
+    thinkingEffort?: string | null;
     workdir?: string;
   }): SessionRuntime {
     const workdir = path.resolve(session.workdir || this.workdir);
@@ -438,6 +444,7 @@ export class Bot {
       if (session.threadId !== undefined) existing.threadId = session.threadId ?? null;
       if (session.codexCumulative !== undefined) existing.codexCumulative = session.codexCumulative;
       if (session.modelId !== undefined) existing.modelId = session.modelId ?? null;
+      if (session.thinkingEffort !== undefined) existing.thinkingEffort = session.thinkingEffort ?? null;
       return existing;
     }
 
@@ -450,6 +457,7 @@ export class Bot {
       threadId: session.threadId ?? null,
       codexCumulative: session.codexCumulative,
       modelId: session.modelId ?? null,
+      thinkingEffort: session.thinkingEffort ?? null,
       runningTaskIds: new Set<string>(),
     };
     this.sessionStates.set(key, runtime);
@@ -559,6 +567,7 @@ export class Bot {
       session.threadId = session.threadId ?? existing.threadId;
       session.codexCumulative = session.codexCumulative ?? existing.codexCumulative;
       session.modelId = session.modelId ?? existing.modelId ?? null;
+      session.thinkingEffort = session.thinkingEffort ?? existing.thinkingEffort ?? null;
       for (const taskId of existing.runningTaskIds) session.runningTaskIds.add(taskId);
     }
 
@@ -655,6 +664,7 @@ export class Bot {
       workspacePath: staged.workspacePath,
       threadId: staged.threadId,
       modelId: this.modelForAgent(cs.agent),
+      thinkingEffort: this.effortForAgent(cs.agent),
     });
     this.applySessionSelection(cs, runtime);
     return runtime;
@@ -975,7 +985,8 @@ export class Bot {
       sessionId: opts.sessionId,
       workdir: opts.workdir,
       workspacePath: null,
-      modelId: null,
+      modelId: opts.modelId ?? null,
+      thinkingEffort: opts.thinkingEffort ?? null,
     });
     const taskId = `ext-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const prompt = opts.prompt.trim();
@@ -1265,7 +1276,7 @@ export class Bot {
   }
 
   async runStream(
-    prompt: string, cs: Pick<SessionRuntime, 'key' | 'workdir' | 'agent' | 'sessionId' | 'workspacePath' | 'codexCumulative' | 'modelId'> | ChatState, attachments: string[],
+    prompt: string, cs: Pick<SessionRuntime, 'key' | 'workdir' | 'agent' | 'sessionId' | 'workspacePath' | 'codexCumulative' | 'modelId' | 'thinkingEffort'> | ChatState, attachments: string[],
     onText: (text: string, thinking: string, activity?: string, meta?: StreamPreviewMeta, plan?: StreamPreviewPlan | null) => void,
     systemPrompt?: string,
     mcpSendFile?: import('../agent/mcp/bridge.js').McpSendFileCallback,
@@ -1276,6 +1287,9 @@ export class Bot {
   ): Promise<StreamResult> {
     const resolvedModel = cs.modelId || this.modelForAgent(cs.agent);
     const agentConfig = this.agentConfigs[cs.agent] || {};
+    const resolvedThinkingEffort = ('thinkingEffort' in cs && typeof cs.thinkingEffort === 'string' && cs.thinkingEffort.trim())
+      ? cs.thinkingEffort.trim().toLowerCase()
+      : (agentConfig.reasoningEffort || 'high');
     const extraArgs: string[] = agentConfig.extraArgs || [];
     const browserEnabled = resolveGuiIntegrationConfig(getActiveUserConfig()).browserEnabled;
     const sessionWorkdir = 'workdir' in cs && typeof cs.workdir === 'string' && cs.workdir
@@ -1305,7 +1319,7 @@ export class Bot {
     const opts: StreamOpts = {
       agent: cs.agent, prompt, workdir: sessionWorkdir, timeout: this.runTimeout,
       sessionId: cs.sessionId, model: null,
-      thinkingEffort: agentConfig.reasoningEffort || 'high', onText,
+      thinkingEffort: resolvedThinkingEffort, onText,
       onSessionId: syncNativeSessionId,
       attachments: attachments.length ? attachments : undefined,
       // codex-specific

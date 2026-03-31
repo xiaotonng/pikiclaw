@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
-import { Badge, Button, Card, Dot, Spinner } from '../ui';
-import { cn } from '../../utils';
+import { Badge, Button, Card, Dot, Spinner } from '../components/ui';
+import { cn } from '../utils';
 
 export type Tone = 'ok' | 'warn' | 'err' | 'accent' | 'muted';
 
