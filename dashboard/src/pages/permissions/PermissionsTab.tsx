@@ -2,8 +2,8 @@ import { useCallback, useMemo, useState, type ReactNode } from 'react';
 import { api } from '../../api';
 import { createT } from '../../i18n';
 import { useStore } from '../../store';
-import { Badge, Button } from '../ui';
-import { SettingRowAction, SettingRowCard, SettingRowField, SettingRowLead } from './shared';
+import { Badge, Button } from '../../components/ui';
+import { SettingRowAction, SettingRowCard, SettingRowField, SettingRowLead } from '../shared';
 
 type PermissionKey = 'accessibility' | 'screenRecording' | 'fullDiskAccess';
 

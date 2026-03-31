@@ -1,7 +1,7 @@
 import { cn, fmtBytes } from '../utils';
 import type { HostInfo } from '../types';
 import { Skeleton } from './ui';
-import { SectionCard } from './tabs/shared';
+import { SectionCard } from '../pages/shared';
 
 type MetricTone = 'ok' | 'warn' | 'err' | 'muted';
 

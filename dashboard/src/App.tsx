@@ -8,12 +8,12 @@ import { api } from './api';
 import { getDashboardTabMeta, type DashboardTab } from './tabs';
 import { cn } from './utils';
 
-const SessionsTab = lazy(async () => ({ default: (await import('./components/SessionsTab')).SessionsTab }));
-const AgentTab = lazy(() => import('./components/tabs/AgentTab'));
-const IMAccessTab = lazy(async () => ({ default: (await import('./components/tabs/IMAccessTab')).IMAccessTab }));
-const PermissionsTab = lazy(async () => ({ default: (await import('./components/tabs/PermissionsTab')).PermissionsTab }));
-const ExtensionsTab = lazy(async () => ({ default: (await import('./components/tabs/ExtensionsTab')).ExtensionsTab }));
-const SystemTab = lazy(async () => ({ default: (await import('./components/tabs/SystemTab')).SystemTab }));
+const SessionsTab = lazy(async () => ({ default: (await import('./pages/sessions')).SessionWorkspace }));
+const AgentTab = lazy(() => import('./pages/agents/AgentTab'));
+const IMAccessTab = lazy(async () => ({ default: (await import('./pages/im/IMAccessTab')).IMAccessTab }));
+const PermissionsTab = lazy(async () => ({ default: (await import('./pages/permissions/PermissionsTab')).PermissionsTab }));
+const ExtensionsTab = lazy(async () => ({ default: (await import('./pages/extensions/ExtensionsTab')).ExtensionsTab }));
+const SystemTab = lazy(async () => ({ default: (await import('./pages/system/SystemTab')).SystemTab }));
 const TelegramModal = lazy(async () => ({ default: (await import('./components/Modals')).TelegramModal }));
 const FeishuModal = lazy(async () => ({ default: (await import('./components/Modals')).FeishuModal }));
 const WeixinModal = lazy(async () => ({ default: (await import('./components/Modals')).WeixinModal }));

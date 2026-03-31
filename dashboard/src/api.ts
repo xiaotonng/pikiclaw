@@ -22,6 +22,12 @@ export interface ApiRequestOptions extends RequestInit {
   timeoutMs?: number;
 }
 
+export interface SessionSendRequestOptions extends ApiRequestOptions {
+  attachments?: File[];
+  model?: string | null;
+  effort?: string | null;
+}
+
 const DEFAULT_TIMEOUT_MS = 15_000;
 
 function forwardAbort(source: AbortSignal | null | undefined, controller: AbortController): () => void {
@@ -203,16 +209,27 @@ export const api = {
     agent: string,
     sessionId: string,
     prompt: string,
-    attachmentsOrOpts?: File[] | ApiRequestOptions,
-    maybeOpts?: ApiRequestOptions,
+    options: SessionSendRequestOptions = {},
   ) => {
-    const attachments = Array.isArray(attachmentsOrOpts) ? attachmentsOrOpts : [];
-    const opts = (Array.isArray(attachmentsOrOpts) ? maybeOpts : attachmentsOrOpts) || {};
+    const {
+      attachments = [],
+      model,
+      effort,
+      ...opts
+    } = options;
+    const payload = {
+      workdir,
+      agent,
+      sessionId,
+      prompt,
+      ...(typeof model === 'string' && model.trim() ? { model: model.trim() } : {}),
+      ...(typeof effort === 'string' && effort.trim() ? { effort: effort.trim() } : {}),
+    };
 
     if (!attachments.length) {
-      return post<{ ok: boolean; queued?: boolean; taskId?: string; error?: string }>(
+      return post<{ ok: boolean; queued?: boolean; taskId?: string; sessionKey?: string; error?: string }>(
         '/api/session-hub/session/send',
-        { workdir, agent, sessionId, prompt },
+        payload,
         { timeoutMs: 30_000, ...opts },
       );
     }
@@ -222,11 +239,13 @@ export const api = {
     body.set('agent', agent);
     body.set('sessionId', sessionId);
     body.set('prompt', prompt);
+    if (typeof model === 'string' && model.trim()) body.set('model', model.trim());
+    if (typeof effort === 'string' && effort.trim()) body.set('effort', effort.trim());
     for (const attachment of attachments) {
       body.append('attachments', attachment, attachment.name || 'image');
     }
 
-    return json<{ ok: boolean; queued?: boolean; taskId?: string; error?: string }>(
+    return json<{ ok: boolean; queued?: boolean; taskId?: string; sessionKey?: string; error?: string }>(
       '/api/session-hub/session/send',
       { method: 'POST', body, timeoutMs: 30_000, ...opts },
     );

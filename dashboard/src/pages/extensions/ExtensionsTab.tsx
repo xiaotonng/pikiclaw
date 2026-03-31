@@ -3,9 +3,9 @@ import { api } from '../../api';
 import { createT } from '../../i18n';
 import { useStore } from '../../store';
 import type { BrowserStatusResponse } from '../../types';
-import { BrandIcon } from '../BrandIcon';
-import { Badge, Button, Spinner } from '../ui';
-import { SettingRowAction, SettingRowCard, SettingRowField, SettingRowLead } from './shared';
+import { BrandIcon } from '../../components/BrandIcon';
+import { Badge, Button, Spinner } from '../../components/ui';
+import { SettingRowAction, SettingRowCard, SettingRowField, SettingRowLead } from '../shared';
 
 function localeText(locale: string, zh: string, en: string): string {
   return locale === 'zh-CN' ? zh : en;

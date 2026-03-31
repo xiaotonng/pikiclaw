@@ -84,30 +84,11 @@ export function adaptMarkdownForFeishu(markdown: string): string {
       continue;
     }
 
+    // Pass GFM tables through — Feishu card markdown supports tables natively
     if (i + 1 < lines.length && isGfmTableRow(lines[i]) && isGfmTableSeparator(lines[i + 1])) {
-      const headers = parseGfmTableCells(lines[i]);
-      i += 2;
-      const dataRows: string[][] = [];
-      while (i < lines.length && isGfmTableRow(lines[i]) && !isGfmTableSeparator(lines[i])) {
-        dataRows.push(parseGfmTableCells(lines[i]));
+      while (i < lines.length && isGfmTableRow(lines[i])) {
+        out.push(lines[i]);
         i++;
-      }
-
-      for (const row of dataRows) {
-        if (headers.length <= 2) {
-          const key = (row[0] || '').trim();
-          const val = (row[1] || '').trim();
-          if (key && val) out.push(adaptLine(`**${stripBoldMarkers(key)}** ${val}`));
-          else if (key || val) out.push(adaptLine(key || val));
-        } else {
-          const parts = headers.map((h, idx) => {
-            const cell = (row[idx] || '').trim();
-            if (!cell) return '';
-            const header = stripBoldMarkers(h.trim());
-            return header ? `**${header}:** ${cell}` : cell;
-          }).filter(Boolean);
-          out.push(adaptLine(parts.join('  ')));
-        }
       }
       continue;
     }

@@ -1,9 +1,9 @@
 import { useMemo } from 'react';
 import { createT } from '../../i18n';
 import { useStore } from '../../store';
-import { buildHostMetricItems, formatHostSummary, SystemInfoGrid } from '../SystemInfoPanel';
-import { Button } from '../ui';
-import { SectionCard } from './shared';
+import { buildHostMetricItems, formatHostSummary, SystemInfoGrid } from '../../components/SystemInfoPanel';
+import { Button } from '../../components/ui';
+import { SectionCard } from '../shared';
 
 export function SystemTab({
   onOpenWorkdir,

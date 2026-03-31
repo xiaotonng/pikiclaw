@@ -140,6 +140,10 @@ npx pikiclaw@latest --doctor  # check environment only
 - Claude Code, Codex CLI, and Gemini CLI via unified driver registry
 - Model listing, session management, and usage tracking through a single interface
 
+### Dashboard as Agent Console
+
+The web dashboard integrates Claude Code's core interactive experience — full conversation history with tool-use activity, thinking traces, plan progress, streaming output, image attachments, and an input composer — so you can drive any agent session directly from the browser, no IM required.
+
 ### Runtime
 
 - Streaming preview with continuous message updates
