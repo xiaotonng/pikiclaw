@@ -423,10 +423,15 @@ function AgentRow({
 export function AgentTab() {
   const locale = useStore(s => s.locale);
   const toast = useStore(s => s.toast);
+  const storeAgentStatus = useStore(s => s.agentStatus);
+  const setStoreAgentStatus = useStore(s => s.setAgentStatus);
+  const refreshStoreAgentStatus = useStore(s => s.refreshAgentStatus);
   const t = useMemo(() => createT(locale), [locale]);
   const copy = getCopy(locale);
-  const [snapshot, setSnapshot] = useState<SnapshotState | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [snapshot, setSnapshot] = useState<SnapshotState | null>(
+    storeAgentStatus ? { defaultAgent: storeAgentStatus.defaultAgent, agents: storeAgentStatus.agents } : null,
+  );
+  const [loading, setLoading] = useState(!storeAgentStatus);
   const [error, setError] = useState<string | null>(null);
   const [updating, setUpdating] = useState(false);
   const [installingAgent, setInstallingAgent] = useState<Agent | null>(null);
@@ -436,13 +441,26 @@ export function AgentTab() {
     model: '',
     effort: '',
   });
-  const hasLoaded = useRef(false);
+  const hasLoaded = useRef(!!storeAgentStatus);
+
+  // Sync store → local snapshot when store updates (e.g. from initial load)
+  useEffect(() => {
+    if (storeAgentStatus) {
+      applySnapshot(setSnapshot, storeAgentStatus);
+      if (!hasLoaded.current) { hasLoaded.current = true; setLoading(false); }
+    }
+  }, [storeAgentStatus]);
+
+  const applyAndSync = useCallback((status: AgentStatusResponse) => {
+    applySnapshot(setSnapshot, status);
+    setStoreAgentStatus(status);
+  }, [setStoreAgentStatus]);
 
   const refresh = useCallback(async () => {
     if (!hasLoaded.current) setLoading(true);
     try {
       const status = await api.getAgentStatus();
-      applySnapshot(setSnapshot, status);
+      applyAndSync(status);
       setError(null);
       hasLoaded.current = true;
       return status;
@@ -454,11 +472,14 @@ export function AgentTab() {
     } finally {
       setLoading(false);
     }
-  }, [copy.loadFailed, toast]);
+  }, [applyAndSync, copy.loadFailed, toast]);
 
+  // Only fetch on mount if store didn't already have data
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    if (!storeAgentStatus) void refresh();
+    else void refreshStoreAgentStatus();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const agents = useMemo(() => {
     const source = snapshot?.agents || [];
@@ -496,7 +517,7 @@ export function AgentTab() {
     try {
       const result = await api.updateRuntimeAgent(patch);
       if (!result.ok) throw new Error(result.error || t('config.applyFailed'));
-      applySnapshot(setSnapshot, result);
+      applyAndSync(result);
       return result;
     } catch (err) {
       const message = err instanceof Error ? err.message : t('config.applyFailed');
@@ -506,7 +527,7 @@ export function AgentTab() {
     } finally {
       setUpdating(false);
     }
-  }, [refresh, t, toast]);
+  }, [applyAndSync, refresh, t, toast]);
 
   useEffect(() => {
     if (!defaultsModalOpen) return;
@@ -561,7 +582,7 @@ export function AgentTab() {
     try {
       const result = await api.installAgent(agent.agent);
       if (!result.ok) throw new Error(result.error || t('config.agentInstallFailed'));
-      applySnapshot(setSnapshot, result);
+      applyAndSync(result);
       toast(t('config.agentInstalled'));
     } catch (err) {
       const message = err instanceof Error ? err.message : t('config.agentInstallFailed');
@@ -570,7 +591,7 @@ export function AgentTab() {
     } finally {
       setInstallingAgent(current => (current === agent.agent ? null : current));
     }
-  }, [installingAgent, refresh, t, toast]);
+  }, [applyAndSync, installingAgent, refresh, t, toast]);
 
   const [updatingAgent, setUpdatingAgent] = useState<Agent | null>(null);
   const [checkingAgent, setCheckingAgent] = useState<Agent | null>(null);
@@ -581,7 +602,7 @@ export function AgentTab() {
     try {
       const result = await api.updateAgent(agent.agent);
       if (!result.ok) throw new Error(result.error || t('config.agentInstallFailed'));
-      applySnapshot(setSnapshot, result);
+      applyAndSync(result);
       toast(copy.upToDate);
     } catch (err) {
       const message = err instanceof Error ? err.message : copy.updateFailed;
@@ -590,7 +611,7 @@ export function AgentTab() {
     } finally {
       setUpdatingAgent(current => (current === agent.agent ? null : current));
     }
-  }, [copy.updateFailed, copy.upToDate, refresh, t, toast, updatingAgent]);
+  }, [applyAndSync, copy.updateFailed, copy.upToDate, refresh, t, toast, updatingAgent]);
 
   const handleCheckUpdate = useCallback(async (agent: AgentRuntimeStatus) => {
     if (checkingAgent) return;
@@ -598,7 +619,7 @@ export function AgentTab() {
     try {
       const result = await api.checkAgentUpdate(agent.agent);
       if (!result.ok) throw new Error(result.error || copy.loadFailed);
-      applySnapshot(setSnapshot, result);
+      applyAndSync(result);
     } catch (err) {
       const message = err instanceof Error ? err.message : copy.loadFailed;
       toast(message, false);
@@ -606,7 +627,7 @@ export function AgentTab() {
     } finally {
       setCheckingAgent(current => (current === agent.agent ? null : current));
     }
-  }, [checkingAgent, copy.loadFailed, refresh, toast]);
+  }, [applyAndSync, checkingAgent, copy.loadFailed, refresh, toast]);
   const initialLoading = loading && !snapshot;
 
   const defaultAgentValue = initialLoading

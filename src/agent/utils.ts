@@ -74,6 +74,26 @@ export function normalizeStreamPreviewPlan(value: unknown): StreamPreviewPlan | 
   };
 }
 
+/** Parse a TodoWrite tool input into a StreamPreviewPlan. */
+export function parseTodoWriteAsPlan(input: any): StreamPreviewPlan | null {
+  if (!input || typeof input !== 'object') return null;
+  const rawTodos = Array.isArray(input.todos) ? input.todos : [];
+  if (!rawTodos.length) return null;
+  const steps: StreamPreviewPlanStep[] = [];
+  for (const todo of rawTodos) {
+    if (!todo || typeof todo !== 'object') continue;
+    const content = typeof todo.content === 'string' ? todo.content.trim() : '';
+    if (!content) continue;
+    const rawStatus = typeof todo.status === 'string' ? todo.status : 'pending';
+    const status = rawStatus === 'completed' ? 'completed'
+      : rawStatus === 'in_progress' ? 'inProgress'
+        : 'pending';
+    steps.push({ step: content, status });
+  }
+  if (!steps.length) return null;
+  return { explanation: null, steps };
+}
+
 export function normalizeActivityLine(text: string): string { return text.replace(/\s+/g, ' ').trim(); }
 
 export function pushRecentActivity(lines: string[], line: string, maxLines = 50) {

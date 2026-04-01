@@ -8,7 +8,7 @@ import { execSync, spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { registerDriver, type AgentDriver } from '../driver.js';
 import {
-  type StreamOpts, type StreamResult,
+  type StreamOpts, type StreamResult, type StreamPreviewPlan,
   type SessionListResult, type SessionTailOpts, type SessionTailResult,
   type SessionMessagesOpts, type SessionMessagesResult,
   type TailMessage, type RichMessage, type MessageBlock,
@@ -18,7 +18,7 @@ import {
   // shared helpers
   Q, run, agentError, agentLog, agentWarn,
   appendSystemPrompt, buildStreamPreviewMeta, pushRecentActivity,
-  summarizeClaudeToolUse, summarizeClaudeToolResult, joinErrorMessages,
+  summarizeClaudeToolUse, summarizeClaudeToolResult, joinErrorMessages, parseTodoWriteAsPlan,
   IMAGE_EXTS, mimeForExt,
   listPikiclawSessions, findPikiclawSession, isPendingSessionId,
   mergeManagedAndNativeSessions,
@@ -145,8 +145,17 @@ function claudeParse(ev: any, s: any) {
     for (const block of toolUses) {
       const toolId = String(block?.id || '').trim();
       if (!toolId || s.seenClaudeToolIds.has(toolId)) continue;
+      const toolName = String(block?.name || 'Tool').trim() || 'Tool';
+      // TodoWrite → update plan instead of adding activity noise
+      if (toolName === 'TodoWrite') {
+        const plan = parseTodoWriteAsPlan(block?.input);
+        if (plan) s.plan = plan;
+        s.seenClaudeToolIds.add(toolId);
+        s.claudeToolsById.set(toolId, { name: toolName, summary: 'Update plan' });
+        continue;
+      }
       const tool = {
-        name: String(block?.name || 'Tool').trim() || 'Tool',
+        name: toolName,
         summary: summarizeClaudeToolUse(block?.name, block?.input || {}),
       };
       s.seenClaudeToolIds.add(toolId);
@@ -164,6 +173,8 @@ function claudeParse(ev: any, s: any) {
     for (const block of toolResults) {
       const toolId = String(block?.tool_use_id || '').trim();
       const tool = toolId ? s.claudeToolsById.get(toolId) : undefined;
+      // Skip TodoWrite results from activity — plan card handles it
+      if (tool?.name === 'TodoWrite') continue;
       pushRecentActivity(s.recentActivity, summarizeClaudeToolResult(tool, block, ev.tool_use_result));
     }
     s.activity = s.recentActivity.join('\n');
@@ -210,6 +221,7 @@ function createClaudeStreamState(opts: StreamOpts) {
     stopReason: null as string | null,
     activity: '',
     recentActivity: [] as string[],
+    plan: null as StreamPreviewPlan | null,
     claudeToolsById: new Map<string, { name: string; summary: string }>(),
     seenClaudeToolIds: new Set<string>(),
   };
@@ -278,7 +290,7 @@ async function doClaudeInteractiveStream(opts: StreamOpts): Promise<StreamResult
   };
 
   const emit = () => {
-    opts.onText(s.text, s.thinking, s.activity, buildStreamPreviewMeta(s), null);
+    opts.onText(s.text, s.thinking, s.activity, buildStreamPreviewMeta(s), s.plan);
   };
 
   const abortStream = () => {
@@ -473,6 +485,7 @@ async function doClaudeInteractiveStream(opts: StreamOpts): Promise<StreamResult
     contextPercent: roundPercent((s.contextUsedTokens || 0) / (s.contextWindow || 0)),
     codexCumulative: null,
     error,
+    plan: s.plan,
     stopReason: s.stopReason,
     incomplete,
     activity: s.activity.trim() || null,
@@ -733,8 +746,10 @@ function getClaudeSessionTail(opts: SessionTailOpts): SessionTailResult {
 // Session messages (full content)
 // ---------------------------------------------------------------------------
 
-/** Extract structured content blocks from Claude message content. */
-function extractClaudeBlocks(content: any, skipSystemBlocks = false): MessageBlock[] {
+/** Extract structured content blocks from Claude message content.
+ *  When `todoWriteToolIds` is provided, TodoWrite tool_use blocks are emitted
+ *  as `plan` blocks and their IDs are tracked so tool_results can be skipped. */
+function extractClaudeBlocks(content: any, skipSystemBlocks = false, todoWriteToolIds?: Set<string>): MessageBlock[] {
   if (typeof content === 'string') return [{ type: 'text', content }];
   if (!Array.isArray(content)) return [];
   const blocks: MessageBlock[] = [];
@@ -746,6 +761,15 @@ function extractClaudeBlocks(content: any, skipSystemBlocks = false): MessageBlo
     } else if (block.type === 'thinking' && typeof block.thinking === 'string') {
       blocks.push({ type: 'thinking', content: block.thinking });
     } else if (block.type === 'tool_use') {
+      // TodoWrite → emit as plan block instead of generic tool_use
+      if (block.name === 'TodoWrite' && todoWriteToolIds) {
+        const plan = parseTodoWriteAsPlan(block.input);
+        if (plan) {
+          todoWriteToolIds.add(block.id);
+          blocks.push({ type: 'plan', content: '', plan, toolId: block.id });
+          continue;
+        }
+      }
       const inputStr = block.input ? JSON.stringify(block.input, null, 2) : '';
       blocks.push({ type: 'tool_use', content: inputStr, toolName: block.name || 'unknown', toolId: block.id });
     } else if (block.type === 'tool_result') {
@@ -790,6 +814,7 @@ function getClaudeSessionMessages(opts: SessionMessagesOpts): SessionMessagesRes
     let pendingRole: 'user' | 'assistant' | null = null;
     let pendingTextParts: string[] = [];
     let pendingBlocks: MessageBlock[] = [];
+    const todoWriteToolIds = new Set<string>();
 
     const flush = () => {
       if (!pendingRole) return;
@@ -818,6 +843,8 @@ function getClaudeSessionMessages(opts: SessionMessagesOpts): SessionMessagesRes
             // Tool results belong to the preceding assistant turn — append as blocks
             if (pendingRole === 'assistant') {
               for (const block of contentArr) {
+                // Skip TodoWrite results — plan card handles it
+                if (todoWriteToolIds.has(block.tool_use_id)) continue;
                 const resultText = typeof block.content === 'string'
                   ? block.content
                   : Array.isArray(block.content)
@@ -851,7 +878,7 @@ function getClaudeSessionMessages(opts: SessionMessagesOpts): SessionMessagesRes
           pendingRole = 'assistant';
           const text = extractClaudeText(ev.message?.content, true);
           if (text) pendingTextParts.push(text);
-          const blocks = extractClaudeBlocks(ev.message?.content, true);
+          const blocks = extractClaudeBlocks(ev.message?.content, true, todoWriteToolIds);
           pendingBlocks.push(...blocks);
         }
       } catch { /* skip malformed lines */ }

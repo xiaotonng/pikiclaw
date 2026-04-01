@@ -16,6 +16,7 @@ import { collectSetupState } from '../cli/onboarding.js';
 import { validateFeishuConfig, validateTelegramConfig, validateWeixinConfig } from '../core/config/validation.js';
 import { shouldCacheChannelStates } from '../channels/states.js';
 import { DASHBOARD_TIMEOUTS } from '../core/constants.js';
+import { withTimeoutFallback } from '../core/utils.js';
 import { writeScopedLog, type LogLevel } from '../core/logging.js';
 import {
   DEFAULT_AGENT_EFFORTS,
@@ -93,31 +94,6 @@ function buildLocalChannelStates(config: Partial<UserConfig>): NonNullable<Setup
           : 'Both App ID and App Secret are required.',
     },
   ];
-}
-
-function withTimeoutFallback<T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
-  return new Promise(resolve => {
-    let settled = false;
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      resolve(fallback);
-    }, timeoutMs);
-
-    promise
-      .then(result => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        resolve(result);
-      })
-      .catch(() => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        resolve(fallback);
-      });
-  });
 }
 
 // ---------------------------------------------------------------------------

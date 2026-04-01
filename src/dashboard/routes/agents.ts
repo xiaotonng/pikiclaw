@@ -6,11 +6,12 @@ import { Hono } from 'hono';
 import { spawn } from 'node:child_process';
 import { getAgentInstallCommand, getAgentLabel, getAgentPackage } from '../../agent/npm.js';
 import { loadUserConfig, saveUserConfig, applyUserConfig, type UserConfig } from '../../core/config/user-config.js';
-import { listAgents, listModels, type AgentDetectOptions, type UsageResult } from '../../agent/index.js';
+import { listModels, type AgentDetectOptions, type UsageResult } from '../../agent/index.js';
 import { getAgentUpdateState, checkAgentLatestVersion, manualAgentUpdate } from '../../agent/auto-update.js';
 import type { Agent } from '../../agent/index.js';
 import { getDriver } from '../../agent/driver.js';
 import { DASHBOARD_TIMEOUTS } from '../../core/constants.js';
+import { withTimeoutFallback } from '../../core/utils.js';
 import { runtime } from '../runtime.js';
 
 // ---------------------------------------------------------------------------
@@ -19,36 +20,12 @@ import { runtime } from '../runtime.js';
 
 const AGENT_STATUS_MODELS_TIMEOUT_MS = DASHBOARD_TIMEOUTS.agentStatusModels;
 const AGENT_STATUS_USAGE_TIMEOUT_MS = DASHBOARD_TIMEOUTS.agentStatusUsage;
+const AGENT_STATUS_CACHE_TTL_MS = DASHBOARD_TIMEOUTS.agentStatusCacheTtl;
 const AGENT_INSTALL_TIMEOUT_MS = DASHBOARD_TIMEOUTS.agentInstall;
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function withTimeoutFallback<T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
-  return new Promise(resolve => {
-    let settled = false;
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      resolve(fallback);
-    }, timeoutMs);
-
-    promise
-      .then(result => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        resolve(result);
-      })
-      .catch(() => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        resolve(fallback);
-      });
-  });
-}
 
 function dedupeModels(models: { id: string; alias: string | null }[]): { id: string; alias: string | null }[] {
   const seen = new Set<string>();
@@ -197,17 +174,51 @@ async function buildAgentStatusResponse(config = loadUserConfig(), agentOptions:
 }
 
 // ---------------------------------------------------------------------------
+// Stale-while-revalidate cache
+// ---------------------------------------------------------------------------
+
+type AgentStatusData = Awaited<ReturnType<typeof buildAgentStatusResponse>>;
+
+const statusCache: {
+  data: AgentStatusData | null;
+  expiresAt: number;
+  pending: Promise<AgentStatusData> | null;
+} = { data: null, expiresAt: 0, pending: null };
+
+function refreshStatusCache(config?: Partial<UserConfig>, opts?: AgentDetectOptions) {
+  if (!statusCache.pending) {
+    statusCache.pending = buildAgentStatusResponse(config, opts)
+      .then(result => { statusCache.data = result; statusCache.expiresAt = Date.now() + AGENT_STATUS_CACHE_TTL_MS; return result; })
+      .finally(() => { statusCache.pending = null; });
+  }
+  return statusCache.pending;
+}
+
+function getCachedAgentStatus() {
+  if (statusCache.data) {
+    if (Date.now() >= statusCache.expiresAt) void refreshStatusCache();
+    return Promise.resolve(statusCache.data);
+  }
+  return refreshStatusCache();
+}
+
+function invalidateAgentStatus(config?: Partial<UserConfig>, opts?: AgentDetectOptions) {
+  statusCache.pending = null;
+  return refreshStatusCache(config, opts);
+}
+
+export function preloadAgentStatus() { void refreshStatusCache(); }
+
+// ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
 
 const app = new Hono();
 
-// Agent status (full agent/model/usage data)
 app.get('/api/agent-status', async (c) => {
-  return c.json(await buildAgentStatusResponse());
+  return c.json(await getCachedAgentStatus());
 });
 
-// Agent install via npm
 app.post('/api/agent-install', async (c) => {
   const body = await c.req.json();
   const agent = String(body?.agent || '').trim();
@@ -215,7 +226,7 @@ app.post('/api/agent-install', async (c) => {
   runtime.log(`[agents] install requested agent=${agent} command="${getAgentInstallCommand(agent) || '(unknown)'}"`);
   try {
     await installAgentViaNpm(agent, msg => runtime.log(`[agents] ${msg}`));
-    return c.json({ ok: true, ...(await buildAgentStatusResponse(loadUserConfig(), { refresh: true })) });
+    return c.json({ ok: true, ...(await invalidateAgentStatus(loadUserConfig(), { refresh: true })) });
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     runtime.log(`[agents] install failed agent=${agent} error=${detail}`);
@@ -228,7 +239,6 @@ app.get('/api/agents', (c) => {
   return c.json({ agents: runtime.getSetupState(loadUserConfig(), { includeVersion: true }).agents });
 });
 
-// Check latest version for an agent (on-demand)
 app.post('/api/agent-check-update', async (c) => {
   const body = await c.req.json();
   const agent = String(body?.agent || '').trim();
@@ -240,7 +250,7 @@ app.post('/api/agent-check-update', async (c) => {
     const agentState = setupState.agents.find(a => a.agent === agent);
     if (!agentState?.installed) return c.json({ ok: false, error: 'Agent not installed' }, 400);
     const updateState = await checkAgentLatestVersion(agentState);
-    return c.json({ ok: true, ...updateState, ...(await buildAgentStatusResponse(config)) });
+    return c.json({ ok: true, ...updateState, ...(await invalidateAgentStatus(config)) });
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     runtime.log(`[agents] check-update failed agent=${agent} error=${detail}`);
@@ -248,7 +258,6 @@ app.post('/api/agent-check-update', async (c) => {
   }
 });
 
-// Manual agent update via npm
 app.post('/api/agent-update', async (c) => {
   const body = await c.req.json();
   const agent = String(body?.agent || '').trim();
@@ -261,7 +270,7 @@ app.post('/api/agent-update', async (c) => {
     if (!agentState?.installed) return c.json({ ok: false, error: 'Agent not installed' }, 400);
     const result = await manualAgentUpdate(agentState, msg => runtime.log(`[agents] ${msg}`));
     if (!result.ok) return c.json({ ok: false, error: result.error }, 500);
-    return c.json({ ok: true, ...(await buildAgentStatusResponse(loadUserConfig(), { refresh: true })) });
+    return c.json({ ok: true, ...(await invalidateAgentStatus(loadUserConfig(), { refresh: true })) });
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     runtime.log(`[agents] manual update failed agent=${agent} error=${detail}`);
@@ -269,7 +278,6 @@ app.post('/api/agent-update', async (c) => {
   }
 });
 
-// Runtime agent/model/effort configuration
 app.post('/api/runtime-agent', async (c) => {
   const body = await c.req.json();
   const config = loadUserConfig();
@@ -309,7 +317,7 @@ app.post('/api/runtime-agent', async (c) => {
 
   saveUserConfig(nextConfig);
   applyUserConfig(nextConfig);
-  return c.json({ ok: true, ...(await buildAgentStatusResponse(nextConfig)) });
+  return c.json({ ok: true, ...(await invalidateAgentStatus(nextConfig)) });
 });
 
 export default app;

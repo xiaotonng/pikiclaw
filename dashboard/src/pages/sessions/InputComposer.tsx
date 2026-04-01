@@ -34,7 +34,8 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [localTaskId, setLocalTaskId] = useState<string | null>(null);
-  const [agents, setAgents] = useState<AgentRuntimeStatus[]>([]);
+  const storeAgents = useStore(s => s.agentStatus?.agents ?? null);
+  const [agents, setAgents] = useState<AgentRuntimeStatus[]>(storeAgents || []);
   const [selectedAgent, setSelectedAgent] = useState(session.agent || '');
   const [selectedModel, setSelectedModel] = useState(session.model || '');
   const [selectedEffort, setSelectedEffort] = useState('');
@@ -51,9 +52,9 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   const triggerRef = useRef<HTMLButtonElement>(null);
   const attachmentsRef = useRef<ComposerImageAttachment[]>([]);
   const reloadAppState = useStore(s => s.reload);
+  const refreshAgentStatus = useStore(s => s.refreshAgentStatus);
 
-  const refreshAgents = useCallback(() => { api.getAgentStatus().then(r => setAgents(r.agents || [])).catch(() => {}); }, []);
-  useEffect(() => { refreshAgents(); }, [refreshAgents]);
+  useEffect(() => { if (storeAgents?.length) setAgents(storeAgents); }, [storeAgents]);
   useEffect(() => { attachmentsRef.current = imageAttachments; }, [imageAttachments]);
   useEffect(() => () => revokeComposerAttachments(attachmentsRef.current), []);
 
@@ -273,7 +274,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   }, [persistComposerDefaults]);
 
   const toggleCascade = () => {
-    if (cascadeStep === 'closed') { resetCascade(); refreshAgents(); setCascadeStep('agent'); }
+    if (cascadeStep === 'closed') { resetCascade(); refreshAgentStatus(); setCascadeStep('agent'); }
     else { resetCascade(); setCascadeStep('closed'); }
   };
 
@@ -384,6 +385,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
             <button
               ref={triggerRef}
               onClick={toggleCascade}
+              disabled={!agents.length}
               className={cn(
                 'flex items-center gap-1.5 h-[28px] px-2.5 rounded-lg text-[11px] font-medium transition-all duration-200 select-none',
                 cascadeStep !== 'closed'
@@ -391,8 +393,10 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
                   : 'text-fg-5/60 hover:text-fg-4 hover:bg-panel-h/50 border border-transparent',
               )}
             >
-              <BrandIcon brand={displayAgent} size={12} />
-              <span className="max-w-[200px] truncate">{cascadeLabel}</span>
+              {agents.length
+                ? <BrandIcon brand={displayAgent} size={12} />
+                : <Spinner className="h-3 w-3" />}
+              <span className="max-w-[200px] truncate">{agents.length ? cascadeLabel : t('hub.selectAgent')}</span>
               <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
                 className={cn('text-fg-5/30 transition-transform duration-200', cascadeStep !== 'closed' && 'rotate-180')}>
                 <polyline points="6 9 12 15 18 9" />

@@ -42,7 +42,7 @@ export { IMAGE_EXTS } from './types.js';
 export {
   Q, agentLog, agentWarn, agentError,
   dedupeStrings, numberOrNull,
-  normalizeStreamPreviewPlan, normalizeActivityLine, pushRecentActivity,
+  normalizeStreamPreviewPlan, parseTodoWriteAsPlan, normalizeActivityLine, pushRecentActivity,
   firstNonEmptyLine, shortValue, normalizeErrorMessage, joinErrorMessages,
   appendSystemPrompt, mimeForExt, computeContext, buildStreamPreviewMeta,
   summarizeClaudeToolUse, summarizeClaudeToolResult,

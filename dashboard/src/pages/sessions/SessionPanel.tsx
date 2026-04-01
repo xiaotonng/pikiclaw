@@ -3,8 +3,8 @@ import { useStore } from '../../store';
 import { createT } from '../../i18n';
 import { api } from '../../api';
 import { loadSessionMessages, peekSessionMessages } from '../../session-preload';
-import { cn, getAgentMeta, sessionDisplayState, shouldPollSessionStreamState } from '../../utils';
-import { Spinner } from '../../components/ui';
+import { cn, fmtRelative, getAgentMeta, shortenModel, sessionDisplayState, shouldPollSessionStreamState } from '../../utils';
+import { Dot, Spinner } from '../../components/ui';
 import { BrandIcon } from '../../components/BrandIcon';
 import { hasPlan } from '../../components/PlanProgressCard';
 import type { SessionInfo, StreamPlan } from '../../types';
@@ -255,10 +255,8 @@ export const SessionPanel = memo(function SessionPanel({
           if (prevPhase !== 'done') {
             if (stickToBottomRef.current) scrollToBottomRef.current = true;
             void loadLatestTurns({ keepOlder: true, force: true }).then(loaded => {
-              if (loaded) {
-                clearPending();
-                setLiveStream(null);
-              }
+              if (loaded) clearPending();
+              setLiveStream(null);
             });
           }
           localStreamPendingRef.current = false;
@@ -334,18 +332,34 @@ export const SessionPanel = memo(function SessionPanel({
   return (
     <div className="flex flex-col h-full overflow-hidden">
       {/* ── Header ── */}
-      <div className="shrink-0 flex items-center gap-2.5 px-5 h-10 border-b border-edge/50 bg-panel/40 backdrop-blur-md z-10">
+      <div className="shrink-0 flex items-center gap-2 px-4 h-10 border-b border-edge/50 bg-panel/40 backdrop-blur-md z-10">
         <BrandIcon brand={session.agent || ''} size={14} />
+        <span className="text-[10px] font-medium shrink-0" style={{ color: meta.color }}>{meta.shortLabel}</span>
         <span className="flex-1 min-w-0 text-[13px] font-medium text-fg truncate">{title}</span>
+        <span className="flex items-center gap-1 text-[10px] text-fg-5/60 shrink-0">
+          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="opacity-60">
+            <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
+          </svg>
+          <span className="max-w-[80px] truncate">{workdir.split('/').pop()}</span>
+        </span>
         {session.model && (
-          <span className="text-[10px] font-mono text-fg-5 px-1.5 py-0.5 rounded bg-panel-alt/40">{session.model}</span>
+          <span className="text-[10px] font-mono text-fg-5/60 px-1.5 py-0.5 rounded bg-inset/40 shrink-0">{shortenModel(session.model)}</span>
         )}
-        {displayState === 'running' && (
-          <span className="flex items-center gap-1.5">
-            <span className="h-[5px] w-[5px] rounded-full bg-ok animate-pulse" />
-            <span className="text-[10px] text-ok font-medium">{t('status.running')}</span>
+        {!!session.numTurns && (
+          <span className="flex items-center gap-0.5 text-[10px] text-fg-5/50 tabular-nums shrink-0">
+            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="opacity-50">
+              <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
+            </svg>
+            {session.numTurns}
           </span>
         )}
+        <Dot
+          variant={displayState === 'running' ? 'ok' : displayState === 'incomplete' ? 'warn' : 'idle'}
+          pulse={displayState === 'running'}
+        />
+        <span className="text-[10px] text-fg-5/50 tabular-nums shrink-0">
+          {fmtRelative(session.runUpdatedAt || session.createdAt)}
+        </span>
       </div>
 
       {/* ── Messages ── */}

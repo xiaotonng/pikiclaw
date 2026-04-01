@@ -44,6 +44,8 @@ export const DASHBOARD_TIMEOUTS = {
   channelStatusValidation: 3_000,
   /** How long validated channel states are cached before re-checking. */
   channelStatusCacheTtl: 20_000,
+  /** How long the full agent-status response is cached (SWR). */
+  agentStatusCacheTtl: 30_000,
   /** Timeout for agent npm install via the dashboard. */
   agentInstall: 10 * 60_000,
   /** Default timeout for dashboard-spawned shell commands. */

@@ -9,7 +9,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { exec } from 'node:child_process';
 import configRoutes from './routes/config.js';
-import agentRoutes from './routes/agents.js';
+import agentRoutes, { preloadAgentStatus } from './routes/agents.js';
 import sessionRoutes from './routes/sessions.js';
 import { runtime } from './runtime.js';
 import { registerProcessRuntime } from '../core/process-control.js';
@@ -122,6 +122,9 @@ export async function startDashboard(opts: DashboardOptions = {}): Promise<Dashb
           const dashUrl = `http://localhost:${actualPort}`;
           const ts = new Date().toTimeString().slice(0, 8);
           process.stdout.write(`[pikiclaw ${ts}] dashboard: ${dashUrl}\n`);
+
+          // Preload agent status cache so the first dashboard page load is instant
+          preloadAgentStatus();
 
           if (opts.open !== false) {
             const cmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';

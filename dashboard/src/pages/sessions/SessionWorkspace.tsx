@@ -4,11 +4,12 @@ import { createT } from '../../i18n';
 import { api } from '../../api';
 import { loadWorkspaceSessions, prefetchSessionMessages } from '../../session-preload';
 import { cn, fmtRelative, getAgentMeta, shortenModel, sessionDisplayState, shouldPollSessionStreamState, sessionListContextText, sessionListDisplayText } from '../../utils';
-import { Badge, Dot, Spinner, Modal, ModalHeader, Button, Select, IconPicker } from '../../components/ui';
+import { Badge, Dot, Spinner, Modal, ModalHeader, Button, IconPicker } from '../../components/ui';
 import { BrandIcon } from '../../components/BrandIcon';
 import { DirBrowser } from '../../components/DirBrowser';
 import { PlanProgressCard, hasPlan } from '../../components/PlanProgressCard';
 import type { SessionInfo, WorkspaceEntry, DirEntry, StreamPlan, OpenTarget } from '../../types';
+import { InputComposer } from './InputComposer';
 
 let sessionPanelModulePromise: Promise<typeof import('./SessionPanel')> | null = null;
 
@@ -74,9 +75,10 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const [workspaces, setWorkspaces] = useState<WorkspaceEntry[]>([]);
   const [sessionsMap, setSessionsMap] = useState<Record<string, SessionInfo[]>>({});
   const [loadingMap, setLoadingMap] = useState<Record<string, boolean>>({});
+  const [sidebarLoading, setSidebarLoading] = useState(true);
   const [selectedSession, setSelectedSession] = useState<{ agent: string; sessionId: string; workdir: string } | null>(null);
   const [showAddDialog, setShowAddDialog] = useState(false);
-  const [showNewSession, setShowNewSession] = useState(false);
+  const [showNewSession, setShowNewSession] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<FilterMode>('all');
   const deferredSearch = useDeferredValue(search);
@@ -100,6 +102,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       initializedRef.current = true;
     } catch {
       initializedRef.current = true;
+    } finally {
+      setSidebarLoading(false);
     }
   }, []);
 
@@ -268,29 +272,20 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     void loadSessionsForWorkspace(wsPath, { force: true });
   }, [loadSessionsForWorkspace]);
 
-  /* ── New session — create and auto-select ── */
-  const handleNewSession = useCallback(async (workdir: string, agent: string, prompt: string) => {
-    try {
-      const res = await api.sendSessionMessage(workdir, agent, '', prompt);
-      if (res.ok && res.sessionKey) {
-        setShowNewSession(false);
-        // sessionKey is "agent:sessionId"
-        const colonIdx = res.sessionKey.indexOf(':');
-        const newSessionId = colonIdx >= 0 ? res.sessionKey.slice(colonIdx + 1) : '';
-        if (newSessionId) {
-          startTransition(() => {
-            setSelectedSession({ agent, sessionId: newSessionId, workdir });
-          });
-        }
-        // Refresh workspace sessions to include the new one
-        void loadSessionsForWorkspace(workdir, { force: true });
-      }
-    } catch {}
-  }, [loadSessionsForWorkspace]);
+  /* ── New session — transition after InputComposer creates it ── */
+  const handleNewSessionCreated = useCallback((next: { agent: string; sessionId: string; workdir: string }) => {
+    warmSession({ agent: next.agent, sessionId: next.sessionId, runState: 'running' }, next.workdir);
+    setShowNewSession(null);
+    startTransition(() => {
+      setSelectedSession(next);
+    });
+    void loadSessionsForWorkspace(next.workdir, { force: true });
+  }, [loadSessionsForWorkspace, warmSession]);
 
   /* ── Select session — stable callback that takes wsPath ── */
   const handleSelectSession = useCallback((session: SessionInfo, workdir: string) => {
     warmSession(session, workdir);
+    setShowNewSession(null);
     startTransition(() => {
       setSelectedSession({ agent: session.agent || '', sessionId: session.sessionId, workdir });
     });
@@ -331,11 +326,18 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   }, [workspaces, sessionsMap, filterFn]);
 
   /* ── Derived: selected session info ── */
-  const selectedSessionInfo = useMemo(() => {
+  const selectedSessionInfo = useMemo((): SessionInfo | null => {
     if (!selectedSession) return null;
     return (sessionsMap[selectedSession.workdir] || []).find(
       s => s.sessionId === selectedSession.sessionId && s.agent === selectedSession.agent,
-    ) ?? null;
+    ) ?? {
+      // Fallback: session selected but not yet in sessionsMap (e.g. just created).
+      // SessionPanel handles missing fields gracefully; real data replaces this
+      // once loadSessionsForWorkspace completes.
+      sessionId: selectedSession.sessionId,
+      agent: selectedSession.agent,
+      runState: 'running' as const,
+    };
   }, [selectedSession, sessionsMap]);
 
   const selectedKey = selectedSession ? sKey(selectedSession.agent, selectedSession.sessionId) : null;
@@ -387,7 +389,11 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 
         {/* Workspace list */}
         <div className="flex-1 overflow-y-auto">
-          {workspaces.length === 0 && !showAddDialog ? (
+          {sidebarLoading ? (
+            <div className="flex items-center justify-center py-12">
+              <Spinner className="h-4 w-4 text-fg-5" />
+            </div>
+          ) : workspaces.length === 0 && !showAddDialog ? (
             <div className="py-12 text-center text-[13px] text-fg-5">{t('hub.noWorkspaces')}</div>
           ) : (
             workspaces.map(ws => (
@@ -395,9 +401,10 @@ export const SessionWorkspace = memo(function SessionWorkspace({
                 key={ws.path}
                 workspace={ws}
                 sessions={filteredByWs[ws.path] || []}
-                loading={!!loadingMap[ws.path]}
+                loading={!!loadingMap[ws.path] || !(ws.path in sessionsMap)}
                 selectedKey={selectedKey}
                 onSelectSession={handleSelectSession}
+                onNewSession={setShowNewSession}
                 onRefresh={handleRefreshWorkspace}
                 onRemove={handleRemoveWorkspace}
                 onWarmSession={scheduleSessionWarmup}
@@ -409,18 +416,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
         </div>
 
         {/* Footer actions */}
-        <div className="shrink-0 px-3 py-2 border-t border-edge/20 space-y-1.5">
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => setShowNewSession(true)}
-            className="w-full"
-          >
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-              <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
-            </svg>
-            {t('hub.newSession')}
-          </Button>
+        <div className="shrink-0 px-3 py-2 border-t border-edge/20">
           <Button
             variant="ghost"
             size="sm"
@@ -437,7 +433,16 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 
       {/* ═══ Center Panel — Conversation ═══ */}
       <div className="panel-scroll-safe flex-1 min-w-0 overflow-hidden rounded-xl border border-edge bg-panel" style={{ boxShadow: 'var(--th-card-shadow)' }}>
-        {!selectedSessionInfo || !selectedSession ? (
+        {showNewSession ? (
+          <NewSessionView
+            key={showNewSession}
+            workdir={showNewSession}
+            workspaceName={workspaces.find(ws => ws.path === showNewSession)?.name || showNewSession.split('/').pop() || ''}
+            onSessionCreated={handleNewSessionCreated}
+            onClose={() => setShowNewSession(null)}
+            t={t}
+          />
+        ) : !selectedSession ? (
           <div className="flex h-full items-center justify-center">
             <div className="text-center">
               <div className="text-[14px] text-fg-4">{t('hub.selectSession')}</div>
@@ -457,7 +462,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
           >
             <SessionPanel
               key={sKey(selectedSession.agent, selectedSession.sessionId)}
-              session={selectedSessionInfo}
+              session={selectedSessionInfo!}
               workdir={selectedSession.workdir}
               active={active}
               onSessionChange={handlePanelSessionChange}
@@ -468,7 +473,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 
       {/* ═══ Right Panel — Auxiliary ═══ */}
       <RightPanel
-        session={selectedSessionInfo}
+        session={showNewSession ? undefined : selectedSessionInfo}
         workdir={selectedSession?.workdir || ''}
         active={active}
         t={t}
@@ -480,15 +485,6 @@ export const SessionWorkspace = memo(function SessionWorkspace({
         initialPath={runtimeWorkdir || undefined}
         onAdd={handleAddWorkspace}
         onClose={() => setShowAddDialog(false)}
-        t={t}
-      />
-
-      {/* New session modal */}
-      <NewSessionDialog
-        open={showNewSession}
-        workspaces={workspaces}
-        onStart={handleNewSession}
-        onClose={() => setShowNewSession(false)}
         t={t}
       />
     </div>
@@ -545,114 +541,72 @@ function AddWorkspaceModal({
 }
 
 /* ══════════════════════════════════════════════════════
-   New Session Dialog — pick workspace + agent, enter prompt
+   New Session View — empty chat + InputComposer
+   Looks identical to a regular session: header, empty
+   message area, and the standard input bar at the bottom.
    ══════════════════════════════════════════════════════ */
-function NewSessionDialog({
-  open,
-  workspaces,
-  onStart,
+function NewSessionView({
+  workdir,
+  workspaceName,
+  onSessionCreated,
   onClose,
   t,
 }: {
-  open: boolean;
-  workspaces: WorkspaceEntry[];
-  onStart: (workdir: string, agent: string, prompt: string) => void;
+  workdir: string;
+  workspaceName: string;
+  onSessionCreated: (next: { agent: string; sessionId: string; workdir: string }) => void;
   onClose: () => void;
   t: (key: string) => string;
 }) {
-  const appState = useStore(s => s.state);
-  const installedAgents = useMemo(
-    () => (appState?.setupState?.agents || []).filter(a => a.installed),
-    [appState],
-  );
-  const defaultAgent = appState?.config?.defaultAgent || installedAgents[0]?.agent || '';
+  const stubSession = useMemo((): SessionInfo => ({
+    sessionId: '',
+    agent: '',
+    runState: 'completed',
+  }), []);
 
-  const [workdir, setWorkdir] = useState('');
-  const [agent, setAgent] = useState('');
-  const [prompt, setPrompt] = useState('');
-  const [sending, setSending] = useState(false);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-
-  // Reset state when dialog opens
-  useEffect(() => {
-    if (open) {
-      setWorkdir(workspaces[0]?.path || '');
-      setAgent(defaultAgent);
-      setPrompt('');
-      setSending(false);
-      setTimeout(() => textareaRef.current?.focus(), 50);
-    }
-  }, [open, workspaces, defaultAgent]);
-
-  const canSubmit = !!workdir && !!agent && !!prompt.trim() && !sending;
-
-  const handleSubmit = () => {
-    if (!canSubmit) return;
-    setSending(true);
-    onStart(workdir, agent, prompt.trim());
-  };
-
-  const workspaceOptions = useMemo(
-    () => workspaces.map(ws => ({ value: ws.path, label: ws.name || ws.path.split('/').pop() || ws.path })),
-    [workspaces],
-  );
-  const agentOptions = useMemo(
-    () => installedAgents.map(a => ({ value: a.agent, label: getAgentMeta(a.agent).label })),
-    [installedAgents],
-  );
+  const noop = useCallback(() => {}, []);
+  const noopSend = useCallback((_prompt: string, _imageUrls?: string[]) => {}, []);
 
   return (
-    <Modal open={open} onClose={onClose}>
-      <ModalHeader title={t('hub.newSession')} description={t('hub.newSessionHint')} onClose={onClose} />
+    <div className="flex flex-col h-full overflow-hidden">
+      {/* ── Header ── */}
+      <div className="shrink-0 flex items-center gap-2 px-4 h-10 border-b border-edge/50 bg-panel/40 backdrop-blur-md z-10">
+        <span className="flex-1 min-w-0 text-[13px] font-medium text-fg truncate">{t('hub.newSession')}</span>
+        <span className="flex items-center gap-1 text-[10px] text-fg-5/60 shrink-0">
+          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="opacity-60">
+            <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
+          </svg>
+          <span className="max-w-[80px] truncate">{workspaceName}</span>
+        </span>
+        <Dot variant="idle" />
+        <button
+          onClick={onClose}
+          className="p-1 rounded text-fg-5 hover:text-fg-2 transition-colors"
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+          </svg>
+        </button>
+      </div>
 
-      <div className="space-y-3">
-        {/* Workspace picker */}
-        {workspaceOptions.length > 1 && (
-          <div className="space-y-1">
-            <label className="text-[11px] font-medium text-fg-4">{t('hub.workspace')}</label>
-            <Select value={workdir} options={workspaceOptions} onChange={setWorkdir} />
-          </div>
-        )}
-
-        {/* Agent picker */}
-        <div className="space-y-1">
-          <label className="text-[11px] font-medium text-fg-4">{t('hub.selectAgent')}</label>
-          {agentOptions.length > 0 ? (
-            <Select value={agent} options={agentOptions} onChange={setAgent} />
-          ) : (
-            <div className="text-[12px] text-fg-5">{t('sessions.noAgent')}</div>
-          )}
-        </div>
-
-        {/* Prompt input */}
-        <div className="space-y-1">
-          <label className="text-[11px] font-medium text-fg-4">{t('hub.inputPlaceholder')}</label>
-          <textarea
-            ref={textareaRef}
-            value={prompt}
-            onChange={e => setPrompt(e.target.value)}
-            onKeyDown={e => {
-              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && canSubmit) {
-                e.preventDefault();
-                handleSubmit();
-              }
-            }}
-            rows={3}
-            className="w-full rounded-lg border border-edge/40 bg-inset/50 px-3 py-2 text-[13px] text-fg outline-none placeholder:text-fg-5/30 focus:border-primary/30 focus:bg-inset focus:shadow-[0_0_0_3px_rgba(99,102,241,0.06)] transition-all duration-200 resize-none"
-            placeholder={t('hub.inputPlaceholder')}
-          />
+      {/* ── Empty message area ── */}
+      <div className="flex-1 overflow-y-auto flex items-center justify-center">
+        <div className="text-center space-y-1.5">
+          <div className="text-[13px] text-fg-5">{t('hub.newSessionHint')}</div>
         </div>
       </div>
 
-      <div className="flex gap-2 mt-4">
-        <Button disabled={!canSubmit} onClick={handleSubmit} className="flex-1">
-          {sending ? <Spinner className="h-3 w-3" /> : t('hub.startSession')}
-        </Button>
-        <Button variant="secondary" onClick={onClose} className="flex-1">
-          {t('hub.cancel')}
-        </Button>
-      </div>
-    </Modal>
+      {/* ── Input ── */}
+      <InputComposer
+        session={stubSession}
+        workdir={workdir}
+        onStreamQueued={noop}
+        onSendStart={noopSend}
+        onSessionChange={onSessionCreated}
+        t={t}
+        streamPhase={null}
+      />
+    </div>
   );
 }
 
@@ -667,6 +621,7 @@ const WorkspaceGroup = memo(function WorkspaceGroup({
   loading,
   selectedKey,
   onSelectSession,
+  onNewSession,
   onRefresh,
   onRemove,
   onWarmSession,
@@ -678,6 +633,7 @@ const WorkspaceGroup = memo(function WorkspaceGroup({
   loading: boolean;
   selectedKey: string | null;
   onSelectSession: (s: SessionInfo, wsPath: string) => void;
+  onNewSession: (wsPath: string) => void;
   onRefresh: (wsPath: string) => void;
   onRemove: (wsPath: string) => void;
   onWarmSession: (s: SessionInfo, wsPath: string) => void;
@@ -717,6 +673,15 @@ const WorkspaceGroup = memo(function WorkspaceGroup({
         </span>
         {hovered && (
           <div className="flex items-center gap-0.5 shrink-0">
+            <button
+              onClick={e => { e.stopPropagation(); onNewSession(wsPath); }}
+              className="p-0.5 rounded text-fg-5 hover:text-primary transition-colors"
+              title={t('hub.newSession')}
+            >
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+            </button>
             <button
               onClick={e => { e.stopPropagation(); onRefresh(wsPath); }}
               className="p-0.5 rounded text-fg-5 hover:text-fg-2 transition-colors"

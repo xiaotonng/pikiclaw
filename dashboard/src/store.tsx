@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { api } from './api';
 import { hasPendingChannelValidation } from './channel-status';
-import type { AppState, HostInfo, SessionInfo } from './types';
+import type { AgentStatusResponse, AppState, HostInfo, SessionInfo } from './types';
 import type { Locale } from './i18n';
 
 /* ── Toast ── */
@@ -12,6 +12,31 @@ export interface Toast {
 }
 
 export type Theme = 'dark' | 'light';
+
+/* ── sessionStorage cache for instant restore on refresh ── */
+
+const CACHE_KEY = 'pikiclaw-store-cache';
+
+interface CachedSlices {
+  state: AppState | null;
+  host: HostInfo | null;
+  agentStatus: AgentStatusResponse | null;
+}
+
+function readCache(): CachedSlices {
+  try {
+    const raw = sessionStorage.getItem(CACHE_KEY);
+    if (raw) return JSON.parse(raw) as CachedSlices;
+  } catch {}
+  return { state: null, host: null, agentStatus: null };
+}
+
+function writeCache(slices: Partial<CachedSlices>) {
+  try {
+    const prev = readCache();
+    sessionStorage.setItem(CACHE_KEY, JSON.stringify({ ...prev, ...slices }));
+  } catch {}
+}
 
 /* ── Helpers ── */
 let _toastId = 0;
@@ -37,6 +62,7 @@ interface StoreState {
   /* ── Data slices ── */
   state: AppState | null;
   host: HostInfo | null;
+  agentStatus: AgentStatusResponse | null;
   toasts: Toast[];
   allSessions: Record<string, { sessions: SessionInfo[] }>;
   theme: Theme;
@@ -47,6 +73,8 @@ interface StoreState {
   setTheme: (t: Theme) => void;
   setLocale: (l: Locale) => void;
   reload: () => Promise<AppState | null>;
+  refreshAgentStatus: () => Promise<AgentStatusResponse | null>;
+  setAgentStatus: (status: AgentStatusResponse) => void;
   reloadUntil: (
     predicate: (state: AppState) => boolean,
     opts?: { attempts?: number; intervalMs?: number },
@@ -64,10 +92,13 @@ document.documentElement.dataset.theme = initialTheme;
      const locale = useStore(s => s.locale);
    Actions are stable refs and never cause re-renders.
    ══════════════════════════════════════════════════════ */
+const _cached = readCache();
+
 export const useStore = create<StoreState>()((set, get) => ({
-  /* ── Initial data ── */
-  state: null,
-  host: null,
+  /* ── Initial data (hydrated from sessionStorage) ── */
+  state: _cached.state,
+  host: _cached.host,
+  agentStatus: _cached.agentStatus,
   toasts: [],
   allSessions: {},
   theme: initialTheme,
@@ -95,19 +126,35 @@ export const useStore = create<StoreState>()((set, get) => ({
     set({ locale: l });
   },
 
-  /* ── Reload app state + host ── */
+  /* ── Reload app state + host + agent status ── */
   reload: async () => {
     try {
-      const statePromise = api.getState();
-      const hostPromise = api.getHost().catch(() => null);
-      const d = await statePromise;
-      const h = await hostPromise;
-      set({ state: d, ...(h ? { host: h } : {}) });
+      const [d, h, agents] = await Promise.all([
+        api.getState(),
+        api.getHost().catch(() => null),
+        api.getAgentStatus().catch(() => null),
+      ]);
+      set({ state: d, ...(h ? { host: h } : {}), ...(agents ? { agentStatus: agents } : {}) });
+      writeCache({ state: d, ...(h ? { host: h } : {}), ...(agents ? { agentStatus: agents } : {}) });
       return d;
     } catch (e) {
       console.error('loadState:', e);
       return null;
     }
+  },
+
+  refreshAgentStatus: async () => {
+    try {
+      const agents = await api.getAgentStatus();
+      set({ agentStatus: agents });
+      writeCache({ agentStatus: agents });
+      return agents;
+    } catch { return null; }
+  },
+
+  setAgentStatus: (status) => {
+    set({ agentStatus: status });
+    writeCache({ agentStatus: status });
   },
 
   /* ── Reload with polling until predicate ── */
@@ -136,6 +183,7 @@ export const useStore = create<StoreState>()((set, get) => ({
         host: h,
         allSessions: ses as Record<string, { sessions: SessionInfo[] }>,
       });
+      writeCache({ state: s, host: h });
     } catch (e) {
       console.error('loadSessions:', e);
     }

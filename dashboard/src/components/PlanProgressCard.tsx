@@ -56,7 +56,7 @@ export function PlanProgressCard({
     <CollapsibleCard
       open={open}
       onToggle={() => setOpen(v => !v)}
-      dot={{ color: isDone ? 'bg-emerald-400/60' : 'bg-cyan-400/60' }}
+      dot={{ color: isDone ? 'bg-emerald-400/60' : 'bg-cyan-400/60', pulse: !isDone }}
       label={progressLabel}
       preview={plan.explanation ? (
         <span className="text-[11.5px] text-fg-4 truncate">{plan.explanation}</span>
