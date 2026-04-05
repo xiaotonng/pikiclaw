@@ -3,13 +3,14 @@ import { useStore } from '../../store';
 import { createT } from '../../i18n';
 import { api } from '../../api';
 import { loadSessionMessages, peekSessionMessages } from '../../session-preload';
+import { useDashboardEvent, type DashboardEvent } from '../../sse';
 import { cn, fmtRelative, getAgentMeta, shortenModel, sessionDisplayState, shouldPollSessionStreamState } from '../../utils';
 import { Dot, Spinner } from '../../components/ui';
 import { BrandIcon } from '../../components/BrandIcon';
 import { hasPlan } from '../../components/PlanProgressCard';
 import type { SessionInfo, StreamPlan } from '../../types';
 import { TurnView, UserBubble, TurnDivider } from './TurnView';
-import { LivePreview } from './LivePreview';
+import { LivePreview, ThinkingDots } from './LivePreview';
 import { InputComposer } from './InputComposer';
 import {
   normalizeTurnHistory,
@@ -27,12 +28,14 @@ const BOTTOM_STICK_THRESHOLD_PX = 96;
    SessionPanel
    ═══════════════════════════════════════════════════════════════ */
 export const SessionPanel = memo(function SessionPanel({
-  session, workdir, active = true, onSessionChange,
+  session, workdir, active = true, onSessionChange, initialPendingPrompt, onPendingPromptConsumed,
 }: {
   session: SessionInfo;
   workdir: string;
   active?: boolean;
   onSessionChange?: (next: { agent: string; sessionId: string; workdir: string }) => void;
+  initialPendingPrompt?: string | null;
+  onPendingPromptConsumed?: () => void;
 }) {
   const locale = useStore(s => s.locale);
   const t = useMemo(() => createT(locale), [locale]);
@@ -53,6 +56,7 @@ export const SessionPanel = memo(function SessionPanel({
   const [streamPhase, setStreamPhase] = useState<string | null>(null);
   const [streamPollNonce, setStreamPollNonce] = useState(0);
   const [streamTaskId, setStreamTaskId] = useState<string | null>(null);
+  const [queuedTaskId, setQueuedTaskId] = useState<string | null>(null);
   const [pendingPrompt, setPendingPrompt] = useState<string | null>(null);
   const [pendingImageUrls, setPendingImageUrls] = useState<string[]>([]);
   const [editDraft, setEditDraft] = useState<string | null>(null);
@@ -64,6 +68,17 @@ export const SessionPanel = memo(function SessionPanel({
   const loadingLatestRef = useRef(false);
   const loadingOlderRef = useRef(false);
   const localStreamPendingRef = useRef(false);
+  const initialPendingConsumedRef = useRef(false);
+
+  // Consume initialPendingPrompt from new-session flow — show immediately and start polling
+  useEffect(() => {
+    if (initialPendingConsumedRef.current || !initialPendingPrompt) return;
+    initialPendingConsumedRef.current = true;
+    setPendingPrompt(initialPendingPrompt);
+    localStreamPendingRef.current = true;
+    setStreamPollNonce(n => n + 1);
+    onPendingPromptConsumed?.();
+  }, [initialPendingPrompt, onPendingPromptConsumed]);
 
   const clearPending = useCallback(() => {
     setPendingPrompt(null);
@@ -136,6 +151,70 @@ export const SessionPanel = memo(function SessionPanel({
     }
   }, [fetchTurnWindow, history]);
 
+  const prevPhaseRef = useRef<'queued' | 'streaming' | 'done' | null>(null);
+
+  /** Apply a stream snapshot to local state — called from both SSE push and poll fallback. */
+  const applyStreamSnapshot = useCallback((state: any | null) => {
+    if (!state) {
+      const prev = prevPhaseRef.current;
+      if (prev === 'streaming') {
+        setStreaming(false);
+        if (stickToBottomRef.current) scrollToBottomRef.current = true;
+        void loadLatestTurns({ keepOlder: true, force: true }).then(loaded => {
+          if (loaded) { clearPending(); setLiveStream(null); }
+        });
+      } else if (prev === 'done') {
+        clearPending();
+        setLiveStream(null);
+      } else if (prev === null && localStreamPendingRef.current) {
+        void loadLatestTurns({ keepOlder: true, force: true }).then(loaded => {
+          if (loaded) { clearPending(); setLiveStream(null); }
+        });
+      }
+      localStreamPendingRef.current = false;
+      setStreamTaskId(null);
+      setStreamPhase(null);
+      setQueuedTaskId(null);
+      prevPhaseRef.current = null;
+      return;
+    }
+    setStreamPhase(state.phase);
+    setStreamTaskId(state.taskId || null);
+    setQueuedTaskId(state.queuedTaskId || null);
+    if (state.phase === 'streaming') {
+      setLiveStream({
+        phase: 'streaming',
+        text: state.text || '',
+        thinking: state.thinking || '',
+        activity: state.activity,
+        plan: state.plan ?? null,
+      });
+      setStreaming(true);
+      if (stickToBottomRef.current) scrollToBottomRef.current = true;
+    } else if (state.phase === 'queued') {
+      setLiveStream(null);
+      setStreaming(false);
+    } else if (state.phase === 'done') {
+      setLiveStream((hasPlan(state.plan) || state.text || state.thinking || state.activity) ? {
+        phase: 'done',
+        text: state.text || '',
+        thinking: state.thinking || '',
+        activity: state.activity || '',
+        plan: state.plan ?? null,
+      } : null);
+      setStreaming(false);
+      if (prevPhaseRef.current !== 'done') {
+        if (stickToBottomRef.current) scrollToBottomRef.current = true;
+        void loadLatestTurns({ keepOlder: true, force: true }).then(loaded => {
+          if (loaded && !state.queuedTaskId) clearPending();
+          setLiveStream(null);
+        });
+      }
+      if (!state.queuedTaskId) localStreamPendingRef.current = false;
+    }
+    prevPhaseRef.current = state.phase;
+  }, [clearPending, loadLatestTurns]);
+
   const requestStreamPolling = useCallback(() => {
     localStreamPendingRef.current = true;
     setStreamPollNonce(current => current + 1);
@@ -145,7 +224,9 @@ export const SessionPanel = memo(function SessionPanel({
     try {
       await api.recallSessionMessage(taskId);
       clearPending();
-      setStreamTaskId(null);
+      // Optimistic: clear the specific task reference so UI responds immediately
+      setQueuedTaskId(prev => prev === taskId ? null : prev);
+      setStreamTaskId(prev => prev === taskId ? null : prev);
     } catch {}
   }, [clearPending]);
 
@@ -168,6 +249,7 @@ export const SessionPanel = memo(function SessionPanel({
     setLiveStream(null);
     setStreaming(false);
     setStreamPhase(null);
+    setQueuedTaskId(null);
     stickToBottomRef.current = true;
     scrollToBottomRef.current = true;
     if (cachedLatest?.ok) setLoading(false);
@@ -181,10 +263,22 @@ export const SessionPanel = memo(function SessionPanel({
     void loadLatestTurns({ keepOlder: true, force: true });
   }, [active, loadLatestTurns]);
 
+  /* ── SSE-driven: apply stream snapshots instantly when pushed from server ── */
+  const sessionKeyRef = useRef(`${session.agent}:${session.sessionId}`);
+  sessionKeyRef.current = `${session.agent}:${session.sessionId}`;
+
+  useDashboardEvent(
+    active ? 'stream-update' : null,
+    useCallback((event: DashboardEvent) => {
+      if (event.key !== sessionKeyRef.current) return;
+      applyStreamSnapshot(event.snapshot ?? null);
+    }, [applyStreamSnapshot]),
+  );
+
+  /* ── Poll fallback — initial fetch + consistency check (SSE handles fast updates) ── */
   useEffect(() => {
     if (!active) return;
     let mounted = true;
-    let prevPhase: 'queued' | 'streaming' | 'done' | null = null;
     let pollTimer: ReturnType<typeof setInterval> | null = null;
 
     const stopPolling = () => {
@@ -195,7 +289,8 @@ export const SessionPanel = memo(function SessionPanel({
 
     const ensurePolling = () => {
       if (pollTimer) return;
-      pollTimer = setInterval(() => { void poll(); }, 800);
+      // SSE handles rapid updates; polling is a slow fallback at 5s
+      pollTimer = setInterval(() => { void poll(); }, 5000);
     };
 
     const poll = async () => {
@@ -205,65 +300,10 @@ export const SessionPanel = memo(function SessionPanel({
         if (!mounted) return;
         const state = res.state;
         const phase = state?.phase ?? null;
-        const keepPolling = shouldPollSessionStreamState(displayState, localStreamPendingRef.current, phase, prevPhase);
-        if (!state) {
-          // No active stream — if we were streaming, stream ended externally
-          if (prevPhase === 'streaming') {
-            setStreaming(false);
-            if (stickToBottomRef.current) scrollToBottomRef.current = true;
-            void loadLatestTurns({ keepOlder: true, force: true }).then(loaded => {
-              if (loaded) { clearPending(); setLiveStream(null); }
-            });
-          } else if (prevPhase === 'done') {
-            clearPending();
-            setLiveStream(null);
-          }
-          if (prevPhase === 'queued' || prevPhase === 'streaming' || prevPhase === 'done') {
-            localStreamPendingRef.current = false;
-          }
-          setStreamTaskId(null);
-          setStreamPhase(null);
-          prevPhase = null;
-          if (keepPolling) ensurePolling();
-          else stopPolling();
-          return;
-        }
-        setStreamPhase(state.phase);
-        setStreamTaskId(state.phase === 'queued' ? (state.taskId || null) : null);
-        if (state.phase === 'streaming') {
-          setLiveStream({
-            phase: 'streaming',
-            text: state.text || '',
-            thinking: state.thinking || '',
-            activity: state.activity,
-            plan: state.plan ?? null,
-          });
-          setStreaming(true);
-          if (stickToBottomRef.current) scrollToBottomRef.current = true;
-        } else if (state.phase === 'queued') {
-          setLiveStream(null);
-          setStreaming(false);
-        } else if (state.phase === 'done') {
-          setLiveStream((hasPlan(state.plan) || state.text || state.thinking || state.activity) ? {
-            phase: 'done',
-            text: state.text || '',
-            thinking: state.thinking || '',
-            activity: state.activity || '',
-            plan: state.plan ?? null,
-          } : null);
-          setStreaming(false);
-          if (prevPhase !== 'done') {
-            if (stickToBottomRef.current) scrollToBottomRef.current = true;
-            void loadLatestTurns({ keepOlder: true, force: true }).then(loaded => {
-              if (loaded) clearPending();
-              setLiveStream(null);
-            });
-          }
-          localStreamPendingRef.current = false;
-        }
+        const keepPolling = shouldPollSessionStreamState(displayState, localStreamPendingRef.current, phase, prevPhaseRef.current);
+        applyStreamSnapshot(state);
         if (keepPolling) ensurePolling();
         else stopPolling();
-        prevPhase = state.phase;
       } catch {
         // Network error — ignore, will retry next tick
       }
@@ -275,16 +315,24 @@ export const SessionPanel = memo(function SessionPanel({
       mounted = false;
       stopPolling();
     };
-  }, [active, displayState, loadLatestTurns, session.agent, session.sessionId, streamPollNonce]);
+  }, [active, applyStreamSnapshot, displayState, session.agent, session.sessionId, streamPollNonce]);
 
   /* ── Fallback: poll messages for IM-triggered sessions (no stream snapshot) ── */
   useEffect(() => {
     if (!active) return;
     if (displayState !== 'running') return;
-    if (streaming) return; // stream-state polling is active, no need
-    const id = setInterval(() => { void loadLatestTurns({ keepOlder: true, force: true }); }, 3000);
+    if (streaming) return; // SSE / stream-state is active, no need
+    const id = setInterval(() => { void loadLatestTurns({ keepOlder: true, force: true }); }, 5000);
     return () => clearInterval(id);
   }, [active, displayState, loadLatestTurns, streaming]);
+
+  /* ── Safety: clear stale pending state when session stops running ── */
+  useEffect(() => {
+    if (displayState !== 'running' && !streaming && !liveStream) {
+      clearPending();
+      localStreamPendingRef.current = false;
+    }
+  }, [displayState, streaming, liveStream, clearPending]);
 
   useLayoutEffect(() => {
     const anchor = prependAnchorRef.current;
@@ -392,12 +440,8 @@ export const SessionPanel = memo(function SessionPanel({
               <div className="session-turn">
                 <UserBubble text={pendingPrompt || ''} blocks={pendingImageUrls.map(u => ({ type: 'image' as const, content: u }))} t={t} />
                 {!liveStream && (
-                  <div className="flex items-center gap-1.5 justify-end mt-1 mb-5 mr-1">
-                    <span className="relative flex h-2 w-2">
-                      <span className="absolute h-full w-full rounded-full bg-fg-4/30 animate-ping" />
-                      <span className="relative h-2 w-2 rounded-full bg-fg-4/50" />
-                    </span>
-                    <span className="text-[11px] text-fg-5">{t('hub.sending')}</span>
+                  <div className="mt-3 mb-5 animate-in">
+                    <ThinkingDots className="text-fg-5" />
                   </div>
                 )}
               </div>
@@ -425,6 +469,8 @@ export const SessionPanel = memo(function SessionPanel({
         t={t}
         streamPhase={streamPhase}
         streamTaskId={streamTaskId}
+        queuedTaskId={queuedTaskId}
+        pendingPrompt={pendingPrompt}
         onRecall={handleRecallTask}
         onSteer={handleSteerTask}
         editDraft={editDraft}

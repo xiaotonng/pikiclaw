@@ -26,7 +26,7 @@ import {
   type UserStatus, type SessionQueryResult,
 } from '../../bot/session-hub.js';
 import { DASHBOARD_PAGINATION } from '../../core/constants.js';
-import { runtime } from '../runtime.js';
+import { runtime, type DashboardEvent } from '../runtime.js';
 import type { Bot } from '../../bot/bot.js';
 
 // ---------------------------------------------------------------------------
@@ -567,6 +567,44 @@ app.post('/api/session-hub/session/steer', async (c) => {
   } catch (e: any) {
     return c.json({ ok: false, error: e.message }, 500);
   }
+});
+
+// ==========================================================================
+// SSE: push events to dashboard clients
+// ==========================================================================
+
+app.get('/api/events', (c) => {
+  const stream = new ReadableStream({
+    start(controller) {
+      const encoder = new TextEncoder();
+      const send = (data: string) => {
+        try { controller.enqueue(encoder.encode(data)); } catch { /* client disconnected */ }
+      };
+
+      // SSE keepalive every 25s (avoid proxy/browser timeout)
+      const keepalive = setInterval(() => send(':keepalive\n\n'), 25_000);
+
+      const onEvent = (event: DashboardEvent) => {
+        send(`data: ${JSON.stringify(event)}\n\n`);
+      };
+
+      runtime.events.on('dashboard-event', onEvent);
+
+      // Cleanup when client disconnects
+      c.req.raw.signal.addEventListener('abort', () => {
+        clearInterval(keepalive);
+        runtime.events.off('dashboard-event', onEvent);
+      });
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+    },
+  });
 });
 
 export default app;

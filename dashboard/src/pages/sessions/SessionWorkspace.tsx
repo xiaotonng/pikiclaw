@@ -3,6 +3,7 @@ import { useStore } from '../../store';
 import { createT } from '../../i18n';
 import { api } from '../../api';
 import { loadWorkspaceSessions, prefetchSessionMessages } from '../../session-preload';
+import { useDashboardEvent } from '../../sse';
 import { cn, fmtRelative, getAgentMeta, shortenModel, sessionDisplayState, shouldPollSessionStreamState, sessionListContextText, sessionListDisplayText } from '../../utils';
 import { Badge, Dot, Spinner, Modal, ModalHeader, Button, IconPicker } from '../../components/ui';
 import { BrandIcon } from '../../components/BrandIcon';
@@ -10,6 +11,8 @@ import { DirBrowser } from '../../components/DirBrowser';
 import { PlanProgressCard, hasPlan } from '../../components/PlanProgressCard';
 import type { SessionInfo, WorkspaceEntry, DirEntry, StreamPlan, OpenTarget } from '../../types';
 import { InputComposer } from './InputComposer';
+import { UserBubble } from './TurnView';
+import { ThinkingDots } from './LivePreview';
 
 let sessionPanelModulePromise: Promise<typeof import('./SessionPanel')> | null = null;
 
@@ -22,7 +25,7 @@ const SessionPanel = lazy(async () => ({ default: (await preloadSessionPanel()).
 
 /* ── Constants ── */
 const PAGE_SIZE = 5;
-const SIDEBAR_POLL_MS = 5_000;
+const SIDEBAR_FALLBACK_POLL_MS = 30_000;
 const AUTO_PREFETCH_DELAY_MS = 240;
 const HOVER_PREFETCH_DELAY_MS = 120;
 const SESSION_PREFETCH_TURNS = 12;
@@ -193,6 +196,18 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     };
   }, [active, loadSessionsForWorkspace, loadingMap, sessionsMap, workspaces]);
 
+  // SSE-driven: refresh session list when server signals a change
+  useDashboardEvent(
+    active && initializedRef.current && workspaces.length > 0 ? 'sessions-changed' : null,
+    useCallback(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      for (const ws of workspaces) {
+        void loadSessionsForWorkspace(ws.path, { background: true, force: true });
+      }
+    }, [workspaces, loadSessionsForWorkspace]),
+  );
+
+  // Slow fallback poll (30s) in case SSE connection drops
   useEffect(() => {
     if (!active || !initializedRef.current || workspaces.length === 0) return;
     const tick = () => {
@@ -201,7 +216,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
         void loadSessionsForWorkspace(ws.path, { background: true, force: true });
       }
     };
-    const id = setInterval(tick, SIDEBAR_POLL_MS);
+    const id = setInterval(tick, SIDEBAR_FALLBACK_POLL_MS);
     return () => clearInterval(id);
   }, [active, workspaces, loadSessionsForWorkspace]);
 
@@ -273,8 +288,27 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   }, [loadSessionsForWorkspace]);
 
   /* ── New session — transition after InputComposer creates it ── */
-  const handleNewSessionCreated = useCallback((next: { agent: string; sessionId: string; workdir: string }) => {
+  const [newSessionPendingPrompt, setNewSessionPendingPrompt] = useState<string | null>(null);
+
+  const handleNewSessionCreated = useCallback((next: { agent: string; sessionId: string; workdir: string }, pendingPrompt?: string) => {
     warmSession({ agent: next.agent, sessionId: next.sessionId, runState: 'running' }, next.workdir);
+    // Optimistically add the new session to the sidebar so it appears immediately
+    setSessionsMap(prev => {
+      const existing = prev[next.workdir] || [];
+      const alreadyPresent = existing.some(s => s.sessionId === next.sessionId && s.agent === next.agent);
+      if (alreadyPresent) return prev;
+      const stub: SessionInfo = {
+        sessionId: next.sessionId,
+        agent: next.agent,
+        runState: 'running',
+        lastQuestion: pendingPrompt,
+        createdAt: new Date().toISOString(),
+        runUpdatedAt: new Date().toISOString(),
+      };
+      return { ...prev, [next.workdir]: [stub, ...existing] };
+    });
+    // Pass pending prompt to SessionPanel for seamless transition
+    setNewSessionPendingPrompt(pendingPrompt || null);
     setShowNewSession(null);
     startTransition(() => {
       setSelectedSession(next);
@@ -466,6 +500,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
               workdir={selectedSession.workdir}
               active={active}
               onSessionChange={handlePanelSessionChange}
+              initialPendingPrompt={newSessionPendingPrompt}
+              onPendingPromptConsumed={() => setNewSessionPendingPrompt(null)}
             />
           </Suspense>
         )}
@@ -554,10 +590,14 @@ function NewSessionView({
 }: {
   workdir: string;
   workspaceName: string;
-  onSessionCreated: (next: { agent: string; sessionId: string; workdir: string }) => void;
+  onSessionCreated: (next: { agent: string; sessionId: string; workdir: string }, pendingPrompt?: string) => void;
   onClose: () => void;
   t: (key: string) => string;
 }) {
+  const [pendingPrompt, setPendingPrompt] = useState<string | null>(null);
+  const [pendingImageUrls, setPendingImageUrls] = useState<string[]>([]);
+  const pendingRef = useRef<string | null>(null);
+
   const stubSession = useMemo((): SessionInfo => ({
     sessionId: '',
     agent: '',
@@ -565,7 +605,18 @@ function NewSessionView({
   }), []);
 
   const noop = useCallback(() => {}, []);
-  const noopSend = useCallback((_prompt: string, _imageUrls?: string[]) => {}, []);
+
+  const handleSendStart = useCallback((prompt: string, imageUrls?: string[]) => {
+    setPendingPrompt(prompt || null);
+    pendingRef.current = prompt || null;
+    setPendingImageUrls(imageUrls || []);
+  }, []);
+
+  const handleSessionCreated = useCallback((next: { agent: string; sessionId: string; workdir: string }) => {
+    onSessionCreated(next, pendingRef.current || undefined);
+  }, [onSessionCreated]);
+
+  const hasPending = !!pendingPrompt || pendingImageUrls.length > 0;
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
@@ -578,22 +629,35 @@ function NewSessionView({
           </svg>
           <span className="max-w-[80px] truncate">{workspaceName}</span>
         </span>
-        <Dot variant="idle" />
-        <button
-          onClick={onClose}
-          className="p-1 rounded text-fg-5 hover:text-fg-2 transition-colors"
-        >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
-          </svg>
-        </button>
+        <Dot variant={hasPending ? 'ok' : 'idle'} pulse={hasPending} />
+        {!hasPending && (
+          <button
+            onClick={onClose}
+            className="p-1 rounded text-fg-5 hover:text-fg-2 transition-colors"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        )}
       </div>
 
-      {/* ── Empty message area ── */}
-      <div className="flex-1 overflow-y-auto flex items-center justify-center">
-        <div className="text-center space-y-1.5">
-          <div className="text-[13px] text-fg-5">{t('hub.newSessionHint')}</div>
-        </div>
+      {/* ── Message area ── */}
+      <div className="flex-1 overflow-y-auto">
+        {hasPending ? (
+          <div className="max-w-[900px] mx-auto px-6 py-6 space-y-0">
+            <UserBubble text={pendingPrompt || ''} blocks={pendingImageUrls.map(u => ({ type: 'image' as const, content: u }))} t={t} />
+            <div className="mt-3 mb-4 animate-in">
+              <ThinkingDots className="text-fg-5" />
+            </div>
+          </div>
+        ) : (
+          <div className="flex items-center justify-center h-full">
+            <div className="text-center space-y-1.5">
+              <div className="text-[13px] text-fg-5">{t('hub.newSessionHint')}</div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* ── Input ── */}
@@ -601,8 +665,8 @@ function NewSessionView({
         session={stubSession}
         workdir={workdir}
         onStreamQueued={noop}
-        onSendStart={noopSend}
-        onSessionChange={onSessionCreated}
+        onSendStart={handleSendStart}
+        onSessionChange={handleSessionCreated}
         t={t}
         streamPhase={null}
       />
@@ -928,49 +992,44 @@ const RightPanel = memo(function RightPanel({
     });
   }, [hostApp, platform]);
 
+  // SSE-driven sidebar card stream state
+  const sessionKeyForSSE = session ? `${session.agent || ''}:${session.sessionId}` : null;
+  useDashboardEvent(
+    active && session ? 'stream-update' : null,
+    useCallback((event) => {
+      if (!sessionKeyForSSE || event.key !== sessionKeyForSSE) return;
+      const snap = event.snapshot as any;
+      if (!snap) { setStreamState(null); return; }
+      setStreamState({
+        phase: snap.phase,
+        activity: snap.activity,
+        thinking: snap.thinking,
+        plan: snap.plan ?? null,
+      });
+    }, [sessionKeyForSSE]),
+  );
+
+  // Initial fetch + slow fallback for sidebar card stream state
   useEffect(() => {
-    if (!active || !session) {
-      setStreamState(null);
-      return;
-    }
+    if (!active || !session) { setStreamState(null); return; }
     let mounted = true;
-    let prevPhase: 'queued' | 'streaming' | 'done' | null = null;
-    let pollTimer: ReturnType<typeof setInterval> | null = null;
-
-    const stopPolling = () => {
-      if (!pollTimer) return;
-      clearInterval(pollTimer);
-      pollTimer = null;
-    };
-
-    const ensurePolling = () => {
-      if (pollTimer) return;
-      pollTimer = setInterval(() => { void poll(); }, 1200);
-    };
-
-    const poll = async () => {
+    const fetchOnce = async () => {
       try {
         const res = await api.getSessionStreamState(session.agent || '', session.sessionId);
         if (!mounted) return;
-        const phase = res.state?.phase ?? null;
         setStreamState(res.state ? {
           phase: res.state.phase,
           activity: res.state.activity,
           thinking: res.state.thinking,
           plan: res.state.plan ?? null,
         } : null);
-        const keepPolling = shouldPollSessionStreamState(displayState, false, phase, prevPhase);
-        if (keepPolling) ensurePolling();
-        else stopPolling();
-        prevPhase = phase;
       } catch {}
     };
-    void poll();
-    if (shouldPollSessionStreamState(displayState, false, null, null)) ensurePolling();
-    return () => {
-      mounted = false;
-      stopPolling();
-    };
+    void fetchOnce();
+    // Fallback poll only if session appears running (covers SSE downtime)
+    if (displayState !== 'running') return;
+    const id = setInterval(fetchOnce, 10_000);
+    return () => { mounted = false; clearInterval(id); };
   }, [active, displayState, session, sessionAgent, sessionId]);
 
   const openTargetOptions = (platform === 'darwin'

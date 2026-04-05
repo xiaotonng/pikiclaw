@@ -275,6 +275,7 @@ export const api = {
 export interface StreamSnapshot {
   phase: 'queued' | 'streaming' | 'done';
   taskId: string;
+  queuedTaskId?: string;
   text?: string;
   thinking?: string;
   activity?: string;

@@ -17,7 +17,7 @@ import type { SessionInfo, AgentRuntimeStatus } from '../../types';
 
 type CascadeStep = 'closed' | 'agent' | 'model' | 'effort';
 
-export const InputComposer = memo(function InputComposer({ session, workdir, onStreamQueued, onSendStart, onSessionChange, t, streamPhase, streamTaskId, onRecall, onSteer, editDraft, onEditDraftConsumed }: {
+export const InputComposer = memo(function InputComposer({ session, workdir, onStreamQueued, onSendStart, onSessionChange, t, streamPhase, streamTaskId, queuedTaskId, pendingPrompt, onRecall, onSteer, editDraft, onEditDraftConsumed }: {
   session: SessionInfo;
   workdir: string;
   onStreamQueued: () => void;
@@ -26,6 +26,8 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   t: (k: string) => string;
   streamPhase: string | null;
   streamTaskId?: string | null;
+  queuedTaskId?: string | null;
+  pendingPrompt?: string | null;
   onRecall?: (taskId: string) => void;
   onSteer?: (taskId: string) => void;
   editDraft?: string | null;
@@ -115,12 +117,13 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
     setCascadePos({ left: rect.left, bottom: window.innerHeight - rect.top + 8 });
   }, [cascadeStep]);
 
-  // Clear local taskId once the task leaves the queue (started running or finished)
+  // Clear local taskId once the real snapshot has the info
   useEffect(() => {
-    if (localTaskId && streamPhase !== 'queued' && streamPhase !== null) {
-      setLocalTaskId(null);
+    if (localTaskId) {
+      if (queuedTaskId) setLocalTaskId(null);
+      else if (streamPhase !== null && streamPhase !== 'queued') setLocalTaskId(null);
     }
-  }, [streamPhase, localTaskId]);
+  }, [streamPhase, localTaskId, queuedTaskId]);
 
   // Auto-resize textarea
   useEffect(() => {
@@ -204,21 +207,33 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
     workdir,
   ]);
 
-  const effectiveTaskId = streamTaskId || localTaskId;
+  // Task bar state — derived from snapshot + optimistic local state
+  const isActiveStream = streamPhase === 'streaming';
+  const effectiveQueuedId = queuedTaskId
+    || (streamPhase === 'queued' ? (streamTaskId || localTaskId) : null)
+    || (!streamPhase && localTaskId ? localTaskId : null);
+  const hasQueuedTask = !!effectiveQueuedId;
+  const showTaskBar = sending || hasQueuedTask || isActiveStream;
 
   const handleRecall = useCallback(() => {
-    const tid = streamTaskId || localTaskId;
-    if (!tid) return;
-    onRecall?.(tid);
-    setLocalTaskId(null);
-  }, [streamTaskId, localTaskId, onRecall]);
+    if (hasQueuedTask && effectiveQueuedId) {
+      onRecall?.(effectiveQueuedId);
+      setLocalTaskId(null);
+    } else if (isActiveStream && streamTaskId) {
+      onRecall?.(streamTaskId);
+    }
+  }, [hasQueuedTask, effectiveQueuedId, isActiveStream, streamTaskId, onRecall]);
+
+  const handleStop = useCallback(() => {
+    if (streamTaskId) onRecall?.(streamTaskId);
+  }, [streamTaskId, onRecall]);
 
   const handleSteer = useCallback(() => {
-    const tid = streamTaskId || localTaskId;
-    if (!tid) return;
-    onSteer?.(tid);
-    setLocalTaskId(null);
-  }, [streamTaskId, localTaskId, onSteer]);
+    if (effectiveQueuedId) {
+      onSteer?.(effectiveQueuedId);
+      setLocalTaskId(null);
+    }
+  }, [effectiveQueuedId, onSteer]);
 
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
@@ -291,20 +306,71 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
 
   return (
     <div className="shrink-0" ref={composerRef}>
-      {/* Queue banner — show from poll state OR optimistically after send API returns */}
-      {(streamPhase === 'queued' || (!!localTaskId && !streamPhase)) && (
-        <div className="flex items-center gap-2 px-5 py-2 border-t border-edge/40 bg-warn/[0.04]">
-          <span className="h-1.5 w-1.5 rounded-full bg-warn animate-pulse" />
-          <span className="text-[11px] text-warn font-medium">{t('hub.queued')}</span>
-          <div className="ml-auto flex gap-1">
-            <button onClick={handleRecall} disabled={!effectiveTaskId} className="px-2.5 py-1 rounded-md text-[11px] font-medium text-fg-4 hover:text-err hover:bg-err/10 transition-colors disabled:opacity-30 disabled:pointer-events-none">{t('hub.recall')}</button>
-            <button onClick={handleSteer} disabled={!effectiveTaskId} className="px-2.5 py-1 rounded-md text-[11px] font-medium text-fg-4 hover:text-blue-400 hover:bg-blue-400/10 transition-colors disabled:opacity-30 disabled:pointer-events-none">{t('hub.steer')}</button>
-          </div>
-        </div>
-      )}
-
       {/* Floating centered input area */}
       <div className="max-w-[680px] mx-auto px-5 pb-4 pt-2">
+        {/* Task control bar — Codex-style, positioned above the input box */}
+        {showTaskBar && (
+          <div className={cn(
+            'mb-2 flex items-center gap-2.5 rounded-lg border px-3.5 py-2 transition-colors',
+            hasQueuedTask ? 'border-warn/25 bg-warn/[0.04]'
+              : isActiveStream ? 'border-primary/20 bg-primary/[0.04]'
+              : 'border-edge/30 bg-panel-alt/20',
+          )}>
+            {hasQueuedTask ? (
+              <span className="h-1.5 w-1.5 rounded-full bg-warn animate-pulse shrink-0" />
+            ) : isActiveStream ? (
+              <Spinner className="h-3 w-3 text-primary shrink-0" />
+            ) : (
+              <Spinner className="h-3 w-3 text-fg-5/50 shrink-0" />
+            )}
+            <div className="flex-1 min-w-0 flex items-baseline gap-2">
+              <span className={cn(
+                'text-[12px] font-medium shrink-0',
+                hasQueuedTask ? 'text-warn' : isActiveStream ? 'text-fg-3' : 'text-fg-5',
+              )}>
+                {hasQueuedTask ? t('hub.queued') : isActiveStream ? t('hub.running') : t('hub.sending')}
+              </span>
+              {hasQueuedTask && pendingPrompt && (
+                <span className="text-[11px] text-fg-5/60 truncate">{pendingPrompt}</span>
+              )}
+            </div>
+            <div className="flex items-center gap-1 shrink-0">
+              {hasQueuedTask && (
+                <>
+                  <button
+                    onClick={handleSteer}
+                    disabled={!effectiveQueuedId}
+                    title={t('hub.steerHint')}
+                    className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-fg-4 hover:text-blue-400 hover:bg-blue-400/10 transition-colors disabled:opacity-30 disabled:pointer-events-none"
+                  >
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polyline points="9 6 15 12 9 18" /></svg>
+                    {t('hub.steer')}
+                  </button>
+                  <button
+                    onClick={handleRecall}
+                    disabled={!effectiveQueuedId}
+                    title={t('hub.recallHint')}
+                    className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-fg-4 hover:text-err hover:bg-err/10 transition-colors disabled:opacity-30 disabled:pointer-events-none"
+                  >
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M18 6 6 18" /><path d="M6 6l12 12" /></svg>
+                    {t('hub.recall')}
+                  </button>
+                </>
+              )}
+              {isActiveStream && !hasQueuedTask && (
+                <button
+                  onClick={handleStop}
+                  disabled={!streamTaskId}
+                  title={t('hub.stopHint')}
+                  className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-fg-4 hover:text-err hover:bg-err/10 transition-colors disabled:opacity-30 disabled:pointer-events-none"
+                >
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2" /></svg>
+                  {t('hub.stop')}
+                </button>
+              )}
+            </div>
+          </div>
+        )}
         <div className="relative rounded-xl border border-edge/40 bg-panel shadow-sm transition-[border-color,box-shadow] duration-200 focus-within:border-fg-5/40 focus-within:shadow-md">
           <input
             ref={fileInputRef}

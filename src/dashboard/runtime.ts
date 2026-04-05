@@ -6,6 +6,7 @@
  * channel state caching, and validated setup state construction.
  */
 
+import { EventEmitter } from 'node:events';
 import type { Bot } from '../bot/bot.js';
 import type { Agent, AgentDetectOptions } from '../agent/index.js';
 import type { UserConfig } from '../core/config/user-config.js';
@@ -97,12 +98,40 @@ function buildLocalChannelStates(config: Partial<UserConfig>): NonNullable<Setup
 }
 
 // ---------------------------------------------------------------------------
+// Dashboard event bus — pushes changes to SSE clients
+// ---------------------------------------------------------------------------
+
+/**
+ * Events emitted on the dashboard event bus.
+ *
+ * - `stream-update`    — a stream snapshot changed (new text, phase transition)
+ * - `sessions-changed` — session list may have changed (stream done, status update)
+ */
+export type DashboardEventType = 'stream-update' | 'sessions-changed';
+
+export interface DashboardEvent {
+  type: DashboardEventType;
+  /** agent:sessionId key for stream events, or workdir for session-list events */
+  key?: string;
+  /** Inline snapshot for stream-update (avoids a round-trip fetch) */
+  snapshot?: unknown;
+}
+
+// ---------------------------------------------------------------------------
 // Runtime singleton
 // ---------------------------------------------------------------------------
 
 class Runtime {
   private botRef: Bot | null = null;
   readonly runtimePrefs: RuntimePrefs = { models: {}, efforts: {} };
+
+  /** Dashboard event bus — SSE connections subscribe to this. */
+  readonly events = new EventEmitter();
+
+  /** Emit a dashboard event to all connected SSE clients. */
+  emitDashboardEvent(event: DashboardEvent): void {
+    this.events.emit('dashboard-event', event);
+  }
   private channelStateCache: {
     key: string;
     expiresAt: number;
@@ -130,6 +159,15 @@ class Runtime {
     for (const [agent, effort] of Object.entries(this.runtimePrefs.efforts)) {
       if (this.isAgent(agent) && agent !== 'gemini' && typeof effort === 'string' && effort.trim()) bot.setEffortForAgent(agent, effort);
     }
+    // Wire stream snapshots → dashboard SSE
+    bot.onStreamSnapshot((sessionKey, snapshot) => {
+      this.emitDashboardEvent({ type: 'stream-update', key: sessionKey, snapshot });
+      // Phase transitions that affect the session list
+      const phase = snapshot && typeof snapshot === 'object' ? (snapshot as any).phase : null;
+      if (phase === 'done' || phase === 'queued' || !snapshot) {
+        this.emitDashboardEvent({ type: 'sessions-changed', key: sessionKey });
+      }
+    });
   }
 
   // -- Type guards --

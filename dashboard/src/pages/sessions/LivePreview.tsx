@@ -1,7 +1,7 @@
 import { useState, useRef, useLayoutEffect, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { CollapsibleCard, CountBadge, Spinner } from '../../components/ui';
+import { CollapsibleCard, CountBadge } from '../../components/ui';
 import { PlanProgressCard, hasPlan } from '../../components/PlanProgressCard';
 import { mdComponents } from './markdown';
 import { lastNLines } from './utils';
@@ -87,23 +87,31 @@ export function LivePreview({
         </CollapsibleCard>
       )}
 
-      {/* Response text with typing cursor */}
+      {/* Response text with thinking dots */}
       {stream.text && (
         <div className="session-md text-[13.5px] leading-[1.75] text-fg-2">
           <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
             {stream.text}
           </ReactMarkdown>
-          {stream.phase === 'streaming' && <span className="inline-block w-[2px] h-[16px] bg-fg-3 animate-pulse ml-0.5 align-text-bottom" />}
+          {stream.phase === 'streaming' && <ThinkingDots className="ml-1 inline-flex align-text-bottom text-fg-4" />}
         </div>
       )}
 
-      {/* Waiting state — no content yet */}
+      {/* Waiting state — just a dots placeholder; status is shown in the task bar */}
       {!showPlan && !showBody && (
-        <div className="flex items-center gap-2.5 py-1">
-          <Spinner className="h-3.5 w-3.5 text-fg-5" />
-          <span className="text-[12px] text-fg-5">{t('status.running')}</span>
+        <div className="py-1">
+          <ThinkingDots className="text-fg-5" />
         </div>
       )}
     </div>
+  );
+}
+
+/** Animated ··· indicator for streaming / thinking states */
+export function ThinkingDots({ className }: { className?: string }) {
+  return (
+    <span className={`thinking-dots inline-flex items-center gap-[3px] ${className || ''}`}>
+      <span /><span /><span />
+    </span>
   );
 }

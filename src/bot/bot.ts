@@ -144,6 +144,7 @@ export type StreamEvent =
 export interface StreamSnapshot {
   phase: 'queued' | 'streaming' | 'done';
   taskId: string;
+  queuedTaskId?: string;
   text?: string;
   thinking?: string;
   activity?: string;
@@ -256,6 +257,39 @@ export class Bot {
     return this.streamSnapshots.get(sessionKey) ?? null;
   }
 
+  /* ── Dashboard SSE push (injected by dashboard layer to avoid circular import) ── */
+  private _onStreamSnapshot: ((sessionKey: string, snapshot: StreamSnapshot | null) => void) | null = null;
+  private streamPushTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private streamPushPending = new Map<string, boolean>();
+
+  /** Called by the dashboard layer to subscribe to stream snapshot changes. */
+  onStreamSnapshot(cb: (sessionKey: string, snapshot: StreamSnapshot | null) => void): void {
+    this._onStreamSnapshot = cb;
+  }
+
+  private pushSnapshotToSSE(sessionKey: string, immediate: boolean) {
+    if (!this._onStreamSnapshot) return;
+    const snap = this.streamSnapshots.get(sessionKey) ?? null;
+    const emit = () => this._onStreamSnapshot!(sessionKey, snap ? { ...snap } : null);
+    if (immediate) {
+      const timer = this.streamPushTimers.get(sessionKey);
+      if (timer) { clearTimeout(timer); this.streamPushTimers.delete(sessionKey); }
+      this.streamPushPending.delete(sessionKey);
+      emit();
+    } else {
+      // Coalesce: if a timer is pending, just mark dirty
+      this.streamPushPending.set(sessionKey, true);
+      if (this.streamPushTimers.has(sessionKey)) return;
+      this.streamPushTimers.set(sessionKey, setTimeout(() => {
+        this.streamPushTimers.delete(sessionKey);
+        if (this.streamPushPending.get(sessionKey)) {
+          this.streamPushPending.delete(sessionKey);
+          emit();
+        }
+      }, 200));
+    }
+  }
+
   /** Emit a streaming event — updates the polling snapshot. */
   emitStream(sessionKey: string, event: StreamEvent) {
     // Clear any pending cleanup timer
@@ -264,9 +298,17 @@ export class Bot {
 
     const now = Date.now();
     switch (event.type) {
-      case 'queued':
-        this.streamSnapshots.set(sessionKey, { phase: 'queued', taskId: event.taskId, updatedAt: now });
+      case 'queued': {
+        const existing = this.streamSnapshots.get(sessionKey);
+        if (existing && (existing.phase === 'streaming' || existing.phase === 'done')) {
+          // Don't overwrite active stream — annotate with queued task info
+          existing.queuedTaskId = event.taskId;
+          existing.updatedAt = now;
+        } else {
+          this.streamSnapshots.set(sessionKey, { phase: 'queued', taskId: event.taskId, updatedAt: now });
+        }
         break;
+      }
       case 'start':
         this.streamSnapshots.set(sessionKey, {
           phase: 'streaming', taskId: event.taskId,
@@ -295,6 +337,7 @@ export class Bot {
           activity: prev?.activity || '',
           error: event.error,
           plan: prev?.plan ?? null,
+          queuedTaskId: prev?.queuedTaskId,
           updatedAt: now,
         });
         // Auto-clean 'done' snapshot after 10s so stale state doesn't linger
@@ -304,10 +347,22 @@ export class Bot {
         }, 10_000));
         break;
       }
-      case 'cancelled':
-        this.streamSnapshots.delete(sessionKey);
+      case 'cancelled': {
+        const snap = this.streamSnapshots.get(sessionKey);
+        if (snap && snap.queuedTaskId === event.taskId) {
+          // Cancelled the queued task — keep the running/done snapshot
+          delete snap.queuedTaskId;
+        } else {
+          this.streamSnapshots.delete(sessionKey);
+        }
         break;
+      }
     }
+
+    // Push to dashboard SSE — throttle text events, push everything else immediately
+    try {
+      this.pushSnapshotToSSE(sessionKey, event.type !== 'text');
+    } catch { /* dashboard not loaded yet — ignore */ }
   }
 
   private keepAliveProc: ReturnType<typeof spawn> | null = null;
