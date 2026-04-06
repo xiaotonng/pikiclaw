@@ -1172,6 +1172,15 @@ export class Bot {
     this.log(`effort switched to ${effort} for ${cs.agent} chat=${chatId}`);
   }
 
+  switchPermissionModeForChat(chatId: ChatId, mode: string) {
+    const cs = this.chat(chatId);
+    if (cs.agent === 'claude') {
+      this.agentConfigs.claude.permissionMode = mode;
+      this.resetChatConversation(cs);
+      this.log(`permission mode switched to ${mode} for claude chat=${chatId}`);
+    }
+  }
+
   modelForAgent(agent: Agent): string {
     return this.agentConfigs[agent]?.model || '';
   }
@@ -1254,12 +1263,33 @@ export class Bot {
     let disk: { used: string; total: string; percent: string } | null = null;
     const battery = getHostBatteryData();
     try {
-      const df = execSync(`df -h "${this.workdir}" | tail -1`, { encoding: 'utf-8', timeout: 3000 }).trim().split(/\s+/);
-      if (df.length >= 5) disk = { used: df[2], total: df[1], percent: df[4] };
+      if (process.platform === 'win32') {
+        const driveLetter = this.workdir.charAt(0).toUpperCase();
+        const psOut = execSync(
+          `powershell -NoProfile -Command "Get-PSDrive -Name ${driveLetter} | ForEach-Object { [PSCustomObject]@{Used=$_.Used;Free=$_.Free} } | ConvertTo-Json"`,
+          { encoding: 'utf-8', timeout: 5000 },
+        ).trim();
+        const info: { Used: number | null; Free: number | null } = JSON.parse(psOut);
+        if (info.Used != null && info.Free != null) {
+          const used = Number(info.Used), free = Number(info.Free), total = used + free;
+          const fmt = (b: number) => b >= 1e12 ? `${(b / 1e12).toFixed(1)}T` : b >= 1e9 ? `${(b / 1e9).toFixed(1)}G` : b >= 1e6 ? `${(b / 1e6).toFixed(1)}M` : `${Math.round(b / 1e3)}K`;
+          disk = { used: fmt(used), total: fmt(total), percent: `${Math.round(used / total * 100)}%` };
+        }
+      } else {
+        const df = execSync(`df -h "${this.workdir}" | tail -1`, { encoding: 'utf-8', timeout: 3000 }).trim().split(/\s+/);
+        if (df.length >= 5) disk = { used: df[2], total: df[1], percent: df[4] };
+      }
     } catch {}
     let topProcs: string[] = [];
     try {
-      topProcs = execSync(`ps -eo pid,pcpu,pmem,comm --sort=-pcpu 2>/dev/null | head -6 || ps -eo pid,%cpu,%mem,comm -r 2>/dev/null | head -6`, { encoding: 'utf-8', timeout: 3000 }).trim().split('\n');
+      if (process.platform === 'win32') {
+        topProcs = execSync(
+          `powershell -NoProfile -Command "Get-Process | Sort-Object -Property CPU -Descending | Select-Object -First 5 | ForEach-Object { \\"$($_.Id) $([math]::Round($_.CPU)) $([math]::Round($_.WorkingSet64/1MB)) $($_.ProcessName)\\"" }"`,
+          { encoding: 'utf-8', timeout: 5000 },
+        ).trim().split('\n');
+      } else {
+        topProcs = execSync(`ps -eo pid,pcpu,pmem,comm --sort=-pcpu 2>/dev/null | head -6 || ps -eo pid,%cpu,%mem,comm -r 2>/dev/null | head -6`, { encoding: 'utf-8', timeout: 3000 }).trim().split('\n');
+      }
     } catch {}
     const mem = process.memoryUsage();
     return {

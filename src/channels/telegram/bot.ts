@@ -43,6 +43,7 @@ import {
 import {
   buildAgentsCommandView,
   buildModelsCommandView,
+  buildModeCommandView,
   buildSessionsCommandView,
   buildSkillsCommandView,
   decodeCommandAction,
@@ -436,6 +437,10 @@ export class TelegramBot extends Bot {
 
   private async cmdModels(ctx: TgContext) {
     await this.sendCommandView(ctx, await buildModelsCommandView(this, ctx.chatId));
+  }
+
+  private async cmdMode(ctx: TgContext) {
+    await this.sendCommandView(ctx, buildModeCommandView(this, ctx.chatId));
   }
 
   private async cmdRestart(ctx: TgContext) {
@@ -1018,6 +1023,7 @@ export class TelegramBot extends Bot {
         case 'sessions': await this.cmdSessions(ctx); return;
         case 'agents':   await this.cmdAgents(ctx); return;
         case 'models':   await this.cmdModels(ctx); return;
+        case 'mode':     await this.cmdMode(ctx); return;
         case 'skills':   await this.cmdSkills(ctx); return;
         case 'stop':     await this.cmdStop(ctx); return;
         case 'status':   await this.cmdStatus(ctx); return;

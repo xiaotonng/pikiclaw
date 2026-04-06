@@ -69,8 +69,11 @@ async function runDaemon(userArgs: string[]): Promise<never> {
     clearRestartStateFile(restartStateFile);
     const { bin, args } = buildRestartCommand(forwardedArgs, restartCmd);
     daemonLog(`exec: ${bin} ${args.join(' ')}`);
-    return spawn(bin, args, {
+    // npx/npx.cmd needs shell resolution; node.exe does not
+    const needsShell = process.platform === 'win32' && !bin.endsWith('node.exe');
+    return spawn(needsShell ? `"${bin}"` : bin, args, {
       stdio: 'inherit',
+      shell: needsShell || undefined,
       env: {
         ...process.env,
         ...extraEnv,

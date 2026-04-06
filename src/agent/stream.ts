@@ -107,7 +107,8 @@ function resolveAgentBinPath(cmd: string): string | null {
 
 function readAgentVersion(binPath: string, timeoutMs: number): string | null {
   try {
-    return execSync(`${Q(binPath)} --version 2>/dev/null`, {
+    const devnull = process.platform === 'win32' ? '2>nul' : '2>/dev/null';
+    return execSync(`${Q(binPath)} --version ${devnull}`, {
       encoding: 'utf-8',
       timeout: Math.max(250, timeoutMs),
     }).trim().split('\n')[0] || null;
