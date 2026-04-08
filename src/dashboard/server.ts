@@ -2,16 +2,18 @@
  * Hono-based dashboard HTTP server: static files and API routes.
  */
 
+import http from 'node:http';
 import { Hono } from 'hono';
-import { serve } from '@hono/node-server';
+import { getRequestListener } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import path from 'node:path';
 import fs from 'node:fs';
 import { exec } from 'node:child_process';
+import { WebSocketServer, type WebSocket } from 'ws';
 import configRoutes from './routes/config.js';
 import agentRoutes, { preloadAgentStatus } from './routes/agents.js';
 import sessionRoutes from './routes/sessions.js';
-import { runtime } from './runtime.js';
+import { runtime, type DashboardEvent } from './runtime.js';
 import { registerProcessRuntime } from '../core/process-control.js';
 import { VERSION } from '../core/version.js';
 import type { Bot } from '../bot/bot.js';
@@ -38,6 +40,71 @@ export interface DashboardServer {
 // ---------------------------------------------------------------------------
 
 const DASHBOARD_PORT_RETRY_LIMIT = 10;
+const WS_KEEPALIVE_MS = 25_000;
+
+// ---------------------------------------------------------------------------
+// WebSocket push layer (replaces SSE)
+// ---------------------------------------------------------------------------
+
+function attachWebSocketServer(httpServer: http.Server) {
+  const wss = new WebSocketServer({ noServer: true });
+  const clients = new Set<WebSocket>();
+
+  httpServer.on('upgrade', (req, socket, head) => {
+    const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+    if (url.pathname !== '/ws') {
+      socket.destroy();
+      return;
+    }
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      wss.emit('connection', ws, req);
+    });
+  });
+
+  wss.on('connection', (ws) => {
+    clients.add(ws);
+
+    const keepalive = setInterval(() => {
+      if (ws.readyState === ws.OPEN) ws.ping();
+    }, WS_KEEPALIVE_MS);
+
+    ws.on('message', (raw) => {
+      try {
+        const msg = JSON.parse(String(raw));
+        if (msg?.type === 'ping') {
+          ws.send(JSON.stringify({ type: 'pong' }));
+        }
+      } catch { /* ignore malformed messages */ }
+    });
+
+    ws.on('close', () => {
+      clients.delete(ws);
+      clearInterval(keepalive);
+    });
+
+    ws.on('error', () => {
+      clients.delete(ws);
+      clearInterval(keepalive);
+    });
+  });
+
+  const onEvent = (event: DashboardEvent) => {
+    const data = JSON.stringify(event);
+    for (const ws of clients) {
+      if (ws.readyState === ws.OPEN) {
+        ws.send(data);
+      }
+    }
+  };
+  runtime.events.on('dashboard-event', onEvent);
+
+  httpServer.on('close', () => {
+    runtime.events.off('dashboard-event', onEvent);
+    for (const ws of clients) ws.close();
+    clients.clear();
+    wss.close();
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Server
@@ -85,7 +152,7 @@ export async function startDashboard(opts: DashboardOptions = {}): Promise<Dashb
   });
 
   // -- Process runtime registration --
-  let nodeServer: ReturnType<typeof serve> | null = null;
+  let nodeServer: http.Server | null = null;
 
   const unregisterProcessRuntime = registerProcessRuntime({
     label: 'dashboard',
@@ -111,14 +178,20 @@ export async function startDashboard(opts: DashboardOptions = {}): Promise<Dashb
 
     function tryListen(port: number) {
       try {
-        const server = serve({
-          fetch: app.fetch,
-          port,
-        }, (info) => {
+        // Create HTTP server manually so we can attach WebSocket upgrade handler
+        // before Hono's request listener consumes the connection.
+        const requestListener = getRequestListener(app.fetch);
+        const server = http.createServer(requestListener);
+
+        // Attach WebSocket BEFORE listening — ensures upgrade events are captured
+        attachWebSocketServer(server);
+
+        server.listen(port, () => {
           if (settled) return;
           settled = true;
           nodeServer = server;
-          const actualPort = info.port;
+          const addr = server.address();
+          const actualPort = typeof addr === 'object' && addr ? addr.port : port;
           const dashUrl = `http://localhost:${actualPort}`;
           const ts = new Date().toTimeString().slice(0, 8);
           process.stdout.write(`[pikiclaw ${ts}] dashboard: ${dashUrl}\n`);

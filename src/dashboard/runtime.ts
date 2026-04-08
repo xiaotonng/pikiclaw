@@ -98,7 +98,7 @@ function buildLocalChannelStates(config: Partial<UserConfig>): NonNullable<Setup
 }
 
 // ---------------------------------------------------------------------------
-// Dashboard event bus — pushes changes to SSE clients
+// Dashboard event bus — pushes changes to WebSocket clients
 // ---------------------------------------------------------------------------
 
 /**
@@ -125,10 +125,10 @@ class Runtime {
   private botRef: Bot | null = null;
   readonly runtimePrefs: RuntimePrefs = { models: {}, efforts: {} };
 
-  /** Dashboard event bus — SSE connections subscribe to this. */
+  /** Dashboard event bus — WebSocket connections subscribe to this. */
   readonly events = new EventEmitter();
 
-  /** Emit a dashboard event to all connected SSE clients. */
+  /** Emit a dashboard event to all connected WebSocket clients. */
   emitDashboardEvent(event: DashboardEvent): void {
     this.events.emit('dashboard-event', event);
   }
@@ -159,7 +159,7 @@ class Runtime {
     for (const [agent, effort] of Object.entries(this.runtimePrefs.efforts)) {
       if (this.isAgent(agent) && agent !== 'gemini' && typeof effort === 'string' && effort.trim()) bot.setEffortForAgent(agent, effort);
     }
-    // Wire stream snapshots → dashboard SSE
+    // Wire stream snapshots → dashboard WebSocket
     bot.onStreamSnapshot((sessionKey, snapshot) => {
       this.emitDashboardEvent({ type: 'stream-update', key: sessionKey, snapshot });
       // Phase transitions that affect the session list

@@ -5,7 +5,7 @@ import type { SessionHubResult, SessionMessagesResult } from './types';
 const WORKSPACE_CACHE_TTL_MS = 5_000;
 const MESSAGE_CACHE_TTL_MS = 15_000;
 const MAX_WORKSPACE_CACHE_ENTRIES = 8;
-const MAX_MESSAGE_CACHE_ENTRIES = 10;
+const MAX_MESSAGE_CACHE_ENTRIES = 30;
 const MESSAGE_PREFETCH_CONCURRENCY = 1;
 
 interface CacheEntry<T> {

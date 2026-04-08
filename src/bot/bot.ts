@@ -286,7 +286,7 @@ export class Bot {
           this.streamPushPending.delete(sessionKey);
           emit();
         }
-      }, 200));
+      }, 80));
     }
   }
 
