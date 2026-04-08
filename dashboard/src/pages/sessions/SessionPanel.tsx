@@ -3,8 +3,8 @@ import { useStore } from '../../store';
 import { createT } from '../../i18n';
 import { api } from '../../api';
 import { loadSessionMessages, peekSessionMessages } from '../../session-preload';
-import { useDashboardEvent, type DashboardEvent } from '../../sse';
-import { cn, fmtRelative, getAgentMeta, shortenModel, sessionDisplayState, shouldPollSessionStreamState } from '../../utils';
+import { useDashboardEvent, useDashboardReconnect, type DashboardEvent } from '../../ws';
+import { cn, fmtRelative, getAgentMeta, shortenModel, sessionDisplayState } from '../../utils';
 import { Dot, Spinner } from '../../components/ui';
 import { BrandIcon } from '../../components/BrandIcon';
 import { hasPlan } from '../../components/PlanProgressCard';
@@ -23,6 +23,18 @@ import {
 const SESSION_PAGE_TURNS = 12;
 const TOP_LOAD_THRESHOLD_PX = 160;
 const BOTTOM_STICK_THRESHOLD_PX = 96;
+
+/* ── Stale-while-revalidate: persist last-known history across mount/unmount ── */
+const MAX_HISTORY_SNAPSHOTS = 20;
+const historySnapshots = new Map<string, TurnHistoryWindow>();
+function snapshotKey(agent: string, sessionId: string) { return `${agent}:${sessionId}`; }
+function saveHistorySnapshot(key: string, h: TurnHistoryWindow) {
+  historySnapshots.delete(key); // refresh LRU position
+  historySnapshots.set(key, h);
+  while (historySnapshots.size > MAX_HISTORY_SNAPSHOTS) {
+    historySnapshots.delete(historySnapshots.keys().next().value!);
+  }
+}
 
 /* ═══════════════════════════════════════════════════════════════
    SessionPanel
@@ -157,18 +169,18 @@ export const SessionPanel = memo(function SessionPanel({
   const applyStreamSnapshot = useCallback((state: any | null) => {
     if (!state) {
       const prev = prevPhaseRef.current;
+      setLiveStream(null);
+      setStreaming(false);
       if (prev === 'streaming') {
-        setStreaming(false);
         if (stickToBottomRef.current) scrollToBottomRef.current = true;
         void loadLatestTurns({ keepOlder: true, force: true }).then(loaded => {
-          if (loaded) { clearPending(); setLiveStream(null); }
+          if (loaded) clearPending();
         });
       } else if (prev === 'done') {
         clearPending();
-        setLiveStream(null);
       } else if (prev === null && localStreamPendingRef.current) {
         void loadLatestTurns({ keepOlder: true, force: true }).then(loaded => {
-          if (loaded) { clearPending(); setLiveStream(null); }
+          if (loaded) clearPending();
         });
       }
       localStreamPendingRef.current = false;
@@ -195,19 +207,14 @@ export const SessionPanel = memo(function SessionPanel({
       setLiveStream(null);
       setStreaming(false);
     } else if (state.phase === 'done') {
-      setLiveStream((hasPlan(state.plan) || state.text || state.thinking || state.activity) ? {
-        phase: 'done',
-        text: state.text || '',
-        thinking: state.thinking || '',
-        activity: state.activity || '',
-        plan: state.plan ?? null,
-      } : null);
+      // Clear liveStream immediately to prevent duplicate rendering with refreshed turns.
+      // The pending prompt + ThinkingDots serves as a transition indicator until turns load.
+      setLiveStream(null);
       setStreaming(false);
       if (prevPhaseRef.current !== 'done') {
         if (stickToBottomRef.current) scrollToBottomRef.current = true;
         void loadLatestTurns({ keepOlder: true, force: true }).then(loaded => {
           if (loaded && !state.queuedTaskId) clearPending();
-          setLiveStream(null);
         });
       }
       if (!state.queuedTaskId) localStreamPendingRef.current = false;
@@ -234,6 +241,7 @@ export const SessionPanel = memo(function SessionPanel({
     try { await api.steerSession(taskId); } catch {}
   }, []);
 
+  const sk = snapshotKey(session.agent || '', session.sessionId);
   useEffect(() => {
     let c = false;
     const cachedLatest = peekSessionMessages({
@@ -244,18 +252,29 @@ export const SessionPanel = memo(function SessionPanel({
       turnOffset: 0,
       turnLimit: SESSION_PAGE_TURNS,
     }, { allowStale: true });
-    setLoading(true);
-    setHistory(cachedLatest?.ok ? normalizeTurnHistory(cachedLatest) : null);
+    const isNewSession = !!initialPendingPrompt && !initialPendingConsumedRef.current;
+    // Stale-while-revalidate: API cache → history snapshot → loading spinner
+    const initialHistory = cachedLatest?.ok
+      ? normalizeTurnHistory(cachedLatest)
+      : historySnapshots.get(sk) || null;
+    setLoading(isNewSession ? false : !initialHistory);
+    setHistory(initialHistory);
     setLiveStream(null);
     setStreaming(false);
     setStreamPhase(null);
     setQueuedTaskId(null);
     stickToBottomRef.current = true;
     scrollToBottomRef.current = true;
-    if (cachedLatest?.ok) setLoading(false);
-    loadLatestTurns({ keepOlder: false, force: !!cachedLatest?.ok }).finally(() => { if (!c) setLoading(false); });
+    if (!isNewSession) {
+      loadLatestTurns({ keepOlder: false, force: true }).finally(() => { if (!c) setLoading(false); });
+    }
     return () => { c = true; };
-  }, [loadLatestTurns, session.agent, session.sessionId, workdir]);
+  }, [loadLatestTurns, session.agent, session.sessionId, workdir, sk]);
+
+  // Persist history snapshot for stale-while-revalidate on re-mount
+  useEffect(() => {
+    if (history && history.turns.length > 0) saveHistorySnapshot(sk, history);
+  }, [sk, history]);
 
   /* ── Poll stream state — works identically across multiple tabs ── */
   useEffect(() => {
@@ -275,56 +294,24 @@ export const SessionPanel = memo(function SessionPanel({
     }, [applyStreamSnapshot]),
   );
 
-  /* ── Poll fallback — initial fetch + consistency check (SSE handles fast updates) ── */
+  /* ── Initial stream-state fetch (WS handles all subsequent updates) ── */
   useEffect(() => {
     if (!active) return;
     let mounted = true;
-    let pollTimer: ReturnType<typeof setInterval> | null = null;
+    void api.getSessionStreamState(session.agent || '', session.sessionId).then(res => {
+      if (mounted) applyStreamSnapshot(res.state);
+    }).catch(() => {});
+    return () => { mounted = false; };
+  }, [active, applyStreamSnapshot, session.agent, session.sessionId, streamPollNonce]);
 
-    const stopPolling = () => {
-      if (!pollTimer) return;
-      clearInterval(pollTimer);
-      pollTimer = null;
-    };
-
-    const ensurePolling = () => {
-      if (pollTimer) return;
-      // SSE handles rapid updates; polling is a slow fallback at 5s
-      pollTimer = setInterval(() => { void poll(); }, 5000);
-    };
-
-    const poll = async () => {
-      if (!mounted) return;
-      try {
-        const res = await api.getSessionStreamState(session.agent || '', session.sessionId);
-        if (!mounted) return;
-        const state = res.state;
-        const phase = state?.phase ?? null;
-        const keepPolling = shouldPollSessionStreamState(displayState, localStreamPendingRef.current, phase, prevPhaseRef.current);
-        applyStreamSnapshot(state);
-        if (keepPolling) ensurePolling();
-        else stopPolling();
-      } catch {
-        // Network error — ignore, will retry next tick
-      }
-    };
-
-    if (shouldPollSessionStreamState(displayState, localStreamPendingRef.current, null, null)) ensurePolling();
-    poll(); // initial poll
-    return () => {
-      mounted = false;
-      stopPolling();
-    };
-  }, [active, applyStreamSnapshot, displayState, session.agent, session.sessionId, streamPollNonce]);
-
-  /* ── Fallback: poll messages for IM-triggered sessions (no stream snapshot) ── */
-  useEffect(() => {
+  /* ── Refresh stream state after WS reconnect (covers missed events) ── */
+  useDashboardReconnect(useCallback(() => {
     if (!active) return;
-    if (displayState !== 'running') return;
-    if (streaming) return; // SSE / stream-state is active, no need
-    const id = setInterval(() => { void loadLatestTurns({ keepOlder: true, force: true }); }, 5000);
-    return () => clearInterval(id);
-  }, [active, displayState, loadLatestTurns, streaming]);
+    void api.getSessionStreamState(session.agent || '', session.sessionId).then(res => {
+      applyStreamSnapshot(res.state);
+    }).catch(() => {});
+    void loadLatestTurns({ keepOlder: true, force: true });
+  }, [active, applyStreamSnapshot, session.agent, session.sessionId, loadLatestTurns]));
 
   /* ── Safety: clear stale pending state when session stops running ── */
   useEffect(() => {

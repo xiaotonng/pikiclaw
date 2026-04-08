@@ -127,23 +127,9 @@ export function shortenModel(model: string): string {
 }
 
 export type SessionDisplayState = 'running' | 'completed' | 'incomplete';
-export type SessionStreamPhase = 'queued' | 'streaming' | 'done';
-
 export function sessionDisplayState(session: Pick<SessionInfo, 'running' | 'runState'>): SessionDisplayState {
   if (session.running || session.runState === 'running') return 'running';
   return session.runState === 'incomplete' ? 'incomplete' : 'completed';
-}
-
-export function shouldPollSessionStreamState(
-  displayState: SessionDisplayState,
-  localStreamPending: boolean,
-  phase: SessionStreamPhase | null | undefined,
-  previousPhase: SessionStreamPhase | null | undefined,
-): boolean {
-  if (phase === 'queued' || phase === 'streaming') return true;
-  if (phase === 'done') return false;
-  if (previousPhase === 'queued' || previousPhase === 'streaming' || previousPhase === 'done') return false;
-  return displayState === 'running' || localStreamPending;
 }
 
 export function sessionDisplayDetail(session: Pick<SessionInfo, 'runDetail'>): string | null {

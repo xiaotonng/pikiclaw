@@ -3,8 +3,8 @@ import { useStore } from '../../store';
 import { createT } from '../../i18n';
 import { api } from '../../api';
 import { loadWorkspaceSessions, prefetchSessionMessages } from '../../session-preload';
-import { useDashboardEvent } from '../../sse';
-import { cn, fmtRelative, getAgentMeta, shortenModel, sessionDisplayState, shouldPollSessionStreamState, sessionListContextText, sessionListDisplayText } from '../../utils';
+import { useDashboardEvent, useDashboardReconnect } from '../../ws';
+import { cn, fmtRelative, getAgentMeta, shortenModel, sessionDisplayState, sessionListContextText, sessionListDisplayText } from '../../utils';
 import { Badge, Dot, Spinner, Modal, ModalHeader, Button, IconPicker } from '../../components/ui';
 import { BrandIcon } from '../../components/BrandIcon';
 import { DirBrowser } from '../../components/DirBrowser';
@@ -25,7 +25,6 @@ const SessionPanel = lazy(async () => ({ default: (await preloadSessionPanel()).
 
 /* ── Constants ── */
 const PAGE_SIZE = 5;
-const SIDEBAR_FALLBACK_POLL_MS = 30_000;
 const AUTO_PREFETCH_DELAY_MS = 240;
 const HOVER_PREFETCH_DELAY_MS = 120;
 const SESSION_PREFETCH_TURNS = 12;
@@ -87,6 +86,8 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const deferredSearch = useDeferredValue(search);
   const initializedRef = useRef(false);
   const inflightLoadsRef = useRef<Record<string, boolean>>({});
+  const sessionsMapRef = useRef(sessionsMap);
+  sessionsMapRef.current = sessionsMap;
   const autoPrefetchedSessionsRef = useRef<Set<string>>(new Set());
   const hoverPrefetchTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
@@ -125,7 +126,14 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     try {
       const res = await loadWorkspaceSessions(wsPath, { force: opts.force });
       startTransition(() => {
-        setSessionsMap(prev => ({ ...prev, [wsPath]: res.sessions || [] }));
+        setSessionsMap(prev => {
+          const incoming = res.sessions || [];
+          const existing = prev[wsPath] || [];
+          // Preserve optimistic stubs not yet present in API response
+          const incomingIds = new Set(incoming.map(s => sKey(s.agent || '', s.sessionId)));
+          const stubs = existing.filter(s => s.runState === 'running' && !incomingIds.has(sKey(s.agent || '', s.sessionId)));
+          return { ...prev, [wsPath]: stubs.length ? [...stubs, ...incoming] : incoming };
+        });
       });
     } catch {
       if (!opts.background) {
@@ -174,11 +182,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   }, []);
 
   useEffect(() => {
-    if (!active) return;
-    const timer = setTimeout(() => {
-      void preloadSessionPanel();
-    }, AUTO_PREFETCH_DELAY_MS);
-    return () => clearTimeout(timer);
+    if (active) void preloadSessionPanel();
   }, [active]);
 
   useEffect(() => {
@@ -196,29 +200,31 @@ export const SessionWorkspace = memo(function SessionWorkspace({
     };
   }, [active, loadSessionsForWorkspace, loadingMap, sessionsMap, workspaces]);
 
-  // SSE-driven: refresh session list when server signals a change
+  // SSE-driven: refresh session list when server signals a change (targeted by session key)
   useDashboardEvent(
     active && initializedRef.current && workspaces.length > 0 ? 'sessions-changed' : null,
-    useCallback(() => {
+    useCallback((event) => {
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
-      for (const ws of workspaces) {
+      const eventKey = event.key;
+      // Find workspace(s) that contain this session, or refresh all if unknown
+      const targets = eventKey
+        ? workspaces.filter(ws => (sessionsMapRef.current[ws.path] || []).some(s => sKey(s.agent || '', s.sessionId) === eventKey))
+        : workspaces;
+      // If the session isn't in any known workspace yet (new session), refresh all
+      const toRefresh = targets.length ? targets : workspaces;
+      for (const ws of toRefresh) {
         void loadSessionsForWorkspace(ws.path, { background: true, force: true });
       }
     }, [workspaces, loadSessionsForWorkspace]),
   );
 
-  // Slow fallback poll (30s) in case SSE connection drops
-  useEffect(() => {
+  // Refresh all workspaces after WS reconnect (covers missed events)
+  useDashboardReconnect(useCallback(() => {
     if (!active || !initializedRef.current || workspaces.length === 0) return;
-    const tick = () => {
-      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
-      for (const ws of workspaces) {
-        void loadSessionsForWorkspace(ws.path, { background: true, force: true });
-      }
-    };
-    const id = setInterval(tick, SIDEBAR_FALLBACK_POLL_MS);
-    return () => clearInterval(id);
-  }, [active, workspaces, loadSessionsForWorkspace]);
+    for (const ws of workspaces) {
+      void loadSessionsForWorkspace(ws.path, { background: true, force: true });
+    }
+  }, [active, workspaces, loadSessionsForWorkspace]));
 
   useEffect(() => {
     if (!active || !initializedRef.current || workspaces.length === 0) return;
@@ -1013,24 +1019,18 @@ const RightPanel = memo(function RightPanel({
   useEffect(() => {
     if (!active || !session) { setStreamState(null); return; }
     let mounted = true;
-    const fetchOnce = async () => {
-      try {
-        const res = await api.getSessionStreamState(session.agent || '', session.sessionId);
-        if (!mounted) return;
-        setStreamState(res.state ? {
-          phase: res.state.phase,
-          activity: res.state.activity,
-          thinking: res.state.thinking,
-          plan: res.state.plan ?? null,
-        } : null);
-      } catch {}
-    };
-    void fetchOnce();
-    // Fallback poll only if session appears running (covers SSE downtime)
-    if (displayState !== 'running') return;
-    const id = setInterval(fetchOnce, 10_000);
-    return () => { mounted = false; clearInterval(id); };
-  }, [active, displayState, session, sessionAgent, sessionId]);
+    // Initial fetch only — WS handles all subsequent updates
+    void api.getSessionStreamState(session.agent || '', session.sessionId).then(res => {
+      if (!mounted) return;
+      setStreamState(res.state ? {
+        phase: res.state.phase,
+        activity: res.state.activity,
+        thinking: res.state.thinking,
+        plan: res.state.plan ?? null,
+      } : null);
+    }).catch(() => {});
+    return () => { mounted = false; };
+  }, [active, session, sessionAgent, sessionId]);
 
   const openTargetOptions = (platform === 'darwin'
     ? ['vscode', 'finder']

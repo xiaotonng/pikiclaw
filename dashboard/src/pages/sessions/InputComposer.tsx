@@ -17,6 +17,10 @@ import type { SessionInfo, AgentRuntimeStatus } from '../../types';
 
 type CascadeStep = 'closed' | 'agent' | 'model' | 'effort';
 
+/* ── Draft persistence across session switches ── */
+const draftStore = new Map<string, { text: string; files: File[] }>();
+function draftKey(agent: string, sessionId: string) { return `${agent}:${sessionId}`; }
+
 export const InputComposer = memo(function InputComposer({ session, workdir, onStreamQueued, onSendStart, onSessionChange, t, streamPhase, streamTaskId, queuedTaskId, pendingPrompt, onRecall, onSteer, editDraft, onEditDraftConsumed }: {
   session: SessionInfo;
   workdir: string;
@@ -58,7 +62,27 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
 
   useEffect(() => { if (storeAgents?.length) setAgents(storeAgents); }, [storeAgents]);
   useEffect(() => { attachmentsRef.current = imageAttachments; }, [imageAttachments]);
-  useEffect(() => () => revokeComposerAttachments(attachmentsRef.current), []);
+
+  // Restore draft on mount, save on unmount
+  const dk = draftKey(session.agent || '', session.sessionId);
+  const dkRef = useRef(dk);
+  dkRef.current = dk;
+  useEffect(() => {
+    const saved = draftStore.get(dk);
+    if (saved) {
+      draftStore.delete(dk);
+      if (saved.text) setInput(saved.text);
+      if (saved.files.length) setImageAttachments(saved.files.map(makeComposerImageAttachment));
+    }
+    return () => {
+      const text = inputRef.current?.value || '';
+      const files = attachmentsRef.current.map(a => a.file);
+      // Save draft — revoke preview URLs but keep File objects
+      for (const a of attachmentsRef.current) URL.revokeObjectURL(a.previewUrl);
+      if (text || files.length) draftStore.set(dkRef.current, { text, files });
+      else draftStore.delete(dkRef.current);
+    };
+  }, [dk]);
 
   useEffect(() => {
     if (!agents.length) return;
@@ -169,6 +193,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
     const targetSessionId = targetAgent === session.agent ? session.sessionId : '';
     setSending(true);
     setInput('');
+    draftStore.delete(dkRef.current);
     // Create fresh preview URLs before clearing (clearing revokes the originals)
     const previewUrls = attachments.length ? attachments.map(f => URL.createObjectURL(f)) : undefined;
     clearImageAttachments();
