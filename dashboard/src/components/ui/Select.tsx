@@ -91,7 +91,7 @@ export function Select({
     return (
       <div
         className={cn(
-          'flex h-8 w-full items-center rounded-md border border-edge bg-panel-alt px-2.5 text-[13px] text-fg-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.72),0_1px_2px_rgba(15,23,42,0.05)]',
+          'flex h-8 w-full items-center rounded-md border border-edge bg-panel-alt px-2.5 text-[13px] text-fg-3 shadow-[inset_0_1px_0_var(--th-inset-hl),0_1px_2px_rgba(15,23,42,0.05)]',
           disabled && 'cursor-not-allowed opacity-50',
           className
         )}
@@ -160,7 +160,7 @@ export function Select({
         aria-expanded={open}
         onClick={() => setOpen(currentOpen => !currentOpen)}
         className={cn(
-          'flex h-8 w-full items-center rounded-md border border-edge bg-inset px-2.5 pr-8 text-left text-[13px] text-fg shadow-[inset_0_1px_0_rgba(255,255,255,0.72),0_1px_2px_rgba(15,23,42,0.05)]',
+          'flex h-8 w-full items-center rounded-md border border-edge bg-inset px-2.5 pr-8 text-left text-[13px] text-fg shadow-[inset_0_1px_0_var(--th-inset-hl),0_1px_2px_rgba(15,23,42,0.05)]',
           'transition-[border-color,box-shadow,background] duration-200 outline-none',
           'hover:border-edge-h hover:bg-panel',
           'focus-visible:border-edge-h focus-visible:shadow-[0_0_0_4px_var(--th-glow-a)]',

@@ -11,8 +11,8 @@ import { AssistantMsg } from './AssistantContent';
 import type { MessageBlock } from '../../types';
 import type { Turn } from './utils';
 
-export const TurnView = memo(function TurnView({ turn, agent, meta, t, onResend, onEdit }: {
-  turn: Turn; agent: string; meta: ReturnType<typeof getAgentMeta>; t: (k: string) => string;
+export const TurnView = memo(function TurnView({ turn, agent, meta, model, effort, t, onResend, onEdit }: {
+  turn: Turn; agent: string; meta: ReturnType<typeof getAgentMeta>; model?: string; effort?: string | null; t: (k: string) => string;
   onResend?: (text: string) => void;
   onEdit?: (text: string) => void;
 }) {
@@ -33,7 +33,7 @@ export const TurnView = memo(function TurnView({ turn, agent, meta, t, onResend,
           </ReactMarkdown>
         </div>
       )}
-      {turn.assistant && <TurnDivider agent={agent} meta={meta} />}
+      {turn.assistant && <TurnDivider agent={agent} meta={meta} model={model} effort={effort} />}
       {turn.assistant && (
         <div className="mb-6">
           <AssistantMsg message={turn.assistant} t={t} />
@@ -150,15 +150,12 @@ export function BubbleAction({ label, onClick, children }: { label: string; onCl
   );
 }
 
-export function TurnDivider({ agent, meta }: { agent: string; meta: ReturnType<typeof getAgentMeta> }) {
+export function TurnDivider({ agent, meta, model, effort }: { agent: string; meta: ReturnType<typeof getAgentMeta>; model?: string; effort?: string | null }) {
   return (
-    <div className="flex items-center gap-3 my-4">
-      <div className="flex-1 h-px bg-edge/60" />
-      <div className="flex items-center gap-1.5 text-[11px] text-fg-5">
-        <BrandIcon brand={agent} size={12} />
-        <span style={{ color: meta.color, opacity: 0.6 }} className="font-medium">{meta.label}</span>
-      </div>
-      <div className="flex-1 h-px bg-edge/60" />
+    <div className="flex items-center gap-1.5 mt-1 mb-3">
+      <BrandIcon brand={agent} size={13} />
+      <span style={{ color: meta.color }} className="text-[12px] font-semibold opacity-70">{meta.label}</span>
+      {model && <span className="text-[10px] font-mono text-fg-5/50">{model}{effort ? ` · ${effort}` : ''}</span>}
     </div>
   );
 }

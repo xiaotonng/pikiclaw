@@ -49,12 +49,9 @@ export function categorizeAssistantBlocks(blocks: MessageBlock[]): {
     return {
       activityBlocks: normalized.filter(block => block.type === 'tool_use' || block.type === 'tool_result'),
       thinkingBlocks: normalized.filter(block => block.type === 'thinking'),
-      processNotes: normalized.filter(block => block.type === 'text' && block.phase === 'commentary'),
+      processNotes: [],
       planBlocks: normalized.filter(block => block.type === 'plan' && hasPlan(block.plan)),
-      outputBlocks: normalized.filter(block =>
-        block.type === 'image'
-        || (block.type === 'text' && block.phase !== 'commentary'),
-      ),
+      outputBlocks: normalized.filter(block => block.type === 'image' || block.type === 'text'),
     };
   }
 

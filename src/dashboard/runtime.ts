@@ -160,11 +160,16 @@ class Runtime {
       if (this.isAgent(agent) && agent !== 'gemini' && typeof effort === 'string' && effort.trim()) bot.setEffortForAgent(agent, effort);
     }
     // Wire stream snapshots → dashboard WebSocket
+    const prevPhases = new Map<string, string | null>();
     bot.onStreamSnapshot((sessionKey, snapshot) => {
       this.emitDashboardEvent({ type: 'stream-update', key: sessionKey, snapshot });
-      // Phase transitions that affect the session list
+      // Emit sessions-changed on phase *transitions* (not every snapshot update)
+      // so the sidebar refreshes when a session starts running, finishes, etc.
       const phase = snapshot && typeof snapshot === 'object' ? (snapshot as any).phase : null;
-      if (phase === 'done' || phase === 'queued' || !snapshot) {
+      const prev = prevPhases.get(sessionKey) ?? null;
+      if (phase !== prev) {
+        prevPhases.set(sessionKey, phase);
+        if (!phase) prevPhases.delete(sessionKey); // clean up null entries
         this.emitDashboardEvent({ type: 'sessions-changed', key: sessionKey });
       }
     });

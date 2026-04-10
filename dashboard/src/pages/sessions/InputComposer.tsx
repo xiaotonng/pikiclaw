@@ -40,6 +40,10 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [localTaskId, setLocalTaskId] = useState<string | null>(null);
+  const [recallPending, setRecallPending] = useState(false);
+  const [steerPending, setSteerPending] = useState(false);
+  // Stash last-sent content so recall can restore it to the input field
+  const lastSentRef = useRef<{ prompt: string; files: File[] }>({ prompt: '', files: [] });
   const storeAgents = useStore(s => s.agentStatus?.agents ?? null);
   const [agents, setAgents] = useState<AgentRuntimeStatus[]>(storeAgents || []);
   const [selectedAgent, setSelectedAgent] = useState(session.agent || '');
@@ -53,6 +57,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   const [cascadeStep, setCascadeStep] = useState<CascadeStep>('closed');
   const [cascadePos, setCascadePos] = useState<{ left: number; bottom: number } | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const composingRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const composerRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -192,6 +197,8 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
       : (selectedEffort.trim() || null);
     const targetSessionId = targetAgent === session.agent ? session.sessionId : '';
     setSending(true);
+    // Stash content for potential recall restoration
+    lastSentRef.current = { prompt, files: attachments };
     setInput('');
     draftStore.delete(dkRef.current);
     // Create fresh preview URLs before clearing (clearing revokes the originals)
@@ -240,28 +247,54 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   const hasQueuedTask = !!effectiveQueuedId;
   const showTaskBar = sending || hasQueuedTask || isActiveStream;
 
+  // Clear action-pending flags when the target state resolves
+  useEffect(() => {
+    if (recallPending && !hasQueuedTask && !isActiveStream) setRecallPending(false);
+  }, [recallPending, hasQueuedTask, isActiveStream]);
+  useEffect(() => {
+    if (steerPending && !hasQueuedTask) setSteerPending(false);
+  }, [steerPending, hasQueuedTask]);
+  // Clear stashed files once queued task starts streaming (no longer recallable)
+  useEffect(() => {
+    if (!hasQueuedTask && lastSentRef.current.files.length) {
+      lastSentRef.current = { prompt: '', files: [] };
+    }
+  }, [hasQueuedTask]);
+
   const handleRecall = useCallback(() => {
+    if (recallPending) return;
     if (hasQueuedTask && effectiveQueuedId) {
+      setRecallPending(true);
+      // Restore sent text + images back to the input field
+      const stash = lastSentRef.current;
+      if (stash.prompt) setInput(stash.prompt);
+      if (stash.files.length) setImageAttachments(stash.files.map(makeComposerImageAttachment));
+      lastSentRef.current = { prompt: '', files: [] };
       onRecall?.(effectiveQueuedId);
       setLocalTaskId(null);
     } else if (isActiveStream && streamTaskId) {
+      setRecallPending(true);
       onRecall?.(streamTaskId);
     }
-  }, [hasQueuedTask, effectiveQueuedId, isActiveStream, streamTaskId, onRecall]);
+  }, [recallPending, hasQueuedTask, effectiveQueuedId, isActiveStream, streamTaskId, onRecall]);
 
   const handleStop = useCallback(() => {
-    if (streamTaskId) onRecall?.(streamTaskId);
-  }, [streamTaskId, onRecall]);
+    if (recallPending || !streamTaskId) return;
+    setRecallPending(true);
+    onRecall?.(streamTaskId);
+  }, [recallPending, streamTaskId, onRecall]);
 
   const handleSteer = useCallback(() => {
+    if (steerPending) return;
     if (effectiveQueuedId) {
+      setSteerPending(true);
       onSteer?.(effectiveQueuedId);
       setLocalTaskId(null);
     }
-  }, [effectiveQueuedId, onSteer]);
+  }, [steerPending, effectiveQueuedId, onSteer]);
 
   const onKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
+    if (e.key === 'Enter' && !e.shiftKey && !composingRef.current) { e.preventDefault(); handleSend(); }
   };
 
   const onPaste = useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {
@@ -333,67 +366,70 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
     <div className="shrink-0" ref={composerRef}>
       {/* Floating centered input area */}
       <div className="max-w-[680px] mx-auto px-5 pb-4 pt-2">
-        {/* Task control bar — Codex-style, positioned above the input box */}
+        {/* Task control bar — stacked rows when streaming + queued coexist */}
         {showTaskBar && (
-          <div className={cn(
-            'mb-2 flex items-center gap-2.5 rounded-lg border px-3.5 py-2 transition-colors',
-            hasQueuedTask ? 'border-warn/25 bg-warn/[0.04]'
-              : isActiveStream ? 'border-primary/20 bg-primary/[0.04]'
-              : 'border-edge/30 bg-panel-alt/20',
-          )}>
-            {hasQueuedTask ? (
-              <span className="h-1.5 w-1.5 rounded-full bg-warn animate-pulse shrink-0" />
-            ) : isActiveStream ? (
-              <Spinner className="h-3 w-3 text-primary shrink-0" />
-            ) : (
-              <Spinner className="h-3 w-3 text-fg-5/50 shrink-0" />
+          <div className="mb-2 space-y-1.5">
+            {/* Row 1: Active stream — always visible when streaming */}
+            {isActiveStream && (
+              <div className="flex items-center gap-2.5 rounded-lg border border-primary/20 bg-primary/[0.04] px-3.5 py-1.5 transition-colors">
+                <Spinner className="h-3 w-3 text-primary shrink-0" />
+                <span className="flex-1 min-w-0 text-[12px] font-medium text-fg-3 truncate">{t('hub.running')}</span>
+                <button
+                  onClick={handleStop}
+                  disabled={!streamTaskId || recallPending}
+                  title={t('hub.stopHint')}
+                  className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-fg-4 hover:text-err hover:bg-err/10 transition-colors disabled:opacity-30 disabled:pointer-events-none shrink-0"
+                >
+                  {recallPending && !hasQueuedTask
+                    ? <Spinner className="h-2.5 w-2.5" />
+                    : <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2" /></svg>}
+                  {t('hub.stop')}
+                </button>
+              </div>
             )}
-            <div className="flex-1 min-w-0 flex items-baseline gap-2">
-              <span className={cn(
-                'text-[12px] font-medium shrink-0',
-                hasQueuedTask ? 'text-warn' : isActiveStream ? 'text-fg-3' : 'text-fg-5',
-              )}>
-                {hasQueuedTask ? t('hub.queued') : isActiveStream ? t('hub.running') : t('hub.sending')}
-              </span>
-              {hasQueuedTask && pendingPrompt && (
-                <span className="text-[11px] text-fg-5/60 truncate">{pendingPrompt}</span>
-              )}
-            </div>
-            <div className="flex items-center gap-1 shrink-0">
-              {hasQueuedTask && (
-                <>
+            {/* Row 2: Queued task — shows message preview + steer/recall */}
+            {hasQueuedTask && (
+              <div className="flex items-center gap-2.5 rounded-lg border border-warn/25 bg-warn/[0.04] px-3.5 py-1.5 transition-colors">
+                <span className="h-1.5 w-1.5 rounded-full bg-warn animate-pulse shrink-0" />
+                <div className="flex-1 min-w-0 flex items-baseline gap-2">
+                  <span className="text-[12px] font-medium text-warn shrink-0">{t('hub.queued')}</span>
+                  {pendingPrompt && (
+                    <span className="text-[11px] text-fg-5/60 truncate">{pendingPrompt}</span>
+                  )}
+                </div>
+                <div className="flex items-center gap-1 shrink-0">
                   <button
                     onClick={handleSteer}
-                    disabled={!effectiveQueuedId}
+                    disabled={!effectiveQueuedId || steerPending}
                     title={t('hub.steerHint')}
                     className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-fg-4 hover:text-blue-400 hover:bg-blue-400/10 transition-colors disabled:opacity-30 disabled:pointer-events-none"
                   >
-                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polyline points="9 6 15 12 9 18" /></svg>
+                    {steerPending
+                      ? <Spinner className="h-2.5 w-2.5" />
+                      : <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polyline points="9 6 15 12 9 18" /></svg>}
                     {t('hub.steer')}
                   </button>
                   <button
                     onClick={handleRecall}
-                    disabled={!effectiveQueuedId}
+                    disabled={!effectiveQueuedId || recallPending}
                     title={t('hub.recallHint')}
                     className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-fg-4 hover:text-err hover:bg-err/10 transition-colors disabled:opacity-30 disabled:pointer-events-none"
                   >
-                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M18 6 6 18" /><path d="M6 6l12 12" /></svg>
+                    {recallPending
+                      ? <Spinner className="h-2.5 w-2.5" />
+                      : <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M18 6 6 18" /><path d="M6 6l12 12" /></svg>}
                     {t('hub.recall')}
                   </button>
-                </>
-              )}
-              {isActiveStream && !hasQueuedTask && (
-                <button
-                  onClick={handleStop}
-                  disabled={!streamTaskId}
-                  title={t('hub.stopHint')}
-                  className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-fg-4 hover:text-err hover:bg-err/10 transition-colors disabled:opacity-30 disabled:pointer-events-none"
-                >
-                  <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2" /></svg>
-                  {t('hub.stop')}
-                </button>
-              )}
-            </div>
+                </div>
+              </div>
+            )}
+            {/* Sending state — no stream yet, no queue */}
+            {!isActiveStream && !hasQueuedTask && (
+              <div className="flex items-center gap-2.5 rounded-lg border border-edge/30 bg-panel-alt/20 px-3.5 py-1.5 transition-colors">
+                <Spinner className="h-3 w-3 text-fg-5/50 shrink-0" />
+                <span className="flex-1 min-w-0 text-[12px] font-medium text-fg-5">{t('hub.sending')}</span>
+              </div>
+            )}
           </div>
         )}
         <div className="relative rounded-xl border border-edge/40 bg-panel shadow-sm transition-[border-color,box-shadow] duration-200 focus-within:border-fg-5/40 focus-within:shadow-md">
@@ -452,6 +488,8 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
             onChange={e => setInput(e.target.value)}
             onPaste={onPaste}
             onKeyDown={onKeyDown}
+            onCompositionStart={() => { composingRef.current = true; }}
+            onCompositionEnd={() => { composingRef.current = false; }}
             placeholder={t('hub.inputPlaceholder')}
             rows={1}
             className="w-full resize-none bg-transparent px-4 pt-3 pb-1 text-[13.5px] text-fg outline-none placeholder:text-fg-5/25 leading-[1.6]"
@@ -665,7 +703,7 @@ function ComposerImageLightbox({ attachment, onClose, onRemove, t }: {
             </button>
           </div>
         </div>
-        <div className="overflow-hidden rounded-[24px] border border-white/10 bg-black/35 shadow-[0_20px_70px_rgba(0,0,0,0.45)]">
+        <div className="overflow-hidden rounded-xl border border-white/10 bg-black/35 shadow-[0_20px_70px_rgba(0,0,0,0.45)]">
           <img src={attachment.previewUrl} alt={attachment.file.name} className="max-h-[80vh] w-full object-contain" />
         </div>
       </div>

@@ -781,16 +781,19 @@ rl.on('line', (line) => {
 });`;
     fs.writeFileSync(path.join(fakeBin, 'codex'), script, { mode: 0o755 });
 
+    const previews: string[] = [];
     const activities: string[] = [];
     const result = await doCodexStream(baseOpts('codex', {
-      onText: (_text, _thinking, activity) => {
+      onText: (text, _thinking, activity) => {
+        if (text?.trim()) previews.push(text);
         if (activity?.trim()) activities.push(activity);
       },
     }));
 
     expect(result.ok).toBe(true);
     expect(result.activity).toContain('KEEP_THIS_VISIBLE_AT_THE_END');
-    expect(activities.some(activity => activity.includes('KEEP_THIS_VISIBLE_AT_THE_END'))).toBe(true);
+    expect(previews.some(text => text.includes('KEEP_THIS_VISIBLE_AT_THE_END'))).toBe(true);
+    expect(activities.some(activity => activity.includes('KEEP_THIS_VISIBLE_AT_THE_END'))).toBe(false);
 
     // --- runs codex turns in parallel across sessions ---
     shutdownCodexServer();

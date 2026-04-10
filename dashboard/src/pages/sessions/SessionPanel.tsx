@@ -4,9 +4,8 @@ import { createT } from '../../i18n';
 import { api } from '../../api';
 import { loadSessionMessages, peekSessionMessages } from '../../session-preload';
 import { useDashboardEvent, useDashboardReconnect, type DashboardEvent } from '../../ws';
-import { cn, fmtRelative, getAgentMeta, shortenModel, sessionDisplayState } from '../../utils';
-import { Dot, Spinner } from '../../components/ui';
-import { BrandIcon } from '../../components/BrandIcon';
+import { cn, getAgentMeta, shortenModel, sessionDisplayState } from '../../utils';
+import { Spinner } from '../../components/ui';
 import { hasPlan } from '../../components/PlanProgressCard';
 import type { SessionInfo, StreamPlan } from '../../types';
 import { TurnView, UserBubble, TurnDivider } from './TurnView';
@@ -50,6 +49,7 @@ export const SessionPanel = memo(function SessionPanel({
   onPendingPromptConsumed?: () => void;
 }) {
   const locale = useStore(s => s.locale);
+  const agentEffort = useStore(s => s.agentStatus?.agents?.find(a => a.agent === session.agent)?.selectedEffort ?? null);
   const t = useMemo(() => createT(locale), [locale]);
   const meta = getAgentMeta(session.agent || '');
   const displayState = sessionDisplayState(session);
@@ -71,8 +71,13 @@ export const SessionPanel = memo(function SessionPanel({
   const [queuedTaskId, setQueuedTaskId] = useState<string | null>(null);
   const [pendingPrompt, setPendingPrompt] = useState<string | null>(null);
   const [pendingImageUrls, setPendingImageUrls] = useState<string[]>([]);
+  const [pendingQueued, setPendingQueued] = useState(false);
   const [editDraft, setEditDraft] = useState<string | null>(null);
   const pendingImageUrlsRef = useRef<string[]>([]);
+  const liveStreamRef = useRef(liveStream);
+  const streamingRef = useRef(streaming);
+  liveStreamRef.current = liveStream;
+  streamingRef.current = streaming;
   const scrollRef = useRef<HTMLDivElement>(null);
   const prependAnchorRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
   const stickToBottomRef = useRef(true);
@@ -80,6 +85,7 @@ export const SessionPanel = memo(function SessionPanel({
   const loadingLatestRef = useRef(false);
   const loadingOlderRef = useRef(false);
   const localStreamPendingRef = useRef(false);
+  const clearPendingOnLoadRef = useRef(false);
   const initialPendingConsumedRef = useRef(false);
 
   // Consume initialPendingPrompt from new-session flow — show immediately and start polling
@@ -96,6 +102,7 @@ export const SessionPanel = memo(function SessionPanel({
     setPendingPrompt(null);
     setPendingImageUrls(prev => { for (const u of prev) URL.revokeObjectURL(u); return []; });
     pendingImageUrlsRef.current = [];
+    setPendingQueued(false);
   }, []);
 
   const handleSendStart = useCallback((prompt: string, imageUrls?: string[]) => {
@@ -105,6 +112,8 @@ export const SessionPanel = memo(function SessionPanel({
     const urls = imageUrls || [];
     setPendingImageUrls(urls);
     pendingImageUrlsRef.current = urls;
+    // If a stream is active, the message will be queued — don't show in conversation yet
+    setPendingQueued(!!liveStreamRef.current || streamingRef.current);
   }, []);
 
   const fetchTurnWindow = useCallback(async (
@@ -138,11 +147,17 @@ export const SessionPanel = memo(function SessionPanel({
         if (!current || !keepOlder) return next;
         return mergeLatestHistory(current, next);
       });
+      // Clear pending in the same synchronous block as setHistory so React batches
+      // both updates into a single render (avoids flash of duplicate user bubble)
+      if (clearPendingOnLoadRef.current) {
+        clearPendingOnLoadRef.current = false;
+        clearPending();
+      }
       return true;
     } finally {
       loadingLatestRef.current = false;
     }
-  }, [fetchTurnWindow]);
+  }, [fetchTurnWindow, clearPending]);
 
   const loadOlderTurns = useCallback(async () => {
     if (!history?.hasOlder || loadingOlderRef.current) return;
@@ -165,23 +180,31 @@ export const SessionPanel = memo(function SessionPanel({
 
   const prevPhaseRef = useRef<'queued' | 'streaming' | 'done' | null>(null);
 
-  /** Apply a stream snapshot to local state — called from both SSE push and poll fallback. */
+  /** Apply a stream snapshot to local state — called from both WS push and poll fallback.
+   *  All open panels receive full updates regardless of active state. */
   const applyStreamSnapshot = useCallback((state: any | null) => {
+    // Detect session promotion: backend promoted pending_XXX → native ID.
+    // Navigate to the promoted session so subsequent messages use the correct ID.
+    if (state?.sessionId && state.sessionId !== session.sessionId) {
+      onSessionChange?.({ agent: session.agent || '', sessionId: state.sessionId, workdir });
+      return;
+    }
     if (!state) {
       const prev = prevPhaseRef.current;
       setLiveStream(null);
       setStreaming(false);
       if (prev === 'streaming') {
         if (stickToBottomRef.current) scrollToBottomRef.current = true;
-        void loadLatestTurns({ keepOlder: true, force: true }).then(loaded => {
-          if (loaded) clearPending();
-        });
+        clearPendingOnLoadRef.current = true;
+        void loadLatestTurns({ keepOlder: true, force: true });
       } else if (prev === 'done') {
         clearPending();
       } else if (prev === null && localStreamPendingRef.current) {
-        void loadLatestTurns({ keepOlder: true, force: true }).then(loaded => {
-          if (loaded) clearPending();
-        });
+        // Do NOT clear pending here — for slow uploads (e.g. images via FormData),
+        // the poll may return null before the stream actually starts. The pending
+        // bubble should stay visible until the stream begins or the safety cleanup
+        // effect fires (displayState !== 'running' && !streaming && !liveStream).
+        void loadLatestTurns({ keepOlder: true, force: true });
       }
       localStreamPendingRef.current = false;
       setStreamTaskId(null);
@@ -202,6 +225,8 @@ export const SessionPanel = memo(function SessionPanel({
         plan: state.plan ?? null,
       });
       setStreaming(true);
+      // Queued task is now active — show its bubble in conversation
+      if (!state.queuedTaskId) setPendingQueued(false);
       if (stickToBottomRef.current) scrollToBottomRef.current = true;
     } else if (state.phase === 'queued') {
       setLiveStream(null);
@@ -213,14 +238,13 @@ export const SessionPanel = memo(function SessionPanel({
       setStreaming(false);
       if (prevPhaseRef.current !== 'done') {
         if (stickToBottomRef.current) scrollToBottomRef.current = true;
-        void loadLatestTurns({ keepOlder: true, force: true }).then(loaded => {
-          if (loaded && !state.queuedTaskId) clearPending();
-        });
+        if (!state.queuedTaskId) clearPendingOnLoadRef.current = true;
+        void loadLatestTurns({ keepOlder: true, force: true });
       }
       if (!state.queuedTaskId) localStreamPendingRef.current = false;
     }
     prevPhaseRef.current = state.phase;
-  }, [clearPending, loadLatestTurns]);
+  }, [clearPending, loadLatestTurns, session.sessionId, session.agent, onSessionChange, workdir]);
 
   const requestStreamPolling = useCallback(() => {
     localStreamPendingRef.current = true;
@@ -282,36 +306,36 @@ export const SessionPanel = memo(function SessionPanel({
     void loadLatestTurns({ keepOlder: true, force: true });
   }, [active, loadLatestTurns]);
 
-  /* ── SSE-driven: apply stream snapshots instantly when pushed from server ── */
+  /* ── WS-driven: apply stream snapshots for ALL open panels (active or not).
+     Active panels get full liveStream text; inactive panels get phase/status only. ── */
   const sessionKeyRef = useRef(`${session.agent}:${session.sessionId}`);
   sessionKeyRef.current = `${session.agent}:${session.sessionId}`;
 
   useDashboardEvent(
-    active ? 'stream-update' : null,
+    'stream-update',
     useCallback((event: DashboardEvent) => {
       if (event.key !== sessionKeyRef.current) return;
       applyStreamSnapshot(event.snapshot ?? null);
     }, [applyStreamSnapshot]),
   );
 
-  /* ── Initial stream-state fetch (WS handles all subsequent updates) ── */
+  /* ── Initial stream-state fetch (WS handles all subsequent updates).
+     Runs for ALL open panels so inactive panels know the current phase. ── */
   useEffect(() => {
-    if (!active) return;
     let mounted = true;
     void api.getSessionStreamState(session.agent || '', session.sessionId).then(res => {
       if (mounted) applyStreamSnapshot(res.state);
     }).catch(() => {});
     return () => { mounted = false; };
-  }, [active, applyStreamSnapshot, session.agent, session.sessionId, streamPollNonce]);
+  }, [applyStreamSnapshot, session.agent, session.sessionId, streamPollNonce]);
 
   /* ── Refresh stream state after WS reconnect (covers missed events) ── */
   useDashboardReconnect(useCallback(() => {
-    if (!active) return;
     void api.getSessionStreamState(session.agent || '', session.sessionId).then(res => {
       applyStreamSnapshot(res.state);
     }).catch(() => {});
     void loadLatestTurns({ keepOlder: true, force: true });
-  }, [active, applyStreamSnapshot, session.agent, session.sessionId, loadLatestTurns]));
+  }, [applyStreamSnapshot, session.agent, session.sessionId, loadLatestTurns]));
 
   /* ── Safety: clear stale pending state when session stops running ── */
   useEffect(() => {
@@ -361,42 +385,19 @@ export const SessionPanel = memo(function SessionPanel({
     if (el.scrollTop <= TOP_LOAD_THRESHOLD_PX) void loadOlderTurns();
   }, [loadOlderTurns]);
 
-  const title = session.title || session.lastQuestion?.slice(0, 80) || session.sessionId.slice(0, 16);
-  const turns = history?.turns || [];
+  const rawTurns = history?.turns || [];
+  // When a live stream is active, the last turn's assistant response may already be
+  // present in fetched history (partial or complete).  Suppress it to avoid rendering
+  // the same response twice (once in TurnView, once in LivePreview).
+  const turns = useMemo(() => {
+    if (!liveStream || !rawTurns.length) return rawTurns;
+    const last = rawTurns[rawTurns.length - 1];
+    if (!last.assistant) return rawTurns;
+    return [...rawTurns.slice(0, -1), { ...last, assistant: null }];
+  }, [rawTurns, liveStream]);
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
-      {/* ── Header ── */}
-      <div className="shrink-0 flex items-center gap-2 px-4 h-10 border-b border-edge/50 bg-panel/40 backdrop-blur-md z-10">
-        <BrandIcon brand={session.agent || ''} size={14} />
-        <span className="text-[10px] font-medium shrink-0" style={{ color: meta.color }}>{meta.shortLabel}</span>
-        <span className="flex-1 min-w-0 text-[13px] font-medium text-fg truncate">{title}</span>
-        <span className="flex items-center gap-1 text-[10px] text-fg-5/60 shrink-0">
-          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="opacity-60">
-            <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
-          </svg>
-          <span className="max-w-[80px] truncate">{workdir.split('/').pop()}</span>
-        </span>
-        {session.model && (
-          <span className="text-[10px] font-mono text-fg-5/60 px-1.5 py-0.5 rounded bg-inset/40 shrink-0">{shortenModel(session.model)}</span>
-        )}
-        {!!session.numTurns && (
-          <span className="flex items-center gap-0.5 text-[10px] text-fg-5/50 tabular-nums shrink-0">
-            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="opacity-50">
-              <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
-            </svg>
-            {session.numTurns}
-          </span>
-        )}
-        <Dot
-          variant={displayState === 'running' ? 'ok' : displayState === 'incomplete' ? 'warn' : 'idle'}
-          pulse={displayState === 'running'}
-        />
-        <span className="text-[10px] text-fg-5/50 tabular-nums shrink-0">
-          {fmtRelative(session.runUpdatedAt || session.createdAt)}
-        </span>
-      </div>
-
       {/* ── Messages ── */}
       <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto overscroll-contain">
         {loading ? (
@@ -412,7 +413,7 @@ export const SessionPanel = memo(function SessionPanel({
               </div>
             )}
             {turns.map((turn, i) => (
-              <TurnView key={`${history?.startTurn || 0}:${i}`} turn={turn} agent={session.agent || ''} meta={meta} t={t}
+              <TurnView key={`${history?.startTurn || 0}:${i}`} turn={turn} agent={session.agent || ''} meta={meta} model={session.model ? shortenModel(session.model) : undefined} effort={agentEffort} t={t}
                 onResend={(txt) => {
                   scrollToBottomRef.current = true;
                   handleSendStart(txt);
@@ -422,8 +423,11 @@ export const SessionPanel = memo(function SessionPanel({
                 }}
                 onEdit={(txt) => setEditDraft(txt)} />
             ))}
-            {/* Optimistic pending message — persists until turn history refreshes */}
-            {(pendingPrompt || pendingImageUrls.length > 0) && (
+            {/* Optimistic pending message — hidden while queued behind an active stream (pendingQueued),
+                and deduped against the last loaded user turn to avoid double-rendering after history refresh. */}
+            {(pendingPrompt || pendingImageUrls.length > 0) && !pendingQueued
+              && !clearPendingOnLoadRef.current
+              && !(pendingPrompt && turns.length > 0 && turns[turns.length - 1]?.user?.text?.trim() === pendingPrompt.trim()) && (
               <div className="session-turn">
                 <UserBubble text={pendingPrompt || ''} blocks={pendingImageUrls.map(u => ({ type: 'image' as const, content: u }))} t={t} />
                 {!liveStream && (
@@ -436,8 +440,8 @@ export const SessionPanel = memo(function SessionPanel({
             {/* Live stream preview */}
             {liveStream && (
               <div className="mb-6">
-                {!pendingPrompt && !pendingImageUrls.length && <TurnDivider agent={session.agent || ''} meta={meta} />}
-                {(pendingPrompt || pendingImageUrls.length > 0) && <TurnDivider agent={session.agent || ''} meta={meta} />}
+                {!pendingPrompt && !pendingImageUrls.length && <TurnDivider agent={session.agent || ''} meta={meta} model={session.model ? shortenModel(session.model) : undefined} effort={agentEffort} />}
+                {(pendingPrompt || pendingImageUrls.length > 0) && <TurnDivider agent={session.agent || ''} meta={meta} model={session.model ? shortenModel(session.model) : undefined} effort={agentEffort} />}
                 <LivePreview stream={liveStream} t={t} />
               </div>
             )}

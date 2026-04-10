@@ -568,6 +568,17 @@ export function findManagedThreadSession(workdir: string, threadId: string, agen
   return record ? managedRecordToSessionInfo(record) : null;
 }
 
+/**
+ * Find the most recently updated session sharing a threadId but from a *different* agent.
+ * Used to carry conversation context across agent switches.
+ */
+export function findThreadSessionAcrossAgents(workdir: string, threadId: string, excludeAgent: Agent): SessionInfo | null {
+  const record = loadSessionIndex(path.resolve(workdir)).sessions
+    .filter(entry => entry.threadId === threadId && entry.agent !== excludeAgent)
+    .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))[0] || null;
+  return record ? managedRecordToSessionInfo(record) : null;
+}
+
 export function stageSessionFiles(opts: StageSessionFilesOpts): StageSessionFilesResult {
   const session = ensureSessionWorkspace({
     agent: opts.agent,

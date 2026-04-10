@@ -16,7 +16,7 @@ export function TabHero({
   right?: ReactNode;
 }) {
   return (
-    <div className="flex flex-col gap-4 rounded-2xl border border-edge bg-[linear-gradient(180deg,var(--color-panel),var(--color-panel-alt))] p-5 shadow-[0_1px_0_rgba(255,255,255,0.03),0_20px_48px_rgba(2,6,23,0.18)] xl:flex-row xl:items-end xl:justify-between">
+    <div className="flex flex-col gap-4 rounded-xl border border-edge bg-[linear-gradient(180deg,var(--color-panel),var(--color-panel-alt))] p-5 shadow-[0_1px_0_rgba(255,255,255,0.03),0_20px_48px_rgba(2,6,23,0.18)] xl:flex-row xl:items-end xl:justify-between">
       <div className="max-w-3xl">
         <Badge variant="accent">{eyebrow}</Badge>
         <div className="mt-3 text-[26px] font-semibold tracking-tight text-fg">{title}</div>

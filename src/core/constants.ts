@@ -69,9 +69,9 @@ export const MANAGED_BROWSER_PROFILE_SUBPATH = path.join('.pikiclaw', 'browser',
 
 /** Base Playwright MCP args for the managed browser integration. */
 export const PLAYWRIGHT_MCP_PACKAGE_NAME = '@playwright/mcp';
-export const PLAYWRIGHT_MCP_PACKAGE_VERSION = '0.0.68';
+export const PLAYWRIGHT_MCP_PACKAGE_VERSION = '0.0.70';
 export const PLAYWRIGHT_MCP_PACKAGE_SPEC = `${PLAYWRIGHT_MCP_PACKAGE_NAME}@${PLAYWRIGHT_MCP_PACKAGE_VERSION}`;
-export const PLAYWRIGHT_MCP_BROWSER_ARGS = ['--browser', 'chrome'] as const;
+export const PLAYWRIGHT_MCP_BROWSER_ARGS = ['--browser', 'chrome', '--viewport-size', '1920x1080'] as const;
 
 /** Dashboard session pagination limits. */
 export const DASHBOARD_PAGINATION = {

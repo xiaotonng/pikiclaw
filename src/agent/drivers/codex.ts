@@ -487,14 +487,22 @@ function isCodexToolCallFailure(item: any): boolean {
 function buildCodexActivityPreview(s: {
   recentNarrative: string[]; recentFailures: string[];
   commentaryByItem: Map<string, string>;
+  commentaryParts: string[];
   activeCommands: Map<string, string>;
   activeToolCalls: Map<string, CodexActiveToolCall>;
   completedCommands: number;
-}): string {
-  const lines = [...s.recentNarrative];
-  for (const text of s.commentaryByItem.values()) {
-    const cleaned = normalizeActivityLine(text);
-    if (cleaned && lines[lines.length - 1] !== cleaned) lines.push(cleaned);
+}, opts: { includeCommentary?: boolean } = {}): string {
+  const commentaryLines = opts.includeCommentary === false
+    ? new Set(s.commentaryParts.map(text => normalizeActivityLine(text)).filter(Boolean))
+    : null;
+  const lines = commentaryLines
+    ? s.recentNarrative.filter(line => !commentaryLines.has(line))
+    : [...s.recentNarrative];
+  if (opts.includeCommentary !== false) {
+    for (const text of s.commentaryByItem.values()) {
+      const cleaned = normalizeActivityLine(text);
+      if (cleaned && lines[lines.length - 1] !== cleaned) lines.push(cleaned);
+    }
   }
   for (const failure of s.recentFailures) {
     if (lines[lines.length - 1] !== failure) lines.push(failure);
@@ -506,6 +514,24 @@ function buildCodexActivityPreview(s: {
     if (lines[lines.length - 1] !== running) lines.push(running);
   }
   return lines.join('\n');
+}
+
+function buildCodexPreviewText(s: {
+  text: string;
+  commentaryParts: string[];
+  commentaryByItem: Map<string, string>;
+}): string {
+  const commentary = [
+    ...s.commentaryParts,
+    ...s.commentaryByItem.values(),
+  ]
+    .map(text => text.trim())
+    .filter(Boolean)
+    .join('\n\n')
+    .trim();
+  const finalText = s.text.trim();
+  if (commentary && finalText) return `${commentary}\n\n${finalText}`;
+  return commentary || finalText;
 }
 
 // ---------------------------------------------------------------------------
@@ -624,6 +650,7 @@ interface CodexStreamState {
   turnError: string | null;
   messagePhases: Map<string, string>;
   commentaryByItem: Map<string, string>;
+  commentaryParts: string[];
   activeCommands: Map<string, string>;
   activeToolCalls: Map<string, CodexActiveToolCall>;
   recentNarrative: string[];
@@ -644,6 +671,7 @@ function createCodexStreamState(opts: StreamOpts): CodexStreamState {
     turnId: null, turnStatus: null, turnError: null,
     messagePhases: new Map(),
     commentaryByItem: new Map(),
+    commentaryParts: [],
     activeCommands: new Map(),
     activeToolCalls: new Map(),
     recentNarrative: [], recentFailures: [],
@@ -815,7 +843,10 @@ function handleCompletedAgentMessage(item: any, s: CodexStreamState, emit: () =>
     if (item.text?.trim()) s.msgs.push(item.text.trim());
   } else {
     const commentary = item.text?.trim() || s.commentaryByItem.get(item.id)?.trim() || '';
-    if (commentary) pushRecentActivity(s.recentNarrative, commentary);
+    if (commentary) {
+      s.commentaryParts.push(commentary);
+      pushRecentActivity(s.recentNarrative, commentary);
+    }
     s.commentaryByItem.delete(item.id);
     emit();
   }
@@ -1003,7 +1034,9 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
 
       const emit = () => {
         s.activity = buildCodexActivityPreview(s);
-        opts.onText(s.text, s.thinking, s.activity, buildStreamPreviewMeta(s), s.plan);
+        const previewText = buildCodexPreviewText(s);
+        const previewActivity = buildCodexActivityPreview(s, { includeCommentary: false });
+        opts.onText(previewText, s.thinking, previewActivity, buildStreamPreviewMeta(s), s.plan);
       };
       emitPreview = emit;
 

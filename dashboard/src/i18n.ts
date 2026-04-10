@@ -278,6 +278,15 @@ const zhCN: Record<string, string> = {
   'hub.read': '读取',
   'hub.deleted': '删除',
   'hub.openDiff': '查看变更',
+  'hub.layout1': '单窗口',
+  'hub.layout2': '双窗口',
+  'hub.layout3': '三窗口',
+  'hub.layout6': '六窗口',
+  'hub.emptySlot': '点击左侧会话填充',
+  'hub.closePanel': '关闭',
+  'hub.detailPanel': '详情面板',
+  'hub.minimizePanel': '最小化',
+  'hub.restorePanel': '恢复面板',
 
   // Plugins
   'plugins.title': '插件中心',
@@ -424,6 +433,10 @@ const zhCN: Record<string, string> = {
   'modal.restarting': '进程即将重启...',
   'modal.restartFailed': '重启失败',
   'modal.workdir': '工作目录',
+  'modal.confirmRemoveWorkspace': '确定要移除此工作区吗？',
+  'modal.confirmRemoveWorkspaceHint': '移除后不会删除本地文件，你可以随时重新添加。',
+  'modal.removing': '移除中...',
+  'modal.remove': '移除',
 };
 
 const en: Record<string, string> = {
@@ -698,6 +711,15 @@ const en: Record<string, string> = {
   'hub.read': 'Read',
   'hub.deleted': 'Deleted',
   'hub.openDiff': 'View diff',
+  'hub.layout1': 'Single',
+  'hub.layout2': 'Dual',
+  'hub.layout3': 'Triple',
+  'hub.layout6': 'Six',
+  'hub.emptySlot': 'Click a session to fill',
+  'hub.closePanel': 'Close',
+  'hub.detailPanel': 'Detail Panel',
+  'hub.minimizePanel': 'Minimize',
+  'hub.restorePanel': 'Restore Panel',
 
   'plugins.title': 'Plugin Center',
   'plugins.customSkills': 'Custom Skills',
@@ -842,6 +864,10 @@ const en: Record<string, string> = {
   'modal.restarting': 'Restarting...',
   'modal.restartFailed': 'Restart failed',
   'modal.workdir': 'Work Directory',
+  'modal.confirmRemoveWorkspace': 'Remove this workspace?',
+  'modal.confirmRemoveWorkspaceHint': 'This won\'t delete any local files. You can re-add it anytime.',
+  'modal.removing': 'Removing...',
+  'modal.remove': 'Remove',
 
 };
 

@@ -4,19 +4,23 @@
 :root {
   --th-surface: #080a0d;
   --th-fg: rgba(248,250,252,0.94);
-  --th-fg-2: rgba(248,250,252,0.76);
-  --th-fg-3: rgba(226,232,240,0.58);
-  --th-fg-4: rgba(203,213,225,0.42);
-  --th-fg-5: rgba(148,163,184,0.42);
-  --th-fg-6: rgba(148,163,184,0.18);
+  --th-fg-2: rgba(248,250,252,0.80);
+  --th-fg-3: rgba(226,232,240,0.66);
+  --th-fg-4: rgba(203,213,225,0.52);
+  --th-fg-5: rgba(148,163,184,0.50);
+  --th-fg-6: rgba(148,163,184,0.22);
 
-  --th-panel: rgba(15,23,42,0.42);
-  --th-panel-h: rgba(15,23,42,0.62);
-  --th-panel-alt: rgba(15,23,42,0.26);
-  --th-inset: rgba(255,255,255,0.03);
+  --th-panel: rgba(15,23,42,0.52);
+  --th-panel-h: rgba(15,23,42,0.70);
+  --th-panel-alt: rgba(15,23,42,0.34);
+  --th-inset: rgba(255,255,255,0.05);
 
-  --th-edge: rgba(148,163,184,0.16);
-  --th-edge-h: rgba(148,163,184,0.28);
+  --th-edge: rgba(148,163,184,0.18);
+  --th-edge-h: rgba(148,163,184,0.32);
+
+  --th-inset-hl: rgba(255,255,255,0.05);
+  --th-selected-bg: rgba(255,255,255,0.07);
+  --th-selected-bg-h: rgba(255,255,255,0.10);
 
   --th-primary: #f8fafc;
   --th-primary-fg: #09090b;
@@ -129,6 +133,10 @@
   --th-badge-muted-text: rgba(51,65,85,0.82);
   --th-badge-muted-bg: rgba(255,255,255,0.76);
   --th-badge-muted-border: rgba(15,23,42,0.12);
+
+  --th-inset-hl: rgba(255,255,255,0.72);
+  --th-selected-bg: rgba(15,23,42,0.06);
+  --th-selected-bg-h: rgba(15,23,42,0.09);
 }
 
 /* ── Tailwind theme tokens ── */
@@ -158,14 +166,17 @@
   --color-primary-fg: var(--th-primary-fg);
   --color-primary-hover: var(--th-primary-h);
 
+  --color-selected: var(--th-selected-bg);
+  --color-selected-h: var(--th-selected-bg-h);
+
   --color-ok: var(--th-ok);
   --color-warn: var(--th-warn);
   --color-err: var(--th-err);
 
-  --radius-sm: 8px;
-  --radius-md: 10px;
-  --radius-lg: 14px;
-  --radius-xl: 18px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 10px;
 }
 
 /* ── Global ── */
@@ -308,4 +319,9 @@ button:disabled { cursor: not-allowed; }
     content-visibility: auto;
     contain-intrinsic-size: 1px 320px;
   }
+}
+
+/* ── Turn separation: whitespace boundary between conversation rounds ── */
+.session-turn + .session-turn {
+  margin-top: 2rem;
 }

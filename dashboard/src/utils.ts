@@ -132,6 +132,73 @@ export function sessionDisplayState(session: Pick<SessionInfo, 'running' | 'runS
   return session.runState === 'incomplete' ? 'incomplete' : 'completed';
 }
 
+export interface LiveSessionState {
+  key: string;
+  resolvedKey: string;
+  phase: 'queued' | 'streaming' | 'done';
+  sessionId: string | null;
+  updatedAt: number;
+  incomplete: boolean;
+  error: string | null;
+}
+
+function parseSessionKey(sessionKey: string): { agent: string; sessionId: string } | null {
+  const separator = sessionKey.indexOf(':');
+  if (separator <= 0) return null;
+  const agent = sessionKey.slice(0, separator).trim();
+  const sessionId = sessionKey.slice(separator + 1).trim();
+  if (!agent || !sessionId) return null;
+  return { agent, sessionId };
+}
+
+export function normalizeLiveSessionState(sessionKey: string, snapshot: unknown): LiveSessionState | null {
+  if (!snapshot || typeof snapshot !== 'object') return null;
+  const rawPhase = typeof (snapshot as any).phase === 'string' ? (snapshot as any).phase.trim() : '';
+  if (rawPhase !== 'queued' && rawPhase !== 'streaming' && rawPhase !== 'done') return null;
+
+  const parsedKey = parseSessionKey(sessionKey);
+  if (!parsedKey) return null;
+
+  const sessionId = typeof (snapshot as any).sessionId === 'string' && (snapshot as any).sessionId.trim()
+    ? (snapshot as any).sessionId.trim()
+    : null;
+  const updatedAt = typeof (snapshot as any).updatedAt === 'number' && Number.isFinite((snapshot as any).updatedAt)
+    ? (snapshot as any).updatedAt
+    : Date.now();
+  const error = typeof (snapshot as any).error === 'string' && (snapshot as any).error.trim()
+    ? (snapshot as any).error.trim()
+    : null;
+  const resolvedKey = sessionId ? `${parsedKey.agent}:${sessionId}` : sessionKey;
+
+  return {
+    key: sessionKey,
+    resolvedKey,
+    phase: rawPhase,
+    sessionId,
+    updatedAt,
+    incomplete: !!(snapshot as any).incomplete || !!error,
+    error,
+  };
+}
+
+export function applyLiveSessionState(session: SessionInfo, liveState?: LiveSessionState | null): SessionInfo {
+  if (!liveState) return session;
+
+  const nextRunState: SessionDisplayState = liveState.phase === 'done'
+    ? (liveState.incomplete ? 'incomplete' : 'completed')
+    : 'running';
+
+  return {
+    ...session,
+    running: nextRunState === 'running',
+    runState: nextRunState,
+    runUpdatedAt: new Date(liveState.updatedAt).toISOString(),
+    runDetail: nextRunState === 'running'
+      ? null
+      : (liveState.error || session.runDetail || null),
+  };
+}
+
 export function sessionDisplayDetail(session: Pick<SessionInfo, 'runDetail'>): string | null {
   const detail = String(session.runDetail || '').trim();
   return detail || null;
