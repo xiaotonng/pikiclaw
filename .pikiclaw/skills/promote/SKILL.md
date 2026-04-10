@@ -1,7 +1,7 @@
 ---
 name: promote
 description: This skill should be used to search GitHub for relevant issues, filter them, draft replies to promote pikiclaw using a sub-agent, and publish those replies while tracking already replied issues to avoid duplicates.
-version: 2.0.0
+version: 3.0.0
 ---
 
 # GitHub Promotion Workflow
@@ -38,11 +38,36 @@ Run multiple queries in parallel to maximize coverage:
 - `"coding agent mobile" --state open`
 - `"ai agent remote control" --state open`
 - `"ai coding assistant mobile" --state open`
+- `"claude code remote access" --state open`
+- `"claude code ipad" --state open`
+
+**Dashboard & console queries:**
+- `"claude code dashboard" --state open`
+- `"claude code web ui" --state open`
+- `"codex cli dashboard" --state open`
+- `"agent web console" --state open`
+- `"coding agent dashboard" --state open`
+- `"claude code browser interface" --state open`
+
+**Session & workflow queries:**
+- `"claude code session resume" --state open`
+- `"agent session management" --state open`
+- `"claude code multi agent" --state open`
+- `"switch between agents" --state open`
+- `"claude code task queue" --state open`
+- `"claude code context window" --state open`
 
 **Desktop/browser automation queries:**
 - `"agent browser automation" --state open`
 - `"agent desktop automation mac" --state open`
 - `"playwright mcp" --state open`
+- `"browser automation agent mcp" --state open`
+- `"appium agent automation" --state open`
+
+**Notification & monitoring queries:**
+- `"claude code notification" --state open`
+- `"coding agent notification done" --state open`
+- `"agent task completion alert" --state open`
 
 **Chinese queries:**
 - `"claude code 手机" --state open`
@@ -50,6 +75,10 @@ Run multiple queries in parallel to maximize coverage:
 - `"ai agent 手机控制" --state open`
 - `"coding agent 微信" --state open`
 - `"coding agent 飞书" --state open`
+- `"claude code 网页控制" --state open`
+- `"claude code 仪表盘" --state open`
+- `"代码agent 远程控制" --state open`
+- `"claude code 会话管理" --state open`
 
 Example command (filters out aggregator/bot repos and our own repo):
 ```bash
@@ -68,17 +97,33 @@ Select issues that express a pain point pikiclaw explicitly solves. Target pain 
 - Wanting to use Telegram, Feishu, or WeChat to interact with agents
 - Issues with official web UIs or SSH on mobile
 - Wanting async notifications when long-running agent tasks complete
+- Wanting to control agents from iPad or phone while away from desk
 
-**Agent Runtime:**
+**Agent Console & Dashboard:**
+- Wanting a web-based console to drive agent sessions from the browser (not just IM)
+- Needing real-time streaming output with tool-use activity, thinking traces, and plan progress
+- Wanting to view conversation history, images, and file attachments in a proper UI
+- Needing to monitor multiple agent sessions, context window usage, and token consumption
+- Wanting to configure agents, channels, models, and extensions from a single interface
+
+**Agent Runtime & Orchestration:**
 - Long-running agent tasks dying, sleeping, or disconnecting
 - Needing session persistence, resume, or multi-turn conversation support
 - Wanting to switch agents (Claude/Codex/Gemini) mid-workflow
 - Codex needing human-in-the-loop input remotely (Human Loop)
+- Wanting a task queue to send follow-up instructions while agent is busy
+- Needing to interrupt/steer a running task without killing it (Steer)
+- Wanting to see context window usage per turn and per session
 
 **GUI & Automation:**
 - Wanting an agent to control a browser (login-persistent, managed Chrome profile)
 - macOS desktop automation (open apps, click, type, screenshot) via agent
 - Needing MCP tools for file sharing between agent and IM
+
+**Skills & Extensibility:**
+- Wanting project-level reusable skills or commands for agents
+- Needing compatibility with .claude/commands or custom skill systems
+- Wanting to trigger predefined workflows from IM
 
 **Setup & Management:**
 - Wanting a web dashboard to configure agents, channels, and permissions
@@ -96,27 +141,51 @@ Delegate the drafting process to a sub-agent for high-quality, focused output.
 > Draft short, highly grounded, non-spammy GitHub issue replies to promote 'pikiclaw'.
 >
 > **What pikiclaw is:**
-> A Node.js CLI (`npx pikiclaw@latest`) that bridges local Claude Code, Codex CLI, and Gemini CLI to Telegram, Feishu, or WeChat. It runs on your own machine — your files, your tools, your environment — and lets you control everything from your phone.
+> A Node.js CLI (`npx pikiclaw@latest`) that bridges local Claude Code, Codex CLI, and Gemini CLI to Telegram, Feishu, or WeChat — and also serves a full web dashboard at localhost:3939 that works as a standalone agent console. It runs on your own machine — your files, your tools, your environment — and lets you control everything from your phone or browser.
 >
 > **Key capabilities to draw from (use only what's relevant to the issue):**
+>
+> *Channels & Agents:*
 > - Three IM channels: Telegram, Feishu, WeChat — run one or all simultaneously
 > - Three agent backends: Claude Code, Codex CLI, Gemini CLI — switch mid-session
-> - Streaming preview with continuous message updates
+> - Model listing and switching per agent (e.g., opus/sonnet/haiku for Claude, o4-mini/o3/gpt-5.4 for Codex)
+>
+> *Dashboard as Agent Console:*
+> - Web dashboard at localhost:3939 — a full interactive agent console in the browser
+> - Full conversation history with tool-use activity, thinking traces, plan progress
+> - Real-time streaming output via WebSocket (bidirectional push, no polling)
+> - Image attachments, file previews, and an input composer with file upload
+> - Context window usage display (percentage per turn)
+> - Session monitoring across all agents, token usage tracking
+> - Channel setup, agent config, model selection, permissions, extensions — all in one UI
+>
+> *Runtime & Orchestration:*
+> - Streaming preview with continuous message updates in IM
 > - Session switching, resume, and multi-turn conversations
+> - Task queue with **Steer** — send follow-up instructions while agent is busy; interrupt and re-prioritize the running task
 > - Codex Human Loop — when Codex asks a question mid-task, it surfaces in your IM as an interactive prompt
+> - Long-task sleep prevention, watchdog, and auto-restart
+> - Draft persistence across session switches in the dashboard
+>
+> *MCP & GUI Automation:*
 > - MCP bridge per stream: `im_list_files`, `im_send_file` for real-time file exchange
 > - Browser automation — managed Chrome profile via Playwright MCP (log in once, reuse across tasks)
 > - macOS desktop automation — Appium Mac2 (`desktop_open_app`, `desktop_snapshot`, `desktop_click`, `desktop_type`, `desktop_screenshot`)
-> - Web Dashboard at localhost:3939 for channel setup, agent config, permissions, extensions, session monitoring
-> - Long-task sleep prevention, watchdog, and auto-restart
-> - Project-level skills system (`.pikiclaw/skills/`)
+>
+> *Skills & Extensibility:*
+> - Project-level skills system (`.pikiclaw/skills/`) — reusable workflows triggered from IM
+> - Compatible with `.claude/commands/*.md` skill format
+> - Trigger skills via `/skills` and `/sk_<name>` in chat
+>
+> *Other:*
 > - Working directory browsing and switching from IM
 > - File attachments automatically enter the session workspace
 > - Long text auto-splitting; images and files sent back to IM directly
+> - i18n: Chinese & English; light / dark theme
 >
 > **Reply formula:**
 > 1. One sentence acknowledging the specific pain point in the issue
-> 2. One sentence explaining the relevant architectural solution (be specific — e.g., "watchdog + auto-restart", "MCP bridge for file exchange", "Human Loop for Codex prompts", "managed Chrome profile for persistent logins")
+> 2. One sentence explaining the relevant architectural solution (be specific — e.g., "WebSocket-based dashboard with full tool-use trace and streaming", "task queue with Steer to interrupt and re-prioritize", "managed Chrome profile for persistent logins", "Human Loop for Codex prompts")
 > 3. Direct call to action: `npx pikiclaw@latest`
 > 4. End with project link: `GitHub: https://github.com/xiaotonng/pikiclaw`
 >
