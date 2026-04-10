@@ -289,7 +289,10 @@ describe('Bot external session control', () => {
       text: 'partial reply',
       thinking: 'thinking...',
     });
-    expect(bot.getStreamSnapshot('codex:pending_dashboard')).toBeNull();
+    // After promotion, the old key transparently redirects to the promoted snapshot
+    expect(bot.getStreamSnapshot('codex:pending_dashboard')).toMatchObject({
+      sessionId: 'sess-promoted',
+    });
 
     const runtime = bot.sessionStates.get('codex:sess-promoted');
     expect(runtime?.runningTaskIds.size ?? 0).toBe(0);

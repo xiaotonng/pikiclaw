@@ -482,6 +482,7 @@ export function WorkdirModal({ open, onClose }: { open: boolean; onClose: () => 
   const t = useMemo(() => createT(locale), [locale]);
   const runtimeWorkdir = state?.bot?.workdir || state?.runtimeWorkdir || '';
   const [selectedPath, setSelectedPath] = useState('');
+  const [switching, setSwitching] = useState(false);
   // Reset key forces DirBrowser to re-initialize when modal reopens
   const [browseKey, setBrowseKey] = useState(0);
 
@@ -496,11 +497,13 @@ export function WorkdirModal({ open, onClose }: { open: boolean; onClose: () => 
   const handleConfirm = async () => {
     const p = selectedPath.trim();
     if (!p) { toast(t('modal.selectDirFirst'), false); return; }
+    setSwitching(true);
     try {
       const r = await api.switchWorkdir(p);
       if (r.ok) { toast(t('modal.switchedTo') + r.workdir); onClose(); setTimeout(reload, 300); }
       else toast(r.error || t('modal.switchFailed'), false);
     } catch { toast(t('modal.switchFailed'), false); }
+    finally { setSwitching(false); }
   };
 
   return (
@@ -515,8 +518,10 @@ export function WorkdirModal({ open, onClose }: { open: boolean; onClose: () => 
       <ModalHeader title={t('modal.switchWorkdir')} onClose={onClose} />
       <DirBrowser key={browseKey} initialPath={runtimeWorkdir} onSelect={handleSelect} t={t} />
       <div className="flex justify-end gap-2 mt-4">
-        <Button variant="ghost" onClick={onClose}>{t('modal.cancel')}</Button>
-        <Button variant="primary" onClick={handleConfirm}>{t('modal.selectDir')}</Button>
+        <Button variant="ghost" onClick={onClose} disabled={switching}>{t('modal.cancel')}</Button>
+        <Button variant="primary" onClick={handleConfirm} disabled={switching}>
+          {switching ? t('status.loading') : t('modal.selectDir')}
+        </Button>
       </div>
     </Modal>
   );

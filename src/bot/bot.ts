@@ -9,7 +9,7 @@ import path from 'node:path';
 import { execSync, spawn } from 'node:child_process';
 import { getActiveUserConfig, onUserConfigChange, resolveUserWorkdir, setUserWorkdir } from '../core/config/user-config.js';
 import {
-  doStream, ensureManagedSession, findManagedThreadSession, getUsage, initializeProjectSkills, listAgents, listModels, listSkills, stageSessionFiles,
+  doStream, ensureManagedSession, findManagedThreadSession, findThreadSessionAcrossAgents, getUsage, initializeProjectSkills, listAgents, listModels, listSkills, stageSessionFiles,
   type Agent, type CodexCumulativeUsage, type StreamOpts, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type SessionInfo, type UsageResult,
   type CodexInteractionRequest, type CodexTurnControl,
   type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult,
@@ -68,6 +68,39 @@ export function normalizeAgent(raw: string): Agent {
 
 export function thinkLabel(agent: Agent): string {
   try { return getDriver(agent).thinkLabel; } catch { return 'Thinking'; }
+}
+
+// ---------------------------------------------------------------------------
+// Cross-agent context migration
+// ---------------------------------------------------------------------------
+
+const CROSS_AGENT_CONTEXT_MAX_CHARS = 4000;
+const CROSS_AGENT_MSG_MAX_CHARS = 600;
+
+/**
+ * Format conversation messages from a previous agent session into a compact
+ * context block that can be prepended to the first prompt of the new session.
+ */
+function formatCrossAgentContext(agent: string, messages: TailMessage[]): string {
+  const lines: string[] = [];
+  let totalLen = 0;
+  for (const msg of messages) {
+    const label = msg.role === 'user' ? 'User' : 'Assistant';
+    let text = msg.text.trim();
+    if (text.length > CROSS_AGENT_MSG_MAX_CHARS) {
+      text = text.slice(0, CROSS_AGENT_MSG_MAX_CHARS) + '…';
+    }
+    const line = `${label}: ${text}`;
+    if (totalLen + line.length > CROSS_AGENT_CONTEXT_MAX_CHARS) break;
+    lines.push(line);
+    totalLen += line.length;
+  }
+  if (!lines.length) return '';
+  return [
+    `<previous-conversation agent="${agent}">`,
+    ...lines,
+    '</previous-conversation>',
+  ].join('\n');
 }
 
 function appendExtraPrompt(base: string | undefined, extra: string): string {
@@ -136,7 +169,7 @@ export interface SessionRuntime {
 export type StreamEvent =
   | { type: 'start'; taskId: string; agent: string; sessionId: string | null }
   | { type: 'text'; text: string; thinking: string; activity?: string; plan?: StreamPreviewPlan | null }
-  | { type: 'done'; taskId: string; sessionId: string | null; error?: string }
+  | { type: 'done'; taskId: string; sessionId: string | null; error?: string; incomplete?: boolean }
   | { type: 'queued'; taskId: string; position: number }
   | { type: 'cancelled'; taskId: string };
 
@@ -145,6 +178,7 @@ export interface StreamSnapshot {
   phase: 'queued' | 'streaming' | 'done';
   taskId: string;
   queuedTaskId?: string;
+  incomplete?: boolean;
   text?: string;
   thinking?: string;
   activity?: string;
@@ -251,10 +285,21 @@ export class Bot {
   /* ── Dashboard stream state (polling-friendly snapshots) ── */
   private streamSnapshots = new Map<string, StreamSnapshot>();
   private snapshotCleanupTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Maps promoted session keys (old → new) so poll endpoints can resolve pending IDs. */
+  private promotedSessionKeys = new Map<string, string>();
 
-  /** Get the current streaming snapshot for a session (used by polling endpoint). */
+  /** Get the current streaming snapshot for a session (used by polling endpoint).
+   *  If the session was promoted (pending → native), follows the redirect transparently. */
   getStreamSnapshot(sessionKey: string): StreamSnapshot | null {
-    return this.streamSnapshots.get(sessionKey) ?? null;
+    const snap = this.streamSnapshots.get(sessionKey);
+    if (snap) return snap;
+    // Follow promotion redirect: pending_XXX → native ID
+    const promotedKey = this.promotedSessionKeys.get(sessionKey);
+    if (promotedKey) {
+      const promotedSnap = this.streamSnapshots.get(promotedKey);
+      if (promotedSnap) return promotedSnap;
+    }
+    return null;
   }
 
   /* ── Dashboard SSE push (injected by dashboard layer to avoid circular import) ── */
@@ -332,6 +377,7 @@ export class Bot {
           phase: 'done',
           taskId: event.taskId,
           sessionId: event.sessionId,
+          incomplete: !!event.incomplete,
           text: prev?.text || '',
           thinking: prev?.thinking || '',
           activity: prev?.activity || '',
@@ -647,6 +693,19 @@ export class Bot {
     }
 
     this.moveSessionStreamSnapshot(previousKey, nextKey);
+
+    // Track promotion so poll endpoints can resolve pending → native
+    this.promotedSessionKeys.set(previousKey, nextKey);
+
+    // Update the promoted snapshot's sessionId to reflect the native ID
+    const promotedSnap = this.streamSnapshots.get(nextKey);
+    if (promotedSnap) promotedSnap.sessionId = resolvedSessionId;
+
+    // Notify dashboard clients still tracking the old (pending) key via SSE
+    // so they can detect the promotion and navigate to the correct session
+    if (this._onStreamSnapshot && promotedSnap) {
+      this._onStreamSnapshot(previousKey, { ...promotedSnap });
+    }
 
     for (const [, cs] of this.chats) {
       const matchesPreviousSelection = cs.activeSessionKey === previousKey;
@@ -1087,6 +1146,7 @@ export class Bot {
           type: 'done',
           taskId,
           sessionId: result.sessionId || session.sessionId,
+          incomplete: !!result.incomplete,
           ...(result.ok ? {} : { error: result.error || result.message }),
         });
       } catch (error: any) {
@@ -1094,6 +1154,7 @@ export class Bot {
           type: 'done',
           taskId,
           sessionId: session.sessionId,
+          incomplete: true,
           error: error?.message || String(error),
         });
       } finally {
@@ -1331,7 +1392,7 @@ export class Bot {
   }
 
   async runStream(
-    prompt: string, cs: Pick<SessionRuntime, 'key' | 'workdir' | 'agent' | 'sessionId' | 'workspacePath' | 'codexCumulative' | 'modelId' | 'thinkingEffort'> | ChatState, attachments: string[],
+    prompt: string, cs: Pick<SessionRuntime, 'key' | 'workdir' | 'agent' | 'sessionId' | 'workspacePath' | 'codexCumulative' | 'modelId' | 'thinkingEffort' | 'threadId'> | ChatState, attachments: string[],
     onText: (text: string, thinking: string, activity?: string, meta?: StreamPreviewMeta, plan?: StreamPreviewPlan | null) => void,
     systemPrompt?: string,
     mcpSendFile?: import('../agent/mcp/bridge.js').McpSendFileCallback,
@@ -1353,6 +1414,36 @@ export class Bot {
     this.debug(`[runStream] agent=${cs.agent} session=${cs.sessionId || '(new)'} workdir=${sessionWorkdir} timeout=${this.runTimeout}s attachments=${attachments.length}`);
     this.debug(`[runStream] ${cs.agent} config: model=${resolvedModel} extraArgs=[${extraArgs.join(' ')}]`);
     const isFirstTurnOfSession = !cs.sessionId || isPendingSessionId(cs.sessionId);
+
+    // ── Cross-agent context migration ──
+    // When starting a new session that shares a threadId with a session from a
+    // different agent, fetch the previous conversation tail and prepend it so the
+    // new agent has continuity.
+    if (isFirstTurnOfSession) {
+      const threadId = 'threadId' in cs ? cs.threadId : ('activeThreadId' in cs ? (cs as ChatState).activeThreadId : null);
+      if (threadId) {
+        const prevSession = findThreadSessionAcrossAgents(sessionWorkdir, threadId, cs.agent);
+        if (prevSession?.sessionId && prevSession.agent) {
+          try {
+            const tail = await querySessionTail({
+              agent: prevSession.agent as Agent,
+              sessionId: prevSession.sessionId,
+              workdir: sessionWorkdir,
+              limit: 20,
+            });
+            if (tail.ok && tail.messages.length) {
+              const contextBlock = formatCrossAgentContext(prevSession.agent, tail.messages);
+              if (contextBlock) {
+                prompt = contextBlock + '\n\n' + prompt;
+                this.debug(`[runStream] injected cross-agent context from ${prevSession.agent}:${prevSession.sessionId} (${tail.messages.length} msgs)`);
+              }
+            }
+          } catch (e: any) {
+            this.debug(`[runStream] cross-agent context fetch failed: ${e?.message || e}`);
+          }
+        }
+      }
+    }
     const mcpSystemPrompt = mcpSendFile
       ? appendExtraPrompt(buildMcpDeliveryPrompt(), buildBrowserAutomationPrompt(browserEnabled))
       : '';

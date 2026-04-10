@@ -58,7 +58,7 @@ export {
 export {
   updateSessionMeta, promoteSessionId,
   listPikiclawSessions, findPikiclawSession,
-  ensureManagedSession, findManagedThreadSession, stageSessionFiles,
+  ensureManagedSession, findManagedThreadSession, findThreadSessionAcrossAgents, stageSessionFiles,
   mergeManagedAndNativeSessions,
   getSessions, getSessionTail, getSessionMessages,
   applyTurnWindow, applyTurnFilter,

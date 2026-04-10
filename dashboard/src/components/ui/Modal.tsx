@@ -39,7 +39,7 @@ export function Modal({
       />
       <div
         className={cn(
-          'glass-strong relative max-h-[min(88vh,860px)] w-full overflow-hidden rounded-[24px] border border-edge-h shadow-[0_32px_96px_rgba(2,6,23,0.28),0_8px_24px_rgba(15,23,42,0.08)] animate-scale',
+          'glass-strong relative max-h-[min(88vh,860px)] w-full overflow-hidden rounded-xl border border-edge-h shadow-[0_32px_96px_rgba(2,6,23,0.28),0_8px_24px_rgba(15,23,42,0.08)] animate-scale',
           wide ? 'max-w-[720px]' : 'max-w-[480px]'
         )}
         style={{
