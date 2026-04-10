@@ -21,3 +21,8 @@ https://github.com/Johnixr/claude-code-wechat-channel/issues/12
 https://github.com/anthropics/claude-code/issues/38739
 https://github.com/anthropics/claude-code/issues/28758
 https://github.com/RichardAtCT/claude-code-telegram/issues/102
+https://github.com/anthropics/claude-code/issues/42671
+https://github.com/anthropics/claude-code/issues/41503
+https://github.com/zhukunpenglinyutong/jetbrains-cc-gui/issues/398
+https://github.com/anthropics/claude-code/issues/45408
+https://github.com/Wechat-ggGitHub/wechat-claude-code/issues/7
