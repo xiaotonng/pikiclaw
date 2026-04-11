@@ -25,7 +25,8 @@ export type CommandAction =
   | { kind: 'models.select.model'; modelId: string }
   | { kind: 'models.select.effort'; effort: string }
   | { kind: 'models.confirm' }
-  | { kind: 'skill.run'; command: string };
+  | { kind: 'skill.run'; command: string }
+  | { kind: 'mode.switch'; mode: string };
 
 export type CommandItemState = 'default' | 'current' | 'running' | 'unavailable';
 
@@ -43,7 +44,7 @@ export interface CommandSelectionItem {
 }
 
 export interface CommandSelectionView {
-  kind: 'sessions' | 'agents' | 'models' | 'skills';
+  kind: 'sessions' | 'agents' | 'models' | 'skills' | 'mode';
   title: string;
   detail?: string | null;
   metaLines: string[];
@@ -102,6 +103,8 @@ export function encodeCommandAction(action: CommandAction): string {
       return 'mc';
     case 'skill.run':
       return `skr:${action.command}`;
+    case 'mode.switch':
+      return `pm:${action.mode}`;
   }
 }
 
@@ -149,6 +152,11 @@ export function decodeCommandAction(data: string): CommandAction | null {
     const command = data.slice(4);
     if (!command) return null;
     return { kind: 'skill.run', command };
+  }
+  if (data.startsWith('pm:')) {
+    const mode = data.slice(3);
+    if (!mode) return null;
+    return { kind: 'mode.switch', mode };
   }
   return null;
 }
@@ -325,6 +333,26 @@ export function buildSkillsCommandView(bot: Bot, chatId: ChatId): CommandSelecti
   };
 }
 
+export function buildModeCommandView(bot: Bot, chatId: ChatId): CommandSelectionView {
+  const cs = bot.chat(chatId);
+  const isPlanMode = cs.agent === 'claude' && bot.claudePermissionMode === 'plan';
+  return {
+    kind: 'mode',
+    title: 'Agent Mode',
+    detail: `Current: ${isPlanMode ? 'Plan (read-only)' : 'Code (full access)'}`,
+    metaLines: cs.agent !== 'claude' ? ['Only available for Claude agent'] : [],
+    items: [],
+    rows: [
+      [
+        { label: 'Code', action: { kind: 'mode.switch', mode: 'bypassPermissions' },
+          state: isPlanMode ? 'default' : 'current', primary: !isPlanMode },
+        { label: 'Plan', action: { kind: 'mode.switch', mode: 'plan' },
+          state: isPlanMode ? 'current' : 'default', primary: isPlanMode },
+      ],
+    ],
+  };
+}
+
 export async function executeCommandAction(
   bot: Bot,
   chatId: ChatId,
@@ -495,6 +523,20 @@ export async function executeCommandAction(
         prompt: resolved.prompt,
         skillName: resolved.skillName,
         callbackText: `Run ${resolved.skillName}`,
+      };
+    }
+
+    case 'mode.switch': {
+      const cs = bot.chat(chatId);
+      if (cs.agent !== 'claude') {
+        return { kind: 'noop', message: 'Mode toggle is only available for Claude agent' };
+      }
+      bot.switchPermissionModeForChat(chatId, action.mode);
+      const label = action.mode === 'plan' ? 'Plan (read-only)' : 'Code (full access)';
+      return {
+        kind: 'notice',
+        callbackText: `Mode: ${label}`,
+        notice: { title: 'Agent Mode', value: label },
       };
     }
   }

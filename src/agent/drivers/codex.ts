@@ -75,6 +75,7 @@ export class CodexAppServer {
       agentLog(`[codex-rpc] spawning: codex ${args.join(' ')}`);
       const proc = spawn('codex', args, {
         stdio: ['pipe', 'pipe', 'pipe'],
+        shell: true,
         detached: process.platform !== 'win32',
       });
       this.proc = proc;

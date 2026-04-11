@@ -9,6 +9,7 @@ import {
   Bot,
   buildPrompt,
   fmtUptime,
+  fmtBytes,
   normalizeAgent,
   parseAllowedChatIds,
   type SessionRuntime,
@@ -17,7 +18,21 @@ import {
 import { BOT_SHUTDOWN_FORCE_EXIT_MS, buildSessionTaskId } from '../../bot/orchestration.js';
 import { shutdownAllDrivers } from '../../agent/driver.js';
 import type { McpSendFileCallback } from '../../agent/mcp/bridge.js';
-import { registerProcessRuntime } from '../../core/process-control.js';
+import {
+  formatActiveTaskRestartError,
+  getActiveTaskCount,
+  registerProcessRuntime,
+  requestProcessRestart,
+} from '../../core/process-control.js';
+import {
+  getStatusDataAsync,
+  getHostDataSync,
+  getAgentsListData,
+  getSkillsListData,
+  getModelsListData,
+  getSessionsPageData,
+  getStartData,
+} from '../../bot/commands.js';
 import { WeixinChannel, type WeixinContext, type WeixinMessagePayload } from './channel.js';
 import { getActiveUserConfig } from '../../core/config/user-config.js';
 
@@ -123,18 +138,6 @@ export class WeixinBot extends Bot {
     return this.ensureSessionForChat(chatId, title, files);
   }
 
-  private buildStatusText(chatId: string): string {
-    const status = this.getStatusData(chatId);
-    return [
-      `Agent: ${status.agent}`,
-      `Model: ${status.model || '-'}`,
-      `Session: ${status.sessionId || 'new'}`,
-      `Tasks: ${status.activeTasksCount}`,
-      `Workdir: ${status.workdir}`,
-      `Uptime: ${fmtUptime(status.uptime)}`,
-    ].join('\n');
-  }
-
   private async handleCommand(text: string, ctx: WeixinContext): Promise<boolean> {
     const [rawCommand, ...rest] = text.trim().slice(1).split(/\s+/);
     const command = rawCommand?.toLowerCase() || '';
@@ -142,10 +145,18 @@ export class WeixinBot extends Bot {
     switch (command) {
       case 'help':
         await ctx.reply([
-          '/help',
-          '/new',
-          '/status',
-          '/agent codex|claude|gemini',
+          '/help - Show commands',
+          '/new - New session',
+          '/status - Session status',
+          '/host - Host system info',
+          '/agent [codex|claude|gemini] - Switch agent',
+          '/models [name|#] - Switch model',
+          '/mode [plan|code] - Toggle plan mode (claude only)',
+          '/switch [path] - Change workdir',
+          '/sessions [new|#] - List/switch sessions',
+          '/skills - List project skills',
+          '/stop - Stop current task',
+          '/restart - Restart pikiclaw',
         ].join('\n'));
         return true;
       case 'new':
@@ -153,24 +164,266 @@ export class WeixinBot extends Bot {
         await ctx.reply('Started a new session.');
         return true;
       case 'status':
-        await ctx.reply(this.buildStatusText(ctx.chatId));
+        await this.cmdStatus(ctx);
+        return true;
+      case 'host':
+        await this.cmdHost(ctx);
         return true;
       case 'agent':
-        if (!args) {
-          await ctx.reply('Usage: /agent codex|claude|gemini');
-          return true;
-        }
-        try {
-          const agent = normalizeAgent(args);
-          this.switchAgentForChat(ctx.chatId, agent);
-          await ctx.reply(`Agent switched to ${agent}.`);
-        } catch {
-          await ctx.reply('Usage: /agent codex|claude|gemini');
-        }
+        await this.cmdAgent(ctx, args);
+        return true;
+      case 'models':
+        await this.cmdModels(ctx, args);
+        return true;
+      case 'mode':
+        await this.cmdMode(ctx, args);
+        return true;
+      case 'switch':
+        await this.cmdSwitch(ctx, args);
+        return true;
+      case 'sessions':
+        await this.cmdSessions(ctx, args);
+        return true;
+      case 'skills':
+        await this.cmdSkills(ctx);
+        return true;
+      case 'stop':
+        await this.cmdStop(ctx);
+        return true;
+      case 'restart':
+        await this.cmdRestart(ctx);
+        return true;
+      case 'start':
+        await this.cmdStart(ctx);
         return true;
       default:
         return false;
     }
+  }
+
+  private async cmdStart(ctx: WeixinContext) {
+    const d = getStartData(this, ctx.chatId);
+    const lines = [`pikiclaw v${d.version}`, `Workdir: ${d.workdir}`, '', `Agent: ${d.agent}`];
+    for (const a of d.agentDetails) {
+      const parts = [`  ${a.agent}: ${a.model}`];
+      if (a.effort) parts[0] += ` (effort: ${a.effort})`;
+      lines.push(parts[0]);
+    }
+    lines.push('', 'Ready. Send a message to start.');
+    await ctx.reply(lines.join('\n'));
+  }
+
+  private async cmdStatus(ctx: WeixinContext) {
+    const d = await getStatusDataAsync(this, ctx.chatId);
+    const lines = [
+      `pikiclaw v${d.version}`,
+      `Uptime: ${fmtUptime(d.uptime)}`,
+      `PID: ${d.pid} | RSS: ${fmtBytes(d.memRss)} | Heap: ${fmtBytes(d.memHeap)}`,
+      `Workdir: ${d.workdir}`,
+      '',
+      `Agent: ${d.agent}`,
+      `Model: ${d.model || '-'}`,
+      `Session: ${d.sessionId ? d.sessionId.slice(0, 16) : '(new)'}`,
+      `Tasks: ${d.activeTasksCount}`,
+    ];
+    if (d.running) {
+      lines.push(`Running: ${fmtUptime(Date.now() - d.running.startedAt)}`);
+    }
+    await ctx.reply(lines.join('\n'));
+  }
+
+  private async cmdHost(ctx: WeixinContext) {
+    const d = getHostDataSync(this);
+    const lines = [
+      `Host: ${d.hostName}`,
+      `CPU: ${d.cpuModel} x${d.cpuCount}`,
+    ];
+    if (d.cpuUsage) {
+      lines.push(`CPU Usage: ${d.cpuUsage.usedPercent.toFixed(1)}% (user ${d.cpuUsage.userPercent.toFixed(1)}%, sys ${d.cpuUsage.sysPercent.toFixed(1)}%)`);
+    }
+    lines.push(
+      `Memory: ${fmtBytes(d.memoryUsed)} / ${fmtBytes(d.totalMem)} (${d.memoryPercent.toFixed(0)}%)`,
+      `Available: ${fmtBytes(d.memoryAvailable)}`,
+    );
+    if (d.battery) lines.push(`Battery: ${d.battery.percent} (${d.battery.state})`);
+    if (d.disk) lines.push(`Disk: ${d.disk.used} / ${d.disk.total} (${d.disk.percent})`);
+    lines.push(`Process: PID ${d.selfPid} | RSS ${fmtBytes(d.selfRss)} | Heap ${fmtBytes(d.selfHeap)}`);
+    if (d.topProcs.length > 1) {
+      lines.push('', 'Top Processes:');
+      lines.push(...d.topProcs);
+    }
+    await ctx.reply(lines.join('\n'));
+  }
+
+  private async cmdAgent(ctx: WeixinContext, args: string) {
+    if (!args) {
+      const d = getAgentsListData(this, ctx.chatId);
+      const lines = [`Current: ${d.currentAgent}`, ''];
+      for (const a of d.agents) {
+        const mark = a.isCurrent ? ' ←' : '';
+        const ver = a.version ? ` (${a.version})` : '';
+        lines.push(`${a.installed ? '✓' : '✗'} ${a.agent}${ver}${mark}`);
+      }
+      lines.push('', 'Usage: /agent codex|claude|gemini');
+      await ctx.reply(lines.join('\n'));
+      return;
+    }
+    try {
+      const agent = normalizeAgent(args);
+      this.switchAgentForChat(ctx.chatId, agent);
+      await ctx.reply(`Agent switched to ${agent}.`);
+    } catch {
+      await ctx.reply('Unknown agent. Use: /agent codex|claude|gemini');
+    }
+  }
+
+  private async cmdModels(ctx: WeixinContext, args: string) {
+    const d = await getModelsListData(this, ctx.chatId);
+    if (args) {
+      const idx = parseInt(args, 10);
+      let modelId: string | null = null;
+      if (!isNaN(idx) && idx >= 1 && idx <= d.models.length) {
+        modelId = d.models[idx - 1].id;
+      } else {
+        const match = d.models.find(m => m.id === args || m.alias === args);
+        if (match) modelId = match.id;
+      }
+      if (modelId) {
+        this.switchModelForChat(ctx.chatId, modelId);
+        await ctx.reply(`Model switched to ${modelId}.`);
+        return;
+      }
+      await ctx.reply(`Unknown model: ${args}`);
+      return;
+    }
+    const lines = [`Current: ${d.currentModel}`, ''];
+    d.models.forEach((m, i) => {
+      const alias = m.alias ? ` (${m.alias})` : '';
+      const mark = m.isCurrent ? ' ←' : '';
+      lines.push(`${i + 1}. ${m.id}${alias}${mark}`);
+    });
+    if (d.effort) {
+      lines.push('', `Effort: ${d.effort.current}`);
+      for (const lv of d.effort.levels) {
+        const mark = lv.isCurrent ? ' ←' : '';
+        lines.push(`  ${lv.id} - ${lv.label}${mark}`);
+      }
+    }
+    lines.push('', 'Usage: /models <name|number>');
+    await ctx.reply(lines.join('\n'));
+  }
+
+  private async cmdMode(ctx: WeixinContext, args: string) {
+    if (this.chat(ctx.chatId).agent !== 'claude') {
+      await ctx.reply('Mode toggle is only available for Claude agent.');
+      return;
+    }
+    const isPlan = this.agentConfigs.claude.permissionMode === 'plan';
+    if (args === 'plan') {
+      this.switchPermissionModeForChat(ctx.chatId, 'plan');
+      await ctx.reply('Mode: Plan (read-only)');
+    } else if (args === 'code') {
+      this.switchPermissionModeForChat(ctx.chatId, 'bypassPermissions');
+      await ctx.reply('Mode: Code (full access)');
+    } else {
+      await ctx.reply(`Current: ${isPlan ? 'Plan (read-only)' : 'Code (full access)'}\n\nUsage: /mode plan|code`);
+    }
+  }
+
+  private async cmdSwitch(ctx: WeixinContext, args: string) {
+    const wd = this.chatWorkdir(ctx.chatId);
+    if (args) {
+      const resolvedPath = path.resolve(args.replace(/^~/, process.env.HOME || os.homedir()));
+      if (!fs.existsSync(resolvedPath) || !fs.statSync(resolvedPath).isDirectory()) {
+        await ctx.reply(`Not a valid directory: ${resolvedPath}`);
+        return;
+      }
+      const oldPath = this.switchWorkdir(resolvedPath);
+      await ctx.reply(`Workdir switched:\n${oldPath}\n→ ${resolvedPath}`);
+      return;
+    }
+    await ctx.reply(`Current workdir: ${wd}\n\nUsage: /switch <path>`);
+  }
+
+  private async cmdSessions(ctx: WeixinContext, args: string) {
+    const arg = args.trim().toLowerCase();
+    if (arg === 'new') {
+      this.resetConversationForChat(ctx.chatId);
+      await ctx.reply('Started a new session.');
+      return;
+    }
+    const idx = parseInt(arg, 10);
+    if (!isNaN(idx) && idx >= 1) {
+      const d = await getSessionsPageData(this, ctx.chatId, 0, 100);
+      const target = d.sessions[idx - 1];
+      if (target) {
+        const result = await this.fetchSessions(this.chat(ctx.chatId).agent, this.chatWorkdir(ctx.chatId));
+        const session = result.sessions.find(s => s.sessionId === target.key);
+        if (session) {
+          this.adoptExistingSessionForChat(ctx.chatId, session);
+          await ctx.reply(`Switched to session ${target.title}`);
+        } else {
+          await ctx.reply(`Session not found.`);
+        }
+        return;
+      }
+      await ctx.reply(`Session #${idx} not found.`);
+      return;
+    }
+    const d = await getSessionsPageData(this, ctx.chatId, 0, 10);
+    if (!d.sessions.length) {
+      await ctx.reply('No sessions found.');
+      return;
+    }
+    const lines = [`Sessions (${d.total}):`, ''];
+    d.sessions.forEach((s, i) => {
+      const mark = s.isCurrent ? ' ←' : '';
+      const running = s.isRunning ? ' [running]' : '';
+      lines.push(`${i + 1}. ${s.title} · ${s.time}${mark}${running}`);
+    });
+    lines.push('', 'Usage: /sessions new | /sessions <#>');
+    await ctx.reply(lines.join('\n'));
+  }
+
+  private async cmdSkills(ctx: WeixinContext) {
+    const d = getSkillsListData(this, ctx.chatId);
+    if (!d.skills.length) {
+      await ctx.reply('No project skills found.');
+      return;
+    }
+    const lines = [`Skills (${d.agent}):`, ''];
+    for (const s of d.skills) {
+      const desc = s.description ? ` - ${s.description}` : '';
+      lines.push(`/${s.command} (${s.label})${desc}`);
+    }
+    await ctx.reply(lines.join('\n'));
+  }
+
+  private async cmdStop(ctx: WeixinContext) {
+    const session = this.selectedSession(ctx.chatId);
+    if (!session) {
+      await ctx.reply('No active session to stop.');
+      return;
+    }
+    const { interrupted, cancelledQueued } = this.stopTasksForSession(session.key);
+    if (!interrupted && cancelledQueued === 0) {
+      await ctx.reply('No running or queued work for the current session.');
+      return;
+    }
+    const parts: string[] = [];
+    if (interrupted) parts.push('interrupted current run');
+    if (cancelledQueued > 0) parts.push(`cancelled ${cancelledQueued} queued task(s)`);
+    await ctx.reply(`Stopped: ${parts.join(', ')}.`);
+  }
+
+  private async cmdRestart(ctx: WeixinContext) {
+    const activeTasks = getActiveTaskCount();
+    if (activeTasks > 0) {
+      await ctx.reply(formatActiveTaskRestartError(activeTasks));
+      return;
+    }
+    await ctx.reply('Restarting pikiclaw...');
+    void requestProcessRestart({ log: msg => this.log(msg) });
   }
 
   private createMcpSendFile(chatId: string): McpSendFileCallback {

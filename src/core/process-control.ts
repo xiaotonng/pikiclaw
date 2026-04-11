@@ -76,12 +76,19 @@ export function ensureNonInteractiveRestartArgs(bin: string, args: string[]): st
 }
 
 export function getDefaultRestartCmd(): string {
+  const argv0 = process.argv[0] ?? '';
   const argv1 = process.argv[1] ?? '';
   if (argv1.endsWith('.ts') || argv1.includes('/tsx') || argv1.includes('/ts-node')) {
-    const isTsxLoader = !process.argv[0]?.includes('/tsx')
+    const isTsxLoader = !argv0.includes('/tsx')
       && process.execArgv?.some(arg => arg.includes('tsx'));
     const parts = isTsxLoader ? ['tsx', argv1] : process.argv.slice(0, 2);
     return parts.map(arg => arg.includes(' ') ? `"${arg}"` : arg).join(' ');
+  }
+  // Running from an installed package (e.g. npm install -g) — reuse the same entry point
+  if (argv1.endsWith('.js') && (argv1.includes('pikiclaw') || argv1.includes('pikiclaw'))) {
+    const nodeBin = argv0.includes(' ') ? `"${argv0}"` : argv0;
+    const entry = argv1.includes(' ') ? `"${argv1}"` : argv1;
+    return `${nodeBin} ${entry}`;
   }
   return 'npx --yes pikiclaw@latest';
 }
@@ -202,9 +209,12 @@ function buildRestartEnvForSpawn(extraEnv: Record<string, string>) {
 }
 
 function spawnReplacementProcess(bin: string, args: string[], env: Record<string, string>, log?: (message: string) => void) {
-  const child = spawn(bin, args, {
+  // npx/npx.cmd needs shell resolution; node.exe does not
+  const needsShell = process.platform === 'win32' && !bin.endsWith('node.exe');
+  const child = spawn(needsShell ? `"${bin}"` : bin, args, {
     stdio: 'inherit',
     detached: true,
+    shell: needsShell || undefined,
     env,
     cwd: process.cwd(),
   });

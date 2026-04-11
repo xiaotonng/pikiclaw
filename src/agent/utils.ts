@@ -14,7 +14,14 @@ import type {
 } from './types.js';
 import { writeScopedLog, type LogLevel } from '../core/logging.js';
 
-export const Q = (a: string) => /[^a-zA-Z0-9_./:=@-]/.test(a) ? `'${a.replace(/'/g, "'\\''")}'` : a;
+export const Q = (a: string) => {
+  if (/[^a-zA-Z0-9_./:=@-]/.test(a)) {
+    return process.platform === 'win32'
+      ? `"${a.replace(/"/g, '""')}"`
+      : `'${a.replace(/'/g, "'\\''")}'`;
+  }
+  return a;
+};
 
 export function agentLog(msg: string, level: LogLevel = 'debug') {
   writeScopedLog('agent', msg, { level });

@@ -535,9 +535,27 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
   } else {
     // Claude: write MCP config JSON for --mcp-config
     configPath = path.join(sessionDir, 'mcp-config.json');
-    const config = buildClaudeMcpConfig(servers);
+    const bridgeConfig = buildClaudeMcpConfig(servers);
+    const mergedServers: Record<string, any> = {};
+
+    // Discover and merge existing MCP configs (project-local, then user-global)
+    for (const candidate of [
+      path.join(opts.workdir || '', '.mcp.json'),
+      path.join(opts.workdir || '', '.claude', '.mcp.json'),
+      path.join(os.homedir(), '.claude', '.mcp.json'),
+    ]) {
+      try {
+        const raw = fs.readFileSync(candidate, 'utf-8');
+        const parsed = JSON.parse(raw);
+        if (parsed.mcpServers) Object.assign(mergedServers, parsed.mcpServers);
+      } catch { /* not found or invalid — skip */ }
+    }
+
+    // Bridge servers take precedence (overwrite duplicates)
+    Object.assign(mergedServers, bridgeConfig.mcpServers);
+
     fs.mkdirSync(sessionDir, { recursive: true });
-    fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+    fs.writeFileSync(configPath, JSON.stringify({ mcpServers: mergedServers }, null, 2));
   }
 
   return {
