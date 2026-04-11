@@ -1,7 +1,7 @@
 ---
 name: promote
 description: This skill should be used to search GitHub for relevant issues, filter them, draft replies to promote pikiclaw using a sub-agent, and publish those replies while tracking already replied issues to avoid duplicates.
-version: 3.0.0
+version: 4.0.0
 ---
 
 # GitHub Promotion Workflow
@@ -69,6 +69,20 @@ Run multiple queries in parallel to maximize coverage:
 - `"coding agent notification done" --state open`
 - `"agent task completion alert" --state open`
 
+**Headless / server / self-hosted queries:**
+- `"coding agent headless" --state open`
+- `"claude code server" --state open`
+- `"ai agent self-hosted" --state open`
+- `"claude code ssh" --state open`
+- `"coding agent remote server" --state open`
+
+**Similar-project issues (high contributor-conversion potential):**
+- `repo:RichardAtCT/claude-code-telegram --state open`
+- `repo:m1heng/clawdbot-feishu --state open`
+- `repo:Johnixr/claude-code-wechat-channel --state open`
+- `repo:Wechat-ggGitHub/wechat-claude-code --state open`
+- `repo:qingpingwang/remote-claude-code --state open`
+
 **Chinese queries:**
 - `"claude code 手机" --state open`
 - `"claude code 远程" --state open`
@@ -90,7 +104,14 @@ gh search issues "claude code telegram" --state open --limit 30 --json url,title
 Filter out any URLs that are already present in `replied_issues.txt`.
 For the remaining candidate issues, use `gh issue view <url>` to read the context.
 
-Select issues that express a pain point pikiclaw explicitly solves. Target pain points include:
+Select issues that express a pain point pikiclaw explicitly solves.
+
+**Priority tiers (select higher-tier issues first):**
+- **Tier 1 — Similar-project issues:** Users already building/using tools like pikiclaw. Highest contributor-conversion potential. These people understand the problem space and are most likely to contribute code.
+- **Tier 2 — Specific technical pain points:** Issues with clear, concrete problems that pikiclaw solves architecturally (e.g., "MCP config on Windows", "agent session dies after sleep").
+- **Tier 3 — General feature requests:** Broader requests for mobile control, dashboards, etc.
+
+Target pain points include:
 
 **IM & Remote Control:**
 - Needing remote or mobile control for local coding agents
@@ -183,17 +204,25 @@ Delegate the drafting process to a sub-agent for high-quality, focused output.
 > - Long text auto-splitting; images and files sent back to IM directly
 > - i18n: Chinese & English; light / dark theme
 >
-> **Reply formula:**
+> **Reply formula (standard):**
 > 1. One sentence acknowledging the specific pain point in the issue
 > 2. One sentence explaining the relevant architectural solution (be specific — e.g., "WebSocket-based dashboard with full tool-use trace and streaming", "task queue with Steer to interrupt and re-prioritize", "managed Chrome profile for persistent logins", "Human Loop for Codex prompts")
 > 3. Direct call to action: `npx pikiclaw@latest`
 > 4. End with project link: `GitHub: https://github.com/xiaotonng/pikiclaw`
 >
+> **Reply formula (contributor-oriented) — use for Tier 1 similar-project issues:**
+> 1. One sentence acknowledging the pain point with genuine technical empathy (you've solved the same problem)
+> 2. One sentence sharing the specific architectural approach pikiclaw took (implementation detail, not marketing)
+> 3. A concrete contribution invitation — link to a specific open issue that's related to their expertise (pick from: Slack support #2, multi-user #3, session history #4, or Windows bugs #5/#8)
+> 4. Direct call to action: `npx pikiclaw@latest`
+> 5. End with project link: `GitHub: https://github.com/xiaotonng/pikiclaw`
+>
 > **Rules:**
 > - Match the language of the original issue (Chinese, Japanese, English, etc.)
 > - Only mention features that are directly relevant to the issue — do NOT list everything
 > - Sound like a developer sharing a tool, not a marketer pushing a product
-> - Keep replies under 5 sentences (the extra sentence is for the project link)
+> - For contributor-oriented replies: share implementation insights that demonstrate technical depth, making the reader think "these people know what they're doing, I'd like to contribute"
+> - Keep replies under 6 sentences
 >
 > Provide only the drafted replies.
 

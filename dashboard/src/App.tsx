@@ -107,6 +107,8 @@ export function App() {
     }
   }, [state, prompted, location.pathname]);
 
+  const [restarting, setRestarting] = useState(false);
+
   const handleRestart = useCallback(async () => {
     try {
       const result = await api.restart();
@@ -114,16 +116,35 @@ export function App() {
         toast(result.error || t('modal.restartFailed'), false);
         return;
       }
-      toast(t('modal.restarting'));
+      setRestarting(true);
+      // Poll until the server is back (new process responds)
+      let recovered = false;
+      for (let i = 0; i < 30; i++) {
+        await new Promise(r => setTimeout(r, 600));
+        try {
+          await api.getState();
+          recovered = true;
+          break;
+        } catch { /* server still down */ }
+      }
+      if (recovered) {
+        await reload();
+        toast(t('modal.restartSuccess'));
+      } else {
+        toast(t('modal.restartFailed'), false);
+      }
+      setRestarting(false);
     } catch {
       toast(t('modal.restartFailed'), false);
+      setRestarting(false);
     }
-  }, [toast, t]);
+  }, [toast, t, reload]);
 
   const tabMeta = getDashboardTabMeta(tab, t);
 
   const [confirmingRestart, setConfirmingRestart] = useState(false);
   const onRestartClick = useCallback(() => {
+    if (restarting) return;
     if (confirmingRestart) {
       setConfirmingRestart(false);
       handleRestart();
@@ -131,7 +152,7 @@ export function App() {
       setConfirmingRestart(true);
       setTimeout(() => setConfirmingRestart(false), 3000);
     }
-  }, [confirmingRestart, handleRestart]);
+  }, [restarting, confirmingRestart, handleRestart]);
 
   return (
     <div className="noise-overlay">
@@ -145,6 +166,7 @@ export function App() {
         <Sidebar
           version={version}
           confirmingRestart={confirmingRestart}
+          restarting={restarting}
           onRestartClick={onRestartClick}
         />
 

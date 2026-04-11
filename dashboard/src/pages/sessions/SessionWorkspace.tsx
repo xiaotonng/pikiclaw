@@ -496,14 +496,14 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       };
       return { ...prev, [next.workdir]: [stub, ...existing] };
     });
-    // Pass pending prompt to SessionPanel for seamless transition
-    setNewSessionPendingPrompt(pendingPrompt || null);
     pendingPromptTextRef.current = pendingPrompt || null;
     // Capture the slot NewSessionView occupies (set during render)
     const targetSlot = newSessionSlotRef.current;
-    // Batch both changes in one transition so NewSessionView → SessionPanel is seamless
-    // (no flash of empty placeholder between the two renders)
+    // CRITICAL: setNewSessionPendingPrompt MUST be inside startTransition so it commits
+    // atomically with the slot/active changes. If set outside, the "pending" render still
+    // shows the OLD active panel which would consume the prompt before the new panel mounts.
     startTransition(() => {
+      setNewSessionPendingPrompt(pendingPrompt || null);
       setShowNewSession(null);
       setOpenSessions(prev => {
         if (targetSlot >= prev.length) {
@@ -532,12 +532,12 @@ export const SessionWorkspace = memo(function SessionWorkspace({
   const handlePanelSessionChange = useCallback((next: { agent: string; sessionId: string; workdir: string }, fromSlotIdx?: number) => {
     warmSession({ agent: next.agent, sessionId: next.sessionId, runState: 'running' }, next.workdir);
     // Session promotion (pending_xxx → native ID) remounts SessionPanel due to key change.
-    // Restore the pending prompt so the new instance can display it.
-    if (fromSlotIdx != null && pendingPromptTextRef.current) {
-      setNewSessionPendingPrompt(pendingPromptTextRef.current);
-      pendingPromptTextRef.current = null; // consumed — only restore once per new session
-    }
+    // Capture the pending prompt text before clearing the ref.
+    const restoredPrompt = (fromSlotIdx != null && pendingPromptTextRef.current) ? pendingPromptTextRef.current : null;
+    if (restoredPrompt) pendingPromptTextRef.current = null; // consumed — only restore once per new session
+    // CRITICAL: setNewSessionPendingPrompt MUST be inside startTransition (see handleNewSessionCreated).
     startTransition(() => {
+      if (restoredPrompt) setNewSessionPendingPrompt(restoredPrompt);
       if (fromSlotIdx != null) {
         // Slot-aware: replace the exact slot that triggered the change (session promotion)
         setOpenSessions(prev => {

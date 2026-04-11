@@ -26,3 +26,8 @@ https://github.com/anthropics/claude-code/issues/41503
 https://github.com/zhukunpenglinyutong/jetbrains-cc-gui/issues/398
 https://github.com/anthropics/claude-code/issues/45408
 https://github.com/Wechat-ggGitHub/wechat-claude-code/issues/7
+https://github.com/chenhg5/cc-connect/issues/547
+https://github.com/chenhg5/cc-connect/issues/541
+https://github.com/RichardAtCT/claude-code-telegram/issues/172
+https://github.com/chenhg5/cc-connect/issues/362
+https://github.com/BMeyn/claude_code_mobile/issues/1

@@ -22,10 +22,12 @@ const TAB_ROUTES: Record<string, string> = {
 export function Sidebar({
   version,
   confirmingRestart,
+  restarting,
   onRestartClick,
 }: {
   version: string;
   confirmingRestart: boolean;
+  restarting?: boolean;
   onRestartClick: () => void;
 }) {
   const state = useStore(s => s.state);
@@ -87,14 +89,22 @@ export function Sidebar({
             variant={confirmingRestart ? 'secondary' : 'outline'}
             size="sm"
             onClick={onRestartClick}
-            title={confirmingRestart ? t('modal.confirmRestart') : t('sidebar.restart')}
-            className={confirmingRestart ? 'border-amber-500/30 bg-amber-500/10 text-amber-200 hover:bg-amber-500/10 hover:text-amber-100' : ''}
+            disabled={restarting}
+            title={restarting ? t('modal.restarting') : confirmingRestart ? t('modal.confirmRestart') : t('sidebar.restart')}
+            className={cn(
+              restarting ? 'pointer-events-none opacity-70' : '',
+              confirmingRestart && !restarting ? 'border-amber-500/30 bg-amber-500/10 text-amber-200 hover:bg-amber-500/10 hover:text-amber-100' : '',
+            )}
           >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <svg
+              width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+              className={restarting ? 'animate-spin' : ''}
+              style={restarting ? { animationDuration: '1s' } : undefined}
+            >
               <polyline points="23 4 23 10 17 10" />
               <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
             </svg>
-            <span className="hidden md:inline">{confirmingRestart ? t('modal.confirmRestart') : t('sidebar.restart')}</span>
+            <span className="hidden md:inline">{restarting ? t('modal.restarting') : confirmingRestart ? t('modal.confirmRestart') : t('sidebar.restart')}</span>
           </Button>
           <Button
             variant="ghost"
