@@ -1,0 +1,83 @@
+name: Bug Report
+description: Report a bug or unexpected behavior
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug! Please fill out the sections below so we can reproduce and fix it.
+
+  - type: input
+    id: version
+    attributes:
+      label: pikiclaw version
+      description: "Run `npx pikiclaw@latest --version` or check dashboard footer"
+      placeholder: "e.g. 0.3.16"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      options:
+        - macOS
+        - Windows
+        - Linux
+    validations:
+      required: true
+
+  - type: dropdown
+    id: channel
+    attributes:
+      label: IM Channel
+      description: Which channel were you using when the bug occurred?
+      options:
+        - Telegram
+        - Feishu
+        - WeChat
+        - Dashboard only
+        - N/A
+    validations:
+      required: true
+
+  - type: dropdown
+    id: agent
+    attributes:
+      label: Agent
+      options:
+        - Claude Code
+        - Codex CLI
+        - Gemini CLI
+        - N/A
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug description
+      description: A clear description of what happened and what you expected
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps to reproduce the behavior
+      placeholder: |
+        1. Start pikiclaw with `npx pikiclaw@latest`
+        2. Send message "..." via Telegram
+        3. See error ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / error output
+      description: Paste relevant log output or error messages
+      render: shell
+    validations:
+      required: false

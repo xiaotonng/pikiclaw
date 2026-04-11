@@ -258,6 +258,16 @@ See also: [ARCHITECTURE.md](ARCHITECTURE.md) · [INTEGRATION.md](INTEGRATION.md)
 
 ---
 
+## Contributing
+
+Contributions are welcome! Whether it's a bug fix, new feature, or documentation improvement — we appreciate your help.
+
+- Read the **[Contributing Guide](CONTRIBUTING.md)** to get started
+- Check out [`good first issue`](https://github.com/xiaotonng/pikiclaw/labels/good%20first%20issue) and [`help wanted`](https://github.com/xiaotonng/pikiclaw/labels/help%20wanted) labels for contribution ideas
+- Open an issue first for larger changes so we can discuss the approach
+
+---
+
 ## License
 
 [MIT](LICENSE)
