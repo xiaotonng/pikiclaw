@@ -55,7 +55,7 @@ export const SessionPanel = memo(function SessionPanel({
   const displayState = sessionDisplayState(session);
 
   const [history, setHistory] = useState<TurnHistoryWindow | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!initialPendingPrompt);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [liveStream, setLiveStream] = useState<{
     phase: 'streaming' | 'done';
@@ -69,7 +69,7 @@ export const SessionPanel = memo(function SessionPanel({
   const [streamPollNonce, setStreamPollNonce] = useState(0);
   const [streamTaskId, setStreamTaskId] = useState<string | null>(null);
   const [queuedTaskId, setQueuedTaskId] = useState<string | null>(null);
-  const [pendingPrompt, setPendingPrompt] = useState<string | null>(null);
+  const [pendingPrompt, setPendingPrompt] = useState<string | null>(initialPendingPrompt || null);
   const [pendingImageUrls, setPendingImageUrls] = useState<string[]>([]);
   const [pendingQueued, setPendingQueued] = useState(false);
   const [editDraft, setEditDraft] = useState<string | null>(null);
@@ -84,17 +84,19 @@ export const SessionPanel = memo(function SessionPanel({
   const scrollToBottomRef = useRef(false);
   const loadingLatestRef = useRef(false);
   const loadingOlderRef = useRef(false);
-  const localStreamPendingRef = useRef(false);
+  const localStreamPendingRef = useRef(!!initialPendingPrompt);
   const clearPendingOnLoadRef = useRef(false);
+  const clearLiveStreamOnLoadRef = useRef(false);
   const initialPendingConsumedRef = useRef(false);
   const promotingRef = useRef(false);
 
-  // Consume initialPendingPrompt from new-session flow — show immediately and start polling
+  // Consume initialPendingPrompt from new-session flow.
+  // State (pendingPrompt, loading, localStreamPendingRef) is already initialized
+  // from the prop so the very first render shows the user message — no spinner flash.
+  // This effect only triggers the remaining side effects (polling + parent notify).
   useEffect(() => {
     if (initialPendingConsumedRef.current || !initialPendingPrompt) return;
     initialPendingConsumedRef.current = true;
-    setPendingPrompt(initialPendingPrompt);
-    localStreamPendingRef.current = true;
     setStreamPollNonce(n => n + 1);
     onPendingPromptConsumed?.();
   }, [initialPendingPrompt, onPendingPromptConsumed]);
@@ -138,21 +140,28 @@ export const SessionPanel = memo(function SessionPanel({
     }
   }, [workdir, session.agent, session.sessionId]);
 
-  const loadLatestTurns = useCallback(async ({ keepOlder, force = false }: { keepOlder: boolean; force?: boolean }) => {
+  const loadLatestTurns = useCallback(async ({ keepOlder, force = false, scrollToBottom = false }: { keepOlder: boolean; force?: boolean; scrollToBottom?: boolean }) => {
     if (loadingLatestRef.current) return false;
     loadingLatestRef.current = true;
     try {
       const next = await fetchTurnWindow({ turnOffset: 0, turnLimit: SESSION_PAGE_TURNS }, { force });
       if (!next) return false;
+      // Set scroll flag right before setHistory so React batches both into
+      // the same render and the layoutEffect sees the flag when turns update.
+      if (scrollToBottom) scrollToBottomRef.current = true;
       setHistory(current => {
         if (!current || !keepOlder) return next;
         return mergeLatestHistory(current, next);
       });
-      // Clear pending in the same synchronous block as setHistory so React batches
-      // both updates into a single render (avoids flash of duplicate user bubble)
+      // Clear pending + liveStream in the same synchronous block as setHistory so
+      // React batches all updates into a single render (avoids flash/scroll jump)
       if (clearPendingOnLoadRef.current) {
         clearPendingOnLoadRef.current = false;
         clearPending();
+      }
+      if (clearLiveStreamOnLoadRef.current) {
+        clearLiveStreamOnLoadRef.current = false;
+        setLiveStream(null);
       }
       return true;
     } finally {
@@ -195,13 +204,16 @@ export const SessionPanel = memo(function SessionPanel({
     }
     if (!state) {
       const prev = prevPhaseRef.current;
-      setLiveStream(null);
       setStreaming(false);
       if (prev === 'streaming') {
-        if (stickToBottomRef.current) scrollToBottomRef.current = true;
+        // Delay liveStream clearing — same pattern as the 'done' handler
         clearPendingOnLoadRef.current = true;
-        void loadLatestTurns({ keepOlder: true, force: true });
-      } else if (prev === 'done') {
+        clearLiveStreamOnLoadRef.current = true;
+        void loadLatestTurns({ keepOlder: true, force: true, scrollToBottom: stickToBottomRef.current });
+      } else {
+        setLiveStream(null);
+      }
+      if (prev === 'done') {
         clearPending();
       } else if (prev === null && localStreamPendingRef.current) {
         // Do NOT clear pending here — for slow uploads (e.g. images via FormData),
@@ -236,14 +248,15 @@ export const SessionPanel = memo(function SessionPanel({
       setLiveStream(null);
       setStreaming(false);
     } else if (state.phase === 'done') {
-      // Clear liveStream immediately to prevent duplicate rendering with refreshed turns.
-      // The pending prompt + ThinkingDots serves as a transition indicator until turns load.
-      setLiveStream(null);
+      // Don't clear liveStream here — keep it visible so the scroll position stays
+      // stable while loadLatestTurns fetches the full history.  The live preview is
+      // cleared atomically with the history update inside loadLatestTurns to avoid
+      // the intermediate "empty" render that causes a scroll jump.
       setStreaming(false);
       if (prevPhaseRef.current !== 'done') {
-        if (stickToBottomRef.current) scrollToBottomRef.current = true;
         if (!state.queuedTaskId) clearPendingOnLoadRef.current = true;
-        void loadLatestTurns({ keepOlder: true, force: true });
+        clearLiveStreamOnLoadRef.current = true;
+        void loadLatestTurns({ keepOlder: true, force: true, scrollToBottom: stickToBottomRef.current });
       }
       if (!state.queuedTaskId) localStreamPendingRef.current = false;
     }
@@ -371,7 +384,11 @@ export const SessionPanel = memo(function SessionPanel({
     if (!el) return;
     scrollToBottomRef.current = false;
     el.scrollTop = el.scrollHeight;
-  }, [history?.turns.length, liveStream]);
+    // Catch any post-layout height shifts (CSS animations, LivePreview→TurnView swap)
+    requestAnimationFrame(() => {
+      if (stickToBottomRef.current) el.scrollTop = el.scrollHeight;
+    });
+  }, [history, liveStream]);
 
   // Scroll to bottom when a pending prompt appears
   useLayoutEffect(() => {

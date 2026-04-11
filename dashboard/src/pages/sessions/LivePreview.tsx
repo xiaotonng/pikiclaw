@@ -1,9 +1,8 @@
 import { useState, useRef, useLayoutEffect, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import { CollapsibleCard, CountBadge } from '../../components/ui';
 import { PlanProgressCard, hasPlan } from '../../components/PlanProgressCard';
-import { mdComponents } from './markdown';
+import { mdComponents, mdPlugins } from './markdown';
 import { lastNLines } from './utils';
 import type { StreamPlan } from '../../types';
 
@@ -90,7 +89,7 @@ export function LivePreview({
       {/* Response text with thinking dots */}
       {stream.text && (
         <div className="session-md text-[13.5px] leading-[1.75] text-fg-2">
-          <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+          <ReactMarkdown remarkPlugins={mdPlugins} components={mdComponents}>
             {stream.text}
           </ReactMarkdown>
           {stream.phase === 'streaming' && <ThinkingDots className="ml-1 inline-flex align-text-bottom text-fg-4" />}

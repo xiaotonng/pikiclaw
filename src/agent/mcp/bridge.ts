@@ -63,8 +63,8 @@ export interface McpBridgeOpts {
   workdir?: string;
   /** List of staged file paths (relative to workspace). */
   stagedFiles: string[];
-  /** Callback invoked when the agent calls the send_file MCP tool. */
-  sendFile: McpSendFileCallback;
+  /** Callback invoked when the agent calls the send_file MCP tool. Optional for dashboard sessions. */
+  sendFile?: McpSendFileCallback;
   /** Agent type — determines how MCP server is registered. */
   agent?: string;
   /** Optional log sink for MCP tool activity. */
@@ -362,7 +362,7 @@ export function resolveSendFilePath(
   };
 }
 
-export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHandle> {
+export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHandle | null> {
   const { sessionDir, workspacePath, stagedFiles, sendFile } = opts;
   let hadActivity = false;
   const gui = resolveGuiIntegrationConfig();
@@ -389,122 +389,136 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
   if (opts.workdir) allowedRoots.push(opts.workdir);
   allowedRoots.push('/tmp', os.tmpdir());
 
-  // ── HTTP callback server ──
-  const server = http.createServer((req, res) => {
-    if (req.method !== 'POST' || (req.url !== '/send-file' && req.url !== '/log')) {
-      res.writeHead(404);
-      res.end();
-      return;
-    }
+  // ── HTTP callback server (only when sendFile callback is provided) ──
+  let callbackServer: http.Server | null = null;
+  let port = 0;
 
-    let body = '';
-    req.on('data', (chunk: Buffer) => { body += chunk; });
-
-    // Timeout for receiving the request body
-    const bodyTimer = setTimeout(() => {
-      req.destroy(new Error('request body timeout'));
-    }, MCP_TIMEOUTS.requestBody);
-
-    req.on('end', async () => {
-      clearTimeout(bodyTimer);
-      try {
-        if (req.url === '/log') {
-          const data = JSON.parse(body || '{}');
-          const message = typeof data.message === 'string' ? data.message.trim() : '';
-          if (message) {
-            hadActivity = true;
-            opts.onLog?.(message);
-          }
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true }));
-          return;
-        }
-
-        const data = JSON.parse(body);
-        const relPath = String(data.path || '').trim();
-        if (!relPath) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: 'path is required' }));
-          return;
-        }
-
-        // Resolve and validate path
-        const resolved = resolveSendFilePath(relPath, workspacePath, stagedFiles, opts.workdir);
-        const absPath = resolved.path;
-        let realFile: string;
-        try { realFile = fs.realpathSync(String(absPath || '')); } catch {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: resolved.error || `file not found: ${relPath}` }));
-          return;
-        }
-        if (!isInsideAllowedRoot(realFile, allowedRoots)) {
-          res.writeHead(403, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: 'file must be inside the workspace, workdir, or /tmp' }));
-          return;
-        }
-
-        // Size check
-        const stat = fs.statSync(realFile);
-        if (!stat.isFile()) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: 'not a regular file' }));
-          return;
-        }
-        if (stat.size > ARTIFACT_MAX_BYTES) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: `file too large (${stat.size} bytes, max ${ARTIFACT_MAX_BYTES})` }));
-          return;
-        }
-
-        // Auto-detect kind
-        const kind = data.kind === 'photo' ? 'photo'
-          : data.kind === 'document' ? 'document'
-          : isPhotoFile(realFile) ? 'photo'
-          : 'document';
-
-        const caption = typeof data.caption === 'string' ? data.caption.trim().slice(0, 1024) || undefined : undefined;
-        hadActivity = true;
-
-        const result = await Promise.race([
-          sendFile(realFile, { caption, kind }),
-          new Promise<McpSendFileResult>((_, reject) =>
-            setTimeout(() => reject(new Error(`sendFile timed out after ${SEND_FILE_TIMEOUT_MS / 1000}s`)), SEND_FILE_TIMEOUT_MS),
-          ),
-        ]);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(result));
-      } catch (e: any) {
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: false, error: e?.message || 'internal error' }));
+  if (sendFile) {
+    callbackServer = http.createServer((req, res) => {
+      if (req.method !== 'POST' || (req.url !== '/send-file' && req.url !== '/log')) {
+        res.writeHead(404);
+        res.end();
+        return;
       }
+
+      let body = '';
+      req.on('data', (chunk: Buffer) => { body += chunk; });
+
+      // Timeout for receiving the request body
+      const bodyTimer = setTimeout(() => {
+        req.destroy(new Error('request body timeout'));
+      }, MCP_TIMEOUTS.requestBody);
+
+      req.on('end', async () => {
+        clearTimeout(bodyTimer);
+        try {
+          if (req.url === '/log') {
+            const data = JSON.parse(body || '{}');
+            const message = typeof data.message === 'string' ? data.message.trim() : '';
+            if (message) {
+              hadActivity = true;
+              opts.onLog?.(message);
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true }));
+            return;
+          }
+
+          const data = JSON.parse(body);
+          const relPath = String(data.path || '').trim();
+          if (!relPath) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'path is required' }));
+            return;
+          }
+
+          // Resolve and validate path
+          const resolved = resolveSendFilePath(relPath, workspacePath, stagedFiles, opts.workdir);
+          const absPath = resolved.path;
+          let realFile: string;
+          try { realFile = fs.realpathSync(String(absPath || '')); } catch {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: resolved.error || `file not found: ${relPath}` }));
+            return;
+          }
+          if (!isInsideAllowedRoot(realFile, allowedRoots)) {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'file must be inside the workspace, workdir, or /tmp' }));
+            return;
+          }
+
+          // Size check
+          const stat = fs.statSync(realFile);
+          if (!stat.isFile()) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'not a regular file' }));
+            return;
+          }
+          if (stat.size > ARTIFACT_MAX_BYTES) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: `file too large (${stat.size} bytes, max ${ARTIFACT_MAX_BYTES})` }));
+            return;
+          }
+
+          // Auto-detect kind
+          const kind = data.kind === 'photo' ? 'photo'
+            : data.kind === 'document' ? 'document'
+            : isPhotoFile(realFile) ? 'photo'
+            : 'document';
+
+          const caption = typeof data.caption === 'string' ? data.caption.trim().slice(0, 1024) || undefined : undefined;
+          hadActivity = true;
+
+          const result = await Promise.race([
+            sendFile(realFile, { caption, kind }),
+            new Promise<McpSendFileResult>((_, reject) =>
+              setTimeout(() => reject(new Error(`sendFile timed out after ${SEND_FILE_TIMEOUT_MS / 1000}s`)), SEND_FILE_TIMEOUT_MS),
+            ),
+          ]);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (e: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: e?.message || 'internal error' }));
+        }
+      });
     });
-  });
 
-  // Set server-level timeouts to prevent hanging connections
-  server.requestTimeout = MCP_TIMEOUTS.serverRequest;
-  server.headersTimeout = MCP_TIMEOUTS.serverHeaders;
+    // Set server-level timeouts to prevent hanging connections
+    callbackServer.requestTimeout = MCP_TIMEOUTS.serverRequest;
+    callbackServer.headersTimeout = MCP_TIMEOUTS.serverHeaders;
 
-  await new Promise<void>((resolve, reject) => {
-    server.on('error', reject);
-    server.listen(0, '127.0.0.1', () => resolve());
-  });
-  const port = (server.address() as { port: number }).port;
+    await new Promise<void>((resolve, reject) => {
+      callbackServer!.on('error', reject);
+      callbackServer!.listen(0, '127.0.0.1', () => resolve());
+    });
+    port = (callbackServer.address() as { port: number }).port;
+  }
 
   // ── Register MCP server with the agent ──
-  const { command, args } = resolveMcpServerCommand();
-  const envVars = {
-    MCP_WORKSPACE_PATH: workspacePath,
-    MCP_WORKDIR: opts.workdir || '',
-    MCP_STAGED_FILES: JSON.stringify(stagedFiles),
-    MCP_CALLBACK_URL: `http://127.0.0.1:${port}`,
-    MCP_LOG_URL: `http://127.0.0.1:${port}/log`,
-    PIKICLAW_DESKTOP_GUI: String(gui.desktopEnabled),
-    PIKICLAW_DESKTOP_APPIUM_URL: gui.desktopAppiumUrl,
-  };
-  const servers: RegisteredMcpServer[] = [
-    { name: 'pikiclaw', command, args, env: envVars },
-    ...buildSupplementalMcpServers(gui, browserRuntime),
-  ];
+  const supplementalServers = buildSupplementalMcpServers(gui, browserRuntime);
+  const servers: RegisteredMcpServer[] = [...supplementalServers];
+
+  // Only include pikiclaw IM tools server when we have a callback server
+  if (port) {
+    const { command, args } = resolveMcpServerCommand();
+    const envVars = {
+      MCP_WORKSPACE_PATH: workspacePath,
+      MCP_WORKDIR: opts.workdir || '',
+      MCP_STAGED_FILES: JSON.stringify(stagedFiles),
+      MCP_CALLBACK_URL: `http://127.0.0.1:${port}`,
+      MCP_LOG_URL: `http://127.0.0.1:${port}/log`,
+      PIKICLAW_DESKTOP_GUI: String(gui.desktopEnabled),
+      PIKICLAW_DESKTOP_APPIUM_URL: gui.desktopAppiumUrl,
+    };
+    servers.unshift({ name: 'pikiclaw', command, args, env: envVars });
+  }
+
+  // Nothing to register — skip bridge entirely
+  if (!servers.length) {
+    if (callbackServer) await new Promise<void>(resolve => callbackServer!.close(() => resolve()));
+    return null;
+  }
 
   let configPath = '';
   let extraEnv: Record<string, string> | undefined;
@@ -563,7 +577,7 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
     extraEnv,
     hadActivity: () => hadActivity,
     stop: async () => {
-      await new Promise<void>(resolve => server.close(() => resolve()));
+      if (callbackServer) await new Promise<void>(resolve => callbackServer!.close(() => resolve()));
       for (const name of [...codexRegisteredNames].reverse()) {
         try { execFileSync('codex', ['mcp', 'remove', name], { stdio: 'pipe', timeout: MCP_TIMEOUTS.codexMcpRemove }); } catch {}
       }

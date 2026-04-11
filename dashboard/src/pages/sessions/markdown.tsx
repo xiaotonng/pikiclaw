@@ -1,5 +1,13 @@
 import { useState } from 'react';
+import remarkGfm from 'remark-gfm';
+import remarkBreaks from 'remark-breaks';
 import { cn } from '../../utils';
+import { api } from '../../api';
+
+export const mdPlugins = [remarkGfm, remarkBreaks];
+
+const isWebUrl = (href: string) => /^https?:\/\//.test(href);
+const isFilePath = (href: string) => /^(\/|~\/|\.\.?\/)/.test(href);
 
 /* ── Copy button for fenced code blocks ── */
 export function CopyButton({ text }: { text: string }) {
@@ -30,7 +38,15 @@ export const mdComponents: Record<string, React.ComponentType<any>> = {
   p: ({ children }: any) => <p className="my-1.5 whitespace-pre-wrap break-words">{children}</p>,
   strong: ({ children }: any) => <strong className="font-semibold text-fg">{children}</strong>,
   em: ({ children }: any) => <em className="italic text-fg-3">{children}</em>,
-  a: ({ href, children }: any) => <span className="text-blue-400 underline underline-offset-2 decoration-blue-400/30 cursor-pointer">{children}</span>,
+  a: ({ href, children }: any) => {
+    if (href && isWebUrl(href)) {
+      return <a href={href} target="_blank" rel="noopener noreferrer" className="text-blue-400 underline underline-offset-2 decoration-blue-400/30 cursor-pointer hover:text-blue-300 transition-colors">{children}</a>;
+    }
+    if (href && isFilePath(href)) {
+      return <span className="text-blue-400 underline underline-offset-2 decoration-blue-400/30 cursor-pointer hover:text-blue-300 transition-colors" onClick={() => api.openInEditor(href)}>{children}</span>;
+    }
+    return <span className="text-blue-400 underline underline-offset-2 decoration-blue-400/30">{children}</span>;
+  },
   ul: ({ children }: any) => <ul className="space-y-1 my-2 ml-1">{children}</ul>,
   ol: ({ children }: any) => <ol className="space-y-1 my-2 ml-1 list-decimal list-inside">{children}</ol>,
   li: ({ children }: any) => (
@@ -47,6 +63,9 @@ export const mdComponents: Record<string, React.ComponentType<any>> = {
 
     // Inline code (no language class, short)
     if (!langMatch && !className) {
+      if (isFilePath(text)) {
+        return <code className={cn('px-1.5 py-[1px] rounded text-[12px] font-mono border cursor-pointer hover:brightness-125 transition-all', classifyCode(text))} onClick={() => api.openInEditor(text)}>{text}</code>;
+      }
       return <code className={cn('px-1.5 py-[1px] rounded text-[12px] font-mono border', classifyCode(text))}>{text}</code>;
     }
 

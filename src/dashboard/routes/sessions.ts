@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { loadUserConfig } from '../../core/config/user-config.js';
-import { listAgents, type Agent, type SessionInfo } from '../../agent/index.js';
+import { listAgents, listSkills, type Agent, type SessionInfo } from '../../agent/index.js';
 import { getSessionStatusForBot } from '../../bot/session-status.js';
 import {
   cancelSessionTask,
@@ -497,6 +497,21 @@ app.post('/api/session-hub/import', async (c) => {
     return c.json(result);
   } catch (e: any) {
     return c.json({ ok: false, error: e.message }, 500);
+  }
+});
+
+// ==========================================================================
+// Skills
+// ==========================================================================
+
+app.get('/api/session-hub/skills', (c) => {
+  const workdir = c.req.query('workdir') || '';
+  if (!workdir) return c.json({ ok: false, error: 'workdir query param required' }, 400);
+  try {
+    const result = listSkills(workdir);
+    return c.json({ ok: true, skills: result.skills });
+  } catch (e: any) {
+    return c.json({ ok: false, skills: [], error: e.message }, 500);
   }
 });
 

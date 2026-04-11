@@ -380,7 +380,14 @@ export const SessionWorkspace = memo(function SessionWorkspace({
 
         const live = normalizeLiveSessionState(key, event.snapshot ?? null);
         if (!live) {
-          delete next[key];
+          // Stream ended (null snapshot).  Don't delete the entry — keep it as
+          // phase 'done' so the sidebar doesn't flash back to the stale
+          // sessionsMap 'running' state before the sessions-changed API
+          // refresh completes.  The 15-min TTL handles eventual cleanup.
+          const prev = next[key];
+          if (prev && prev.phase !== 'done') {
+            next[key] = { ...prev, phase: 'done', updatedAt: Date.now() };
+          }
           return next;
         }
 

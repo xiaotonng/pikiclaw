@@ -371,29 +371,29 @@ export async function doStream(opts: StreamOpts): Promise<StreamResult> {
     };
   }
 
-  // Start MCP bridge if sendFile callback is provided
+  // Start MCP bridge for IM tools (when sendFile is available) and/or supplemental servers (browser, etc.)
   let bridge: import('./mcp/bridge.js').McpBridgeHandle | null = null;
-  if (opts.mcpSendFile) {
-    try {
-      const { startMcpBridge } = await import('./mcp/bridge.js');
-      const sessionDir = path.dirname(session.workspacePath);
-      bridge = await startMcpBridge({
-        sessionDir,
-        workspacePath: session.workspacePath,
-        workdir: opts.workdir,
-        stagedFiles,
-        sendFile: opts.mcpSendFile,
-        agent: opts.agent,
-        onLog: (message: string) => agentLog(`[mcp] ${message}`),
-      });
+  try {
+    const { startMcpBridge } = await import('./mcp/bridge.js');
+    const sessionDir = path.dirname(session.workspacePath);
+    bridge = await startMcpBridge({
+      sessionDir,
+      workspacePath: session.workspacePath,
+      workdir: opts.workdir,
+      stagedFiles,
+      sendFile: opts.mcpSendFile,
+      agent: opts.agent,
+      onLog: (message: string) => agentLog(`[mcp] ${message}`),
+    });
+    if (bridge) {
       prepared.mcpConfigPath = bridge.configPath;
       if (bridge.extraEnv) prepared.extraEnv = { ...(prepared.extraEnv || {}), ...bridge.extraEnv };
       if (bridge.configPath) agentLog(`[mcp] bridge started on ${bridge.configPath}`);
       else agentLog('[mcp] bridge registered with codex');
       try { agentLog(`[mcp] config content:\n${fs.readFileSync(bridge.configPath, 'utf-8')}`); } catch {};
-    } catch (e: any) {
-      agentWarn(`[mcp] bridge start failed: ${e.message} — proceeding without MCP`);
     }
+  } catch (e: any) {
+    agentWarn(`[mcp] bridge start failed: ${e.message} — proceeding without MCP`);
   }
 
   try {

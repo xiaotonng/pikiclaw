@@ -3,11 +3,38 @@
  */
 
 import path from 'node:path';
-import { stageSessionFiles, type Agent } from '../agent/index.js';
+import { getProjectSkillPaths, listSkills, stageSessionFiles, type Agent } from '../agent/index.js';
 import { loadUserConfig } from '../core/config/user-config.js';
 import { runtime } from './runtime.js';
 
 const KNOWN_AGENTS = new Set<Agent>(['claude', 'codex', 'gemini']);
+
+/**
+ * Resolve a `/skill-name [args]` prompt into the full skill execution prompt.
+ * Returns null if the prompt is not a skill invocation or the skill is not found.
+ */
+function resolveSkillFromPrompt(workdir: string, prompt: string): { resolvedPrompt: string; skillName: string } | null {
+  const trimmed = prompt.trim();
+  if (!trimmed.startsWith('/')) return null;
+  // Extract command name and args: "/skill-name some args" → name="skill-name", args="some args"
+  const match = trimmed.match(/^\/([^\s]+)(?:\s+(.*))?$/s);
+  if (!match) return null;
+  const name = match[1];
+  const args = (match[2] || '').trim();
+
+  const { skills } = listSkills(workdir);
+  // Match by exact skill name (case-insensitive)
+  const skill = skills.find(s => s.name.toLowerCase() === name.toLowerCase());
+  if (!skill) return null;
+
+  const extra = args ? ` Additional context: ${args}` : '';
+  const workdirHint = `[Project directory: ${workdir}]\n\n`;
+  const paths = getProjectSkillPaths(workdir, skill.name);
+  const skillFile = paths.claudeSkillFile || paths.sharedSkillFile || paths.agentsSkillFile;
+  const targetPath = skillFile || `${workdir}/.pikiclaw/skills/${skill.name}/SKILL.md`;
+  const resolvedPrompt = `${workdirHint}Read the skill definition at \`${targetPath}\` and execute the instructions defined there.${extra}`;
+  return { resolvedPrompt, skillName: skill.name };
+}
 
 export interface QueueSessionTaskRequest {
   workdir: string;
@@ -35,6 +62,14 @@ export function queueDashboardSessionTask(request: QueueSessionTaskRequest) {
     ? ''
     : (typeof request.effort === 'string' ? request.effort.trim().toLowerCase() : '');
 
+  // Resolve /skill-name prompts into full skill execution prompts
+  let prompt = request.prompt;
+  const skillResult = prompt ? resolveSkillFromPrompt(request.workdir, prompt) : null;
+  if (skillResult) {
+    prompt = skillResult.resolvedPrompt;
+    runtime.debug(`[session-send] resolved skill: ${skillResult.skillName}`);
+  }
+
   let sessionId = request.sessionId;
   let attachments = request.attachments || [];
 
@@ -59,7 +94,7 @@ export function queueDashboardSessionTask(request: QueueSessionTaskRequest) {
     workdir: request.workdir,
     agent: resolvedAgent,
     sessionId,
-    prompt: request.prompt || 'Please inspect the attached file(s).',
+    prompt: prompt || 'Please inspect the attached file(s).',
     attachments,
     ...(modelId ? { modelId } : {}),
     ...(thinkingEffort ? { thinkingEffort } : {}),

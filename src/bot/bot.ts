@@ -1490,9 +1490,10 @@ export class Bot {
         }
       }
     }
-    const mcpSystemPrompt = mcpSendFile
-      ? appendExtraPrompt(buildMcpDeliveryPrompt(), buildBrowserAutomationPrompt(browserEnabled))
-      : '';
+    const mcpSystemPrompt = appendExtraPrompt(
+      mcpSendFile ? buildMcpDeliveryPrompt() : '',
+      buildBrowserAutomationPrompt(browserEnabled),
+    );
     const effectiveSystemPrompt = isFirstTurnOfSession
       ? appendExtraPrompt(systemPrompt, mcpSystemPrompt)
       : undefined;

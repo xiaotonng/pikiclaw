@@ -13,7 +13,7 @@ import {
   parseSessionKey,
   type ComposerImageAttachment,
 } from './utils';
-import type { SessionInfo, AgentRuntimeStatus } from '../../types';
+import type { SessionInfo, AgentRuntimeStatus, SkillInfo } from '../../types';
 
 type CascadeStep = 'closed' | 'agent' | 'model' | 'effort';
 
@@ -62,6 +62,10 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   const composerRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const attachmentsRef = useRef<ComposerImageAttachment[]>([]);
+  const [skills, setSkills] = useState<SkillInfo[]>([]);
+  const [skillMenuOpen, setSkillMenuOpen] = useState(false);
+  const [skillMenuIndex, setSkillMenuIndex] = useState(0);
+  const skillMenuRef = useRef<HTMLDivElement>(null);
   const reloadAppState = useStore(s => s.reload);
   const refreshAgentStatus = useStore(s => s.refreshAgentStatus);
 
@@ -122,6 +126,47 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
       });
     }
   }, [editDraft, onEditDraftConsumed]);
+
+  // Fetch available skills when workdir changes
+  useEffect(() => {
+    if (!workdir) return;
+    let cancelled = false;
+    api.getSkills(workdir).then(res => {
+      if (!cancelled && res.ok) setSkills(res.skills);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [workdir]);
+
+  // Compute filtered skills for the autocomplete menu
+  const skillQuery = skillMenuOpen ? (() => {
+    const match = input.match(/^\/(\S*)$/);
+    return match ? match[1].toLowerCase() : null;
+  })() : null;
+  const filteredSkills = skillQuery !== null
+    ? skills.filter(s => s.name.toLowerCase().includes(skillQuery) || (s.label && s.label.toLowerCase().includes(skillQuery)))
+    : [];
+
+  // Reset selected index when filtered list changes
+  useEffect(() => { setSkillMenuIndex(0); }, [skillMenuOpen, input]);
+
+  // Scroll skill menu to keep selected item visible
+  useEffect(() => {
+    if (!skillMenuOpen || !skillMenuRef.current) return;
+    const item = skillMenuRef.current.querySelector(`[data-skill-idx="${skillMenuIndex}"]`);
+    if (item) (item as HTMLElement).scrollIntoView({ block: 'nearest' });
+  }, [skillMenuIndex, skillMenuOpen]);
+
+  // Close skill menu on outside click
+  useEffect(() => {
+    if (!skillMenuOpen) return;
+    const h = (e: MouseEvent) => {
+      if (skillMenuRef.current?.contains(e.target as Node)) return;
+      if (inputRef.current?.contains(e.target as Node)) return;
+      setSkillMenuOpen(false);
+    };
+    document.addEventListener('mousedown', h);
+    return () => document.removeEventListener('mousedown', h);
+  }, [skillMenuOpen]);
 
   // Close cascade on outside click — check both trigger and portal
   useEffect(() => {
@@ -293,7 +338,33 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
     }
   }, [steerPending, effectiveQueuedId, onSteer]);
 
+  const selectSkill = useCallback((skill: SkillInfo) => {
+    setInput(`/${skill.name} `);
+    setSkillMenuOpen(false);
+    requestAnimationFrame(() => {
+      const el = inputRef.current;
+      if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+    });
+  }, []);
+
+  const handleInputChange = useCallback((value: string) => {
+    setInput(value);
+    // Open skill menu when input is a single slash-command token (no spaces yet)
+    const isSlashCmd = /^\/\S*$/.test(value) && skills.length > 0;
+    setSkillMenuOpen(isSlashCmd);
+  }, [skills.length]);
+
   const onKeyDown = (e: React.KeyboardEvent) => {
+    if (skillMenuOpen && filteredSkills.length > 0) {
+      if (e.key === 'ArrowDown') { e.preventDefault(); setSkillMenuIndex(i => (i + 1) % filteredSkills.length); return; }
+      if (e.key === 'ArrowUp') { e.preventDefault(); setSkillMenuIndex(i => (i - 1 + filteredSkills.length) % filteredSkills.length); return; }
+      if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && !composingRef.current)) {
+        e.preventDefault();
+        selectSkill(filteredSkills[skillMenuIndex]);
+        return;
+      }
+      if (e.key === 'Escape') { e.preventDefault(); setSkillMenuOpen(false); return; }
+    }
     if (e.key === 'Enter' && !e.shiftKey && !composingRef.current) { e.preventDefault(); handleSend(); }
   };
 
@@ -474,11 +545,44 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
             </div>
           )}
 
+          {/* Skill autocomplete popup */}
+          {skillMenuOpen && filteredSkills.length > 0 && (
+            <div
+              ref={skillMenuRef}
+              className="absolute bottom-full left-0 right-0 mb-1.5 z-50 max-h-[200px] overflow-y-auto rounded-xl border border-edge/40 bg-[var(--th-dropdown)] backdrop-blur-xl shadow-lg animate-in"
+            >
+              <div className="px-3 pt-2 pb-1 border-b border-edge/20">
+                <span className="text-[10px] font-semibold text-fg-5 uppercase tracking-wider">{t('hub.skills')}</span>
+              </div>
+              <div className="py-1">
+                {filteredSkills.map((skill, idx) => (
+                  <button
+                    key={skill.name}
+                    data-skill-idx={idx}
+                    onMouseDown={e => { e.preventDefault(); selectSkill(skill); }}
+                    onMouseEnter={() => setSkillMenuIndex(idx)}
+                    className={cn(
+                      'flex flex-col w-full px-3 py-1.5 text-left transition-colors',
+                      idx === skillMenuIndex
+                        ? 'bg-panel-h text-fg'
+                        : 'text-fg-3 hover:bg-panel-alt/50',
+                    )}
+                  >
+                    <span className="text-[12.5px] font-medium">/{skill.name}</span>
+                    {(skill.label || skill.description) && (
+                      <span className="text-[11px] text-fg-5 truncate">{skill.label || skill.description}</span>
+                    )}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Textarea */}
           <textarea
             ref={inputRef}
             value={input}
-            onChange={e => setInput(e.target.value)}
+            onChange={e => handleInputChange(e.target.value)}
             onPaste={onPaste}
             onKeyDown={onKeyDown}
             onCompositionStart={() => { composingRef.current = true; }}

@@ -2,10 +2,9 @@ import { useState, memo, type ReactNode } from 'react';
 import { useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import { cn, getAgentMeta } from '../../utils';
 import { BrandIcon } from '../../components/BrandIcon';
-import { mdComponents } from './markdown';
+import { mdComponents, mdPlugins } from './markdown';
 import { isContinuationSummary } from './utils';
 import { AssistantMsg } from './AssistantContent';
 import type { MessageBlock } from '../../types';
@@ -28,7 +27,7 @@ export const TurnView = memo(function TurnView({ turn, agent, meta, model, effor
       )}
       {isSystemMsg && turn.user && !turn.assistant && (
         <div className="mb-4 px-4 py-3 rounded-lg bg-[rgba(255,255,255,0.02)] border border-edge/20 text-[12.5px] leading-[1.7] text-fg-4">
-          <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+          <ReactMarkdown remarkPlugins={mdPlugins} components={mdComponents}>
             {turn.user.text}
           </ReactMarkdown>
         </div>

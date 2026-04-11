@@ -10,6 +10,7 @@ import type {
   PermissionRequestResult,
   SessionHubResult,
   SessionMessagesResult,
+  SkillInfo,
   StreamPlan,
   SessionTailMessage,
   SessionsPageResult,
@@ -158,6 +159,13 @@ export const api = {
     post<{ ok: boolean; installed?: boolean; error?: string }>('/api/desktop-install', {}, { timeoutMs: 300_000, ...opts }),
   desktopToggle: (enabled: boolean, opts?: ApiRequestOptions) =>
     post<{ ok: boolean; enabled?: boolean; error?: string }>('/api/desktop-toggle', { enabled }, { timeoutMs: 60_000, ...opts }),
+
+  // Skills
+  getSkills: (workdir: string, opts?: ApiRequestOptions) =>
+    json<{ ok: boolean; skills: SkillInfo[]; error?: string }>(
+      `/api/session-hub/skills?workdir=${encodeURIComponent(workdir)}`,
+      { timeoutMs: 5_000, ...opts },
+    ),
 
   // Session hub
   getWorkspaces: () => json<{ ok: boolean; workspaces: WorkspaceEntry[] }>('/api/workspaces'),

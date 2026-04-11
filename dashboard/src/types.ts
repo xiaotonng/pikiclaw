@@ -322,6 +322,12 @@ export interface BrowserSetupResponse {
   error?: string;
 }
 
+export interface SkillInfo {
+  name: string;
+  label: string | null;
+  description: string | null;
+}
+
 export interface GitChange {
   status: 'added' | 'modified' | 'deleted';
   file: string;
