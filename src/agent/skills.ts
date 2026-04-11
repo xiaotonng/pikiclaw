@@ -104,7 +104,7 @@ function ensureDirSymlink(linkPath: string, targetDir: string) {
     fs.rmSync(linkPath, { recursive: true, force: true });
   } catch {}
   fs.mkdirSync(path.dirname(linkPath), { recursive: true });
-  fs.symlinkSync(desiredTarget, linkPath, 'dir');
+  fs.symlinkSync(desiredTarget, linkPath, process.platform === 'win32' ? 'junction' : 'dir');
 }
 
 function copyMergedTree(

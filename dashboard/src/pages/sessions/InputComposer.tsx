@@ -245,7 +245,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
     || (streamPhase === 'queued' ? (streamTaskId || localTaskId) : null)
     || (!streamPhase && localTaskId ? localTaskId : null);
   const hasQueuedTask = !!effectiveQueuedId;
-  const showTaskBar = sending || hasQueuedTask || isActiveStream;
+  const showTaskBar = hasQueuedTask || isActiveStream;
 
   // Clear action-pending flags when the target state resolves
   useEffect(() => {
@@ -421,13 +421,6 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
                     {t('hub.recall')}
                   </button>
                 </div>
-              </div>
-            )}
-            {/* Sending state — no stream yet, no queue */}
-            {!isActiveStream && !hasQueuedTask && (
-              <div className="flex items-center gap-2.5 rounded-lg border border-edge/30 bg-panel-alt/20 px-3.5 py-1.5 transition-colors">
-                <Spinner className="h-3 w-3 text-fg-5/50 shrink-0" />
-                <span className="flex-1 min-w-0 text-[12px] font-medium text-fg-5">{t('hub.sending')}</span>
               </div>
             )}
           </div>

@@ -517,7 +517,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
       });
       setActiveSlotIndex(targetSlot >= 0 ? targetSlot : 0);
     });
-    void loadSessionsForWorkspace(next.workdir, { force: true });
+    void loadSessionsForWorkspace(next.workdir, { background: true, force: true });
   }, [loadSessionsForWorkspace, warmSession]);
 
   /* ── Select session — stable callback that takes wsPath ── */
@@ -551,7 +551,7 @@ export const SessionWorkspace = memo(function SessionWorkspace({
         setSelectedSession(next);
       }
     });
-    void loadSessionsForWorkspace(next.workdir, { force: true });
+    void loadSessionsForWorkspace(next.workdir, { background: true, force: true });
   }, [loadSessionsForWorkspace, warmSession]);
 
   /* ── Filter sessions — memoized per workspace to avoid new-array-on-every-render ── */

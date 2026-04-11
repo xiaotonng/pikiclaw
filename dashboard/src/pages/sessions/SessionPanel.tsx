@@ -389,12 +389,17 @@ export const SessionPanel = memo(function SessionPanel({
   // When a live stream is active, the last turn's assistant response may already be
   // present in fetched history (partial or complete).  Suppress it to avoid rendering
   // the same response twice (once in TurnView, once in LivePreview).
+  // BUT: when there's a pending follow-up prompt whose turn hasn't appeared in history
+  // yet, the liveStream is for the NEW turn — don't strip the previous turn's response.
   const turns = useMemo(() => {
     if (!liveStream || !rawTurns.length) return rawTurns;
     const last = rawTurns[rawTurns.length - 1];
     if (!last.assistant) return rawTurns;
+    // If a pending prompt exists and doesn't match the last turn's user message,
+    // the live stream is for a new follow-up turn, not the last one in history.
+    if (pendingPrompt && last.user?.text?.trim() !== pendingPrompt.trim()) return rawTurns;
     return [...rawTurns.slice(0, -1), { ...last, assistant: null }];
-  }, [rawTurns, liveStream]);
+  }, [rawTurns, liveStream, pendingPrompt]);
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
