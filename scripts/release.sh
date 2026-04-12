@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 #
-# release.sh — bump patch version, build, local install, commit, tag, push,
-#               and wait for CI to finish.
+# release.sh — bump patch version, build, local install, commit, tag, push.
 #
 # Usage:  ./scripts/release.sh
 #
@@ -69,25 +68,7 @@ git tag "$NEW_TAG"
 echo "▸ Pushing…"
 git push origin main "$NEW_TAG"
 
-# ── 4. Wait for CI ───────────────────────────────────────────────────────────
-
-echo "▸ Waiting for Release workflow…"
-RUN_ID=""
-for _ in $(seq 1 30); do
-  RUN_ID=$(gh run list --workflow=release.yml --branch "$NEW_TAG" --limit 1 --json databaseId -q '.[0].databaseId')
-  if [ -n "$RUN_ID" ] && [ "$RUN_ID" != "null" ]; then
-    break
-  fi
-  sleep 2
-done
-
-if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
-  echo "✗ Could not find Release workflow run for ${NEW_TAG}" >&2
-  exit 1
-fi
-
-gh run watch "$RUN_ID" --exit-status
-
 echo ""
 echo "✓ v${NEW_VERSION} released successfully!"
+echo "  CI will publish to npm in the background."
 echo "  Run the install skill to generate release notes."
