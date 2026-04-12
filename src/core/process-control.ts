@@ -229,6 +229,16 @@ export async function requestProcessRestart(opts: ProcessRestartOptions = {}): P
     };
   }
 
+  const activeTasks = getActiveTaskCount();
+  if (activeTasks > 0) {
+    return {
+      ok: false,
+      restarting: false,
+      error: `${activeTasks} task(s) still running. Wait for them to finish or try again.`,
+      activeTasks,
+    };
+  }
+
   restartInFlight = true;
   const log = opts.log;
   const exit = opts.exit || process.exit;
