@@ -120,3 +120,58 @@ export async function steerSessionTask(taskId: string) {
   const result = await bot.steerTask(taskId);
   return { ok: true as const, steered: result.steered };
 }
+
+// ---------------------------------------------------------------------------
+// Interaction prompt control (human-in-the-loop)
+// ---------------------------------------------------------------------------
+
+export function interactionSelectOption(promptId: string, optionValue: string, opts?: { requestFreeform?: boolean }) {
+  const bot = runtime.getBotRef();
+  if (!bot) return { ok: false as const, error: 'Bot is not running' };
+  const result = bot.interactionSelectOption(promptId, optionValue, opts);
+  if (!result) return { ok: false as const, error: 'Prompt not found or no longer active' };
+  return { ok: true as const, completed: result.completed, advanced: result.advanced };
+}
+
+export function interactionSubmitText(promptId: string, text: string) {
+  const bot = runtime.getBotRef();
+  if (!bot) return { ok: false as const, error: 'Bot is not running' };
+  const result = bot.interactionSubmitText(promptId, text);
+  if (!result) return { ok: false as const, error: 'Prompt not found or not awaiting text' };
+  return { ok: true as const, completed: result.completed, advanced: result.advanced };
+}
+
+export function interactionSkip(promptId: string) {
+  const bot = runtime.getBotRef();
+  if (!bot) return { ok: false as const, error: 'Bot is not running' };
+  const result = bot.interactionSkip(promptId);
+  if (!result) return { ok: false as const, error: 'Prompt not found or no longer active' };
+  return { ok: true as const, completed: result.completed, advanced: result.advanced };
+}
+
+export function interactionCancel(promptId: string) {
+  const bot = runtime.getBotRef();
+  if (!bot) return { ok: false as const, error: 'Bot is not running' };
+  const result = bot.interactionCancel(promptId);
+  if (!result) return { ok: false as const, error: 'Prompt not found or no longer active' };
+  return { ok: true as const };
+}
+
+export function getInteractionPrompt(promptId: string) {
+  const bot = runtime.getBotRef();
+  if (!bot) return { ok: false as const, error: 'Bot is not running' };
+  const prompt = bot.interactionPrompt(promptId);
+  if (!prompt) return { ok: true as const, prompt: null };
+  return {
+    ok: true as const,
+    prompt: {
+      promptId: prompt.promptId,
+      taskId: prompt.taskId,
+      title: prompt.title,
+      hint: prompt.hint,
+      questions: prompt.questions,
+      currentIndex: prompt.currentIndex,
+      answers: prompt.answers,
+    },
+  };
+}

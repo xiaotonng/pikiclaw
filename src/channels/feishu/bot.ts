@@ -24,7 +24,6 @@ import {
 } from '../../bot/orchestration.js';
 import {
   stageSessionFiles,
-  type CodexInteractionRequest,
 } from '../../agent/index.js';
 import type { McpSendFileCallback } from '../../agent/mcp/bridge.js';
 import { shutdownAllDrivers } from '../../agent/driver.js';
@@ -53,8 +52,6 @@ import {
 } from '../../bot/command-ui.js';
 import { LivePreview } from '../telegram/live-preview.js';
 import {
-  formatActiveTaskRestartError,
-  getActiveTaskCount,
   registerProcessRuntime,
   requestProcessRestart,
 } from '../../core/process-control.js';
@@ -72,8 +69,7 @@ import {
   buildSwitchWorkdirCard,
   resolveFeishuRegisteredPath,
 } from './render.js';
-import { buildCodexHumanLoopPrompt } from '../../bot/human-loop-codex.js';
-import { currentHumanLoopQuestion, humanLoopOptionSelected } from '../../bot/human-loop.js';
+import { currentHumanLoopQuestion, humanLoopOptionSelected, type HumanLoopPromptState } from '../../bot/human-loop.js';
 import { FeishuChannel, type FeishuContext, type FeishuCallbackContext, type FeishuMessage } from './channel.js';
 import { splitText, supportsChannelCapability } from '../base.js';
 import { getActiveUserConfig } from '../../core/config/user-config.js';
@@ -495,11 +491,6 @@ export class FeishuBot extends Bot {
   }
 
   private async cmdRestart(ctx: FeishuContext) {
-    const activeTasks = getActiveTaskCount();
-    if (activeTasks > 0) {
-      await ctx.reply(`⚠ ${formatActiveTaskRestartError(activeTasks)}`);
-      return;
-    }
     await ctx.reply('**Restarting pikiclaw...**\n\nPulling latest version. The bot will be back shortly.');
     void requestProcessRestart({ log: msg => this.log(msg) });
   }
@@ -584,25 +575,11 @@ export class FeishuBot extends Bot {
     }).catch(() => {});
   }
 
-  private createCodexHumanLoopHandler(ctx: FeishuContext, taskId: string) {
-    return async (request: CodexInteractionRequest): Promise<Record<string, any> | null> => {
-      const blueprint = buildCodexHumanLoopPrompt(request);
-      const active = this.beginHumanLoopPrompt({
-        taskId,
-        chatId: ctx.chatId,
-        ...blueprint,
-      });
-      try {
-        const sent = await ctx.reply(buildHumanLoopPromptMarkdown(active.prompt), {
-          keyboard: this.buildHumanLoopKeyboard(active.prompt.promptId),
-        });
-        if (sent) this.registerHumanLoopMessage(active.prompt.promptId, sent);
-      } catch (error: any) {
-        this.humanLoopCancel(active.prompt.promptId, error?.message || 'Failed to send prompt.');
-        throw error;
-      }
-      return active.result;
-    };
+  protected override async renderInteractionPrompt(prompt: HumanLoopPromptState<string>, chatId: string): Promise<void> {
+    const sent = await this.channel.send(chatId, buildHumanLoopPromptMarkdown(prompt), {
+      keyboard: this.buildHumanLoopKeyboard(prompt.promptId),
+    });
+    if (sent) this.registerHumanLoopMessage(prompt.promptId, sent);
   }
 
   private async safeSetMessageReaction(chatId: string, messageId: string, reactions: string[]) {
@@ -745,7 +722,7 @@ export class FeishuBot extends Bot {
 
         const result = await this.runStream(prompt, session, files, (nextText, nextThinking, nextActivity = '', meta, plan) => {
           livePreview?.update(nextText, nextThinking, nextActivity, meta, plan);
-        }, undefined, mcpSendFile, abortController.signal, this.createCodexHumanLoopHandler(ctx, taskId), (steer) => {
+        }, undefined, mcpSendFile, abortController.signal, this.createInteractionHandler(ctx.chatId, taskId, session.key), (steer) => {
           const currentTask = this.activeTasks.get(taskId);
           if (!currentTask || currentTask.cancelled || currentTask.status !== 'running') return;
           currentTask.steer = steer;

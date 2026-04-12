@@ -21,8 +21,8 @@ import './drivers/gemini.js';
 // ── Re-export: types ────────────────────────────────────────────────────────
 export type {
   Agent, AgentDetectOptions, AgentInfo, AgentListResult,
-  CodexCumulativeUsage, CodexInteractionOption, CodexInteractionQuestion,
-  CodexInteractionRequest, CodexTurnControl,
+  CodexCumulativeUsage, CodexTurnControl,
+  AgentInteractionOption, AgentInteractionQuestion, AgentInteraction,
   StreamPreviewMeta, StreamPreviewPlanStep, StreamPreviewPlan,
   StreamOpts, StreamResult,
   ManagedSessionRecord, SessionRunState, SessionClassification,

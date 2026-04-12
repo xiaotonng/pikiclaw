@@ -21,8 +21,6 @@ import {
   launchManagedBrowserSetup,
 } from '../../browser-profile.js';
 import {
-  formatActiveTaskRestartError,
-  getActiveTaskCount,
   requestProcessRestart,
 } from '../../core/process-control.js';
 import {
@@ -306,10 +304,6 @@ app.post('/api/open-preferences', async (c) => {
 
 // Restart process
 app.post('/api/restart', (c) => {
-  const activeTasks = getActiveTaskCount();
-  if (activeTasks > 0) {
-    return c.json({ ok: false, error: formatActiveTaskRestartError(activeTasks) }, 409);
-  }
   setTimeout(() => {
     void requestProcessRestart({ log: message => runtime.log(message) });
   }, 50);

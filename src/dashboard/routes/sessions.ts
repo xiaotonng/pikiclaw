@@ -14,6 +14,11 @@ import {
   getSessionStreamState,
   queueDashboardSessionTask,
   steerSessionTask,
+  interactionSelectOption,
+  interactionSubmitText,
+  interactionSkip,
+  interactionCancel,
+  getInteractionPrompt,
 } from '../session-control.js';
 import {
   querySessions, querySessionTail, querySessionMessages,
@@ -579,6 +584,71 @@ app.post('/api/session-hub/session/steer', async (c) => {
     }
     const result = await steerSessionTask(taskId);
     return c.json(result, result.ok ? 200 : 503);
+  } catch (e: any) {
+    return c.json({ ok: false, error: e.message }, 500);
+  }
+});
+
+// ==========================================================================
+// Interaction prompts (human-in-the-loop)
+// ==========================================================================
+
+/** GET /api/interaction/:promptId — Get interaction prompt state. */
+app.get('/api/interaction/:promptId', (c) => {
+  const { promptId } = c.req.param();
+  const result = getInteractionPrompt(promptId);
+  return c.json(result, result.ok ? 200 : 503);
+});
+
+/** POST /api/interaction/:promptId/select — Select an option. */
+app.post('/api/interaction/:promptId/select', async (c) => {
+  try {
+    const { promptId } = c.req.param();
+    const body = await c.req.json();
+    const { value, requestFreeform } = body || {};
+    if (!value && !requestFreeform) {
+      return c.json({ ok: false, error: 'value is required' }, 400);
+    }
+    const result = interactionSelectOption(promptId, value || '__other__', { requestFreeform: !!requestFreeform });
+    return c.json(result, result.ok ? 200 : (result.error === 'Bot is not running' ? 503 : 404));
+  } catch (e: any) {
+    return c.json({ ok: false, error: e.message }, 500);
+  }
+});
+
+/** POST /api/interaction/:promptId/text — Submit freeform text. */
+app.post('/api/interaction/:promptId/text', async (c) => {
+  try {
+    const { promptId } = c.req.param();
+    const body = await c.req.json();
+    const { text } = body || {};
+    if (typeof text !== 'string') {
+      return c.json({ ok: false, error: 'text is required' }, 400);
+    }
+    const result = interactionSubmitText(promptId, text);
+    return c.json(result, result.ok ? 200 : (result.error === 'Bot is not running' ? 503 : 404));
+  } catch (e: any) {
+    return c.json({ ok: false, error: e.message }, 500);
+  }
+});
+
+/** POST /api/interaction/:promptId/skip — Skip current question. */
+app.post('/api/interaction/:promptId/skip', async (c) => {
+  try {
+    const { promptId } = c.req.param();
+    const result = interactionSkip(promptId);
+    return c.json(result, result.ok ? 200 : (result.error === 'Bot is not running' ? 503 : 404));
+  } catch (e: any) {
+    return c.json({ ok: false, error: e.message }, 500);
+  }
+});
+
+/** POST /api/interaction/:promptId/cancel — Cancel interaction prompt. */
+app.post('/api/interaction/:promptId/cancel', async (c) => {
+  try {
+    const { promptId } = c.req.param();
+    const result = interactionCancel(promptId);
+    return c.json(result, result.ok ? 200 : (result.error === 'Bot is not running' ? 503 : 404));
   } catch (e: any) {
     return c.json({ ok: false, error: e.message }, 500);
   }
