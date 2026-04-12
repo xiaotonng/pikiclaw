@@ -10,7 +10,7 @@ import { terminateProcessTree } from '../../core/process-control.js';
 import {
   type StreamOpts, type StreamResult,
   type StreamPreviewMeta, type StreamPreviewPlan, type StreamPreviewPlanStep,
-  type CodexCumulativeUsage, type CodexInteractionRequest,
+  type CodexCumulativeUsage, type AgentInteraction, type AgentInteractionQuestion,
   type SessionListResult, type SessionInfo, type SessionTailOpts, type SessionTailResult,
   type SessionMessagesOpts, type SessionMessagesResult,
   type TailMessage, type RichMessage, type MessageBlock,
@@ -439,36 +439,45 @@ function overlayCodexManagedPreview(workdir: string, sessionId: string, richMess
   return merged;
 }
 
-function buildCodexInteractionRequest(method: string, params: any, requestId: string): CodexInteractionRequest | null {
+function toAgentInteraction(method: string, params: any, requestId: string): AgentInteraction | null {
   if (method === 'item/tool/requestUserInput') {
-    const questions = Array.isArray(params?.questions) ? params.questions : [];
-    return {
-      kind: 'requestUserInput',
-      requestId,
-      threadId: String(params?.threadId || ''),
-      turnId: String(params?.turnId || ''),
-      itemId: String(params?.itemId || ''),
-      questions: questions.map((question: any) => ({
-        id: String(question?.id || ''),
-        header: String(question?.header || ''),
-        question: String(question?.question || ''),
-        isOther: !!question?.isOther,
-        isSecret: !!question?.isSecret,
-        options: Array.isArray(question?.options)
-          ? question.options.map((option: any) => ({
-            label: String(option?.label || ''),
-            description: String(option?.description || ''),
+    const raw = Array.isArray(params?.questions) ? params.questions : [];
+    const questions: AgentInteractionQuestion[] = raw
+      .map((q: any) => ({
+        id: String(q?.id || ''),
+        header: String(q?.header || '') || 'Question',
+        prompt: String(q?.question || ''),
+        options: Array.isArray(q?.options)
+          ? q.options.map((o: any) => ({
+            label: String(o?.label || ''),
+            description: String(o?.description || ''),
+            value: String(o?.label || ''),
           }))
           : null,
-      })).filter((question: any) => question.id && question.question),
+        allowFreeform: !!q?.isOther || !Array.isArray(q?.options) || !q.options.length,
+        secret: !!q?.isSecret,
+        allowEmpty: true,
+      }))
+      .filter((q: AgentInteractionQuestion) => q.id && q.prompt);
+    return {
+      kind: 'user-input',
+      id: requestId,
+      title: 'User Input Required',
+      hint: 'Use the buttons when available. Reply with text when prompted.',
+      questions,
+      resolveWith: (answers) => ({
+        answers: Object.fromEntries(
+          Object.entries(answers).map(([id, vals]) => [id, { answers: vals }]),
+        ),
+      }),
     };
   }
   return null;
 }
 
-function defaultCodexInteractionResponse(request: CodexInteractionRequest): Record<string, any> {
+function defaultAgentInteractionResponse(interaction: AgentInteraction): Record<string, any> {
   const answers: Record<string, { answers: string[] }> = {};
-  for (const question of request.questions) answers[question.id] = { answers: [] };
+  for (const q of interaction.questions) answers[q.id] = { answers: [] };
   return { answers };
 }
 
@@ -898,22 +907,22 @@ async function handleCodexRequest(
   s: CodexStreamState, opts: StreamOpts,
   emit: () => void,
 ): Promise<Record<string, any>> {
-  const interaction = buildCodexInteractionRequest(method, params, requestId);
+  const interaction = toAgentInteraction(method, params, requestId);
   if (!interaction) return defaultCodexServerRequestResponse(method);
 
-  pushRecentActivity(s.recentNarrative, interaction.kind === 'requestUserInput' ? 'Waiting for user input' : 'Waiting for approval');
+  pushRecentActivity(s.recentNarrative, interaction.kind === 'user-input' ? 'Waiting for user input' : 'Waiting for approval');
   emit();
 
   try {
-    if (opts.onCodexInteractionRequest) {
-      const response = await opts.onCodexInteractionRequest(interaction);
-      return response ?? defaultCodexInteractionResponse(interaction);
+    if (opts.onInteraction) {
+      const response = await opts.onInteraction(interaction);
+      return response ?? defaultAgentInteractionResponse(interaction);
     }
   } catch (error: any) {
     pushRecentActivity(s.recentFailures, `Human input failed: ${shortValue(error?.message || error, 120)}`, 4);
     emit();
   }
-  return defaultCodexInteractionResponse(interaction);
+  return defaultAgentInteractionResponse(interaction);
 }
 
 // ---------------------------------------------------------------------------

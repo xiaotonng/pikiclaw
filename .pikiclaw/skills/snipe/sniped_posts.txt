@@ -1,2 +1,6 @@
 # 已推荐过的推文 URL（每行一条，避免重复推荐）
 # 格式: https://x.com/{handle}/status/{id}
+https://x.com/NFTCPS/status/2042558416531657134
+https://x.com/GitHub_Daily/status/2042837605725896878
+https://x.com/ClaudeCodeLog/status/2042508004378001787
+https://x.com/tom_doerr/status/2043013754678391120

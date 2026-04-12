@@ -11,7 +11,7 @@ import { getActiveUserConfig, onUserConfigChange, resolveUserWorkdir, setUserWor
 import {
   doStream, ensureManagedSession, findManagedThreadSession, findThreadSessionAcrossAgents, getUsage, initializeProjectSkills, listAgents, listModels, listSkills, stageSessionFiles,
   type Agent, type CodexCumulativeUsage, type StreamOpts, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type SessionInfo, type UsageResult,
-  type CodexInteractionRequest, type CodexTurnControl,
+  type AgentInteraction, type CodexTurnControl,
   type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult,
   type SkillInfo, type SkillListResult, type AgentDetectOptions, isPendingSessionId,
   type SessionClassification, type SessionMessagesOpts, type SessionMessagesResult,
@@ -47,7 +47,7 @@ import {
   type HostBatteryData, type HostCpuUsageData, type HostMemoryUsageData,
 } from './host.js';
 
-export { updateSession, type Agent, type CodexCumulativeUsage, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type SessionInfo, type UsageResult, type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult, type SkillInfo, type SkillListResult, type SessionClassification, type SessionMessagesOpts, type SessionMessagesResult, type SessionQueryResult };
+export { updateSession, type Agent, type CodexCumulativeUsage, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type SessionInfo, type UsageResult, type AgentInteraction, type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult, type SkillInfo, type SkillListResult, type SessionClassification, type SessionMessagesOpts, type SessionMessagesResult, type SessionQueryResult };
 export { envBool, envString, envInt, shellSplit, whichSync, fmtTokens, fmtUptime, fmtBytes, parseAllowedChatIds, listSubdirs, extractThinkingTail, formatThinkingForDisplay, buildPrompt, ensureGitignore, type ChatId } from '../core/utils.js';
 export { getHostBatteryData, getHostCpuUsageData, getHostDisplayName, getHostMemoryUsageData, type HostBatteryData, type HostCpuUsageData, type HostMemoryUsageData } from './host.js';
 import { BOT_TIMEOUTS } from '../core/constants.js';
@@ -166,12 +166,23 @@ export interface SessionRuntime {
 }
 
 /** Events emitted to dashboard listeners during a stream. */
+/** Serialisable subset of AgentInteraction for SSE/snapshot (excludes resolveWith). */
+export interface InteractionSnapshot {
+  promptId: string;
+  kind: 'user-input' | 'permission' | 'confirmation';
+  title: string;
+  hint?: string | null;
+  questions: AgentInteraction['questions'];
+}
+
 export type StreamEvent =
   | { type: 'start'; taskId: string; agent: string; sessionId: string | null }
   | { type: 'text'; text: string; thinking: string; activity?: string; plan?: StreamPreviewPlan | null }
   | { type: 'done'; taskId: string; sessionId: string | null; error?: string; incomplete?: boolean }
   | { type: 'queued'; taskId: string; position: number }
-  | { type: 'cancelled'; taskId: string };
+  | { type: 'cancelled'; taskId: string }
+  | { type: 'interaction'; taskId: string; interaction: InteractionSnapshot }
+  | { type: 'interaction-resolved'; promptId: string };
 
 /** Snapshot of the latest streaming state for a session (used by polling endpoint). */
 export interface StreamSnapshot {
@@ -185,6 +196,8 @@ export interface StreamSnapshot {
   plan?: StreamPreviewPlan | null;
   sessionId?: string | null;
   error?: string;
+  /** Active human-in-the-loop interaction prompts. */
+  interactions?: InteractionSnapshot[];
   updatedAt: number;
 }
 
@@ -413,6 +426,25 @@ export class Bot {
         } else {
           this.streamSnapshots.delete(sessionKey);
           this.promotedFromAliases.delete(sessionKey);
+        }
+        break;
+      }
+      case 'interaction': {
+        const snap = this.streamSnapshots.get(sessionKey);
+        if (snap) {
+          const list = snap.interactions || [];
+          list.push(event.interaction);
+          snap.interactions = list;
+          snap.updatedAt = now;
+        }
+        break;
+      }
+      case 'interaction-resolved': {
+        const snap = this.streamSnapshots.get(sessionKey);
+        if (snap?.interactions) {
+          snap.interactions = snap.interactions.filter(i => i.promptId !== event.promptId);
+          if (!snap.interactions.length) delete snap.interactions;
+          snap.updatedAt = now;
         }
         break;
       }
@@ -1047,6 +1079,7 @@ export class Bot {
     this.humanLoopPrompts.delete(promptId);
     this.removeHumanLoopPromptFromChat(prompt.chatId, promptId);
     prompt.resolve(buildHumanLoopResponse(prompt));
+    this.emitInteractionResolved(prompt.taskId, promptId);
     return prompt;
   }
 
@@ -1056,7 +1089,13 @@ export class Bot {
     this.humanLoopPrompts.delete(promptId);
     this.removeHumanLoopPromptFromChat(prompt.chatId, promptId);
     if (error) prompt.reject(error);
+    this.emitInteractionResolved(prompt.taskId, promptId);
     return prompt;
+  }
+
+  private emitInteractionResolved(taskId: string, promptId: string) {
+    const task = this.activeTasks.get(taskId);
+    if (task) this.emitStream(task.sessionKey, { type: 'interaction-resolved', promptId });
   }
 
   protected humanLoopSelectOption(promptId: string, optionValue: string, opts: { requestFreeform?: boolean } = {}) {
@@ -1103,6 +1142,90 @@ export class Bot {
     const next = promptIds.filter(id => id !== promptId);
     if (next.length) this.humanLoopPromptIdsByChat.set(chatKey, next);
     else this.humanLoopPromptIdsByChat.delete(chatKey);
+  }
+
+  /**
+   * Create an interaction handler that bridges agent requests to the human-loop
+   * state machine and pushes SSE events to the dashboard.
+   *
+   * IM channel subclasses override `renderInteractionPrompt()` to render
+   * buttons/cards in their native UI.  Dashboard clients receive the
+   * `interaction` SSE event and respond via REST.
+   */
+  protected createInteractionHandler(
+    chatId: ChatId,
+    taskId: string,
+    sessionKey: string,
+  ): (request: AgentInteraction) => Promise<Record<string, any> | null> {
+    return async (request) => {
+      const active = this.beginHumanLoopPrompt({
+        taskId,
+        chatId,
+        title: request.title,
+        hint: request.hint,
+        questions: request.questions,
+        resolveWith: request.resolveWith,
+      });
+
+      const interactionSnapshot: InteractionSnapshot = {
+        promptId: active.prompt.promptId,
+        kind: request.kind,
+        title: request.title,
+        hint: request.hint,
+        questions: request.questions,
+      };
+      this.emitStream(sessionKey, { type: 'interaction', taskId, interaction: interactionSnapshot });
+
+      try {
+        await this.renderInteractionPrompt(active.prompt, chatId);
+      } catch (error: any) {
+        this.humanLoopCancel(active.prompt.promptId, error?.message || 'Failed to send prompt.');
+        throw error;
+      }
+
+      return active.result;
+    };
+  }
+
+  /**
+   * Render an interaction prompt in the IM channel.
+   * Override in channel subclasses (Telegram, Feishu, etc.).
+   * Dashboard-only sessions (chatId='dashboard') are a no-op by default.
+   */
+  protected async renderInteractionPrompt(_prompt: HumanLoopPromptState<ChatId>, _chatId: ChatId): Promise<void> {
+    // Default: no-op (dashboard-only sessions use SSE events instead)
+  }
+
+  // ---- Public interaction API (used by dashboard routes) --------------------
+
+  /** Respond to a pending interaction prompt with a selected option. */
+  interactionSelectOption(promptId: string, optionValue: string, opts?: { requestFreeform?: boolean }) {
+    return this.humanLoopSelectOption(promptId, optionValue, opts);
+  }
+
+  /** Submit freeform text to a pending interaction prompt. */
+  interactionSubmitText(promptId: string, text: string) {
+    const prompt = this.humanLoopPrompt(promptId);
+    if (!prompt) return null;
+    if (!isHumanLoopAwaitingText(prompt)) return null;
+    const result = setHumanLoopText(prompt, text);
+    if (result.completed) this.resolveHumanLoopPrompt(prompt.promptId);
+    return { prompt, ...result };
+  }
+
+  /** Skip the current question in a pending interaction prompt. */
+  interactionSkip(promptId: string) {
+    return this.humanLoopSkip(promptId);
+  }
+
+  /** Cancel a pending interaction prompt. */
+  interactionCancel(promptId: string, reason = 'Cancelled from dashboard.') {
+    return this.humanLoopCancel(promptId, reason);
+  }
+
+  /** Get a specific interaction prompt by ID. */
+  interactionPrompt(promptId: string) {
+    return this.humanLoopPrompt(promptId);
   }
 
   selectedSession(chatId: ChatId): SessionRuntime | null {
@@ -1157,6 +1280,7 @@ export class Bot {
           undefined,
           undefined,
           abortController.signal,
+          this.createInteractionHandler(opts.chatId ?? 'dashboard', taskId, currentSessionKey()),
         );
         this.emitStream(currentSessionKey(), {
           type: 'done',
@@ -1443,7 +1567,7 @@ export class Bot {
     systemPrompt?: string,
     mcpSendFile?: import('../agent/mcp/bridge.js').McpSendFileCallback,
     abortSignal?: AbortSignal,
-    onCodexInteractionRequest?: (request: CodexInteractionRequest) => Promise<Record<string, any> | null>,
+    onInteraction?: (request: AgentInteraction) => Promise<Record<string, any> | null>,
     onSteerReady?: (steer: (prompt: string, attachments?: string[]) => Promise<boolean>) => void,
     onCodexTurnReady?: (control: CodexTurnControl) => void,
   ): Promise<StreamResult> {
@@ -1535,7 +1659,7 @@ export class Bot {
       // MCP bridge
       mcpSendFile,
       abortSignal,
-      onCodexInteractionRequest,
+      onInteraction,
       onSteerReady,
       onCodexTurnReady,
     };

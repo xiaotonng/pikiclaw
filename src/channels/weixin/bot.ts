@@ -19,8 +19,6 @@ import { BOT_SHUTDOWN_FORCE_EXIT_MS, buildSessionTaskId } from '../../bot/orches
 import { shutdownAllDrivers } from '../../agent/driver.js';
 import type { McpSendFileCallback } from '../../agent/mcp/bridge.js';
 import {
-  formatActiveTaskRestartError,
-  getActiveTaskCount,
   registerProcessRuntime,
   requestProcessRestart,
 } from '../../core/process-control.js';
@@ -417,11 +415,6 @@ export class WeixinBot extends Bot {
   }
 
   private async cmdRestart(ctx: WeixinContext) {
-    const activeTasks = getActiveTaskCount();
-    if (activeTasks > 0) {
-      await ctx.reply(formatActiveTaskRestartError(activeTasks));
-      return;
-    }
     await ctx.reply('Restarting pikiclaw...');
     void requestProcessRestart({ log: msg => this.log(msg) });
   }

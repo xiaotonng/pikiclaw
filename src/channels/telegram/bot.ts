@@ -24,7 +24,6 @@ import {
 } from '../../bot/orchestration.js';
 import {
   stageSessionFiles,
-  type CodexInteractionRequest,
 } from '../../agent/index.js';
 import type { McpSendFileCallback } from '../../agent/mcp/bridge.js';
 import { shutdownAllDrivers } from '../../agent/driver.js';
@@ -54,8 +53,6 @@ import {
 import { buildSwitchWorkdirView, resolveRegisteredPath } from './directory.js';
 import { LivePreview, type LivePreviewRenderer } from './live-preview.js';
 import {
-  formatActiveTaskRestartError,
-  getActiveTaskCount,
   registerProcessRuntime,
   buildRestartCommand,
   requestProcessRestart,
@@ -74,8 +71,7 @@ import {
   renderSessionTurnHtml,
   truncateMiddle,
 } from './render.js';
-import { buildCodexHumanLoopPrompt } from '../../bot/human-loop-codex.js';
-import { currentHumanLoopQuestion, humanLoopOptionSelected } from '../../bot/human-loop.js';
+import { currentHumanLoopQuestion, humanLoopOptionSelected, type HumanLoopPromptState } from '../../bot/human-loop.js';
 import { TelegramChannel, type TgContext, type TgCallbackContext, type TgMessage } from './channel.js';
 import { splitText, supportsChannelCapability } from '../base.js';
 import { getActiveUserConfig } from '../../core/config/user-config.js';
@@ -444,11 +440,6 @@ export class TelegramBot extends Bot {
   }
 
   private async cmdRestart(ctx: TgContext) {
-    const activeTasks = getActiveTaskCount();
-    if (activeTasks > 0) {
-      await ctx.reply(`⚠ ${formatActiveTaskRestartError(activeTasks)}`, { parseMode: 'HTML' });
-      return;
-    }
     await ctx.reply(
       `<b>Restarting pikiclaw...</b>\n\n` +
       `The bot will be back shortly.`,
@@ -516,28 +507,18 @@ export class TelegramBot extends Bot {
     }).catch(() => {});
   }
 
-  private createCodexHumanLoopHandler(ctx: TgContext, taskId: string, messageThreadId: number | undefined) {
-    return async (request: CodexInteractionRequest): Promise<Record<string, any> | null> => {
-      const blueprint = buildCodexHumanLoopPrompt(request);
-      const active = this.beginHumanLoopPrompt({
-        taskId,
-        chatId: ctx.chatId,
-        ...blueprint,
-      });
-      try {
-        const sent = await ctx.reply(buildHumanLoopPromptHtml(active.prompt), {
-          parseMode: 'HTML',
-          messageThreadId,
-          keyboard: this.buildHumanLoopKeyboard(active.prompt.promptId),
-        });
-        if (typeof sent === 'number') this.registerHumanLoopMessage(active.prompt.promptId, sent);
-      } catch (error: any) {
-        this.humanLoopCancel(active.prompt.promptId, error?.message || 'Failed to send prompt.');
-        throw error;
-      }
-      return active.result;
-    };
+  protected override async renderInteractionPrompt(prompt: HumanLoopPromptState<number>, chatId: number): Promise<void> {
+    const messageThreadId = this.interactionThreadIds.get(prompt.taskId);
+    const sent = await this.channel.send(chatId, buildHumanLoopPromptHtml(prompt), {
+      parseMode: 'HTML',
+      messageThreadId,
+      keyboard: this.buildHumanLoopKeyboard(prompt.promptId),
+    });
+    if (typeof sent === 'number') this.registerHumanLoopMessage(prompt.promptId, sent);
   }
+
+  /** Cache the messageThreadId per task so renderInteractionPrompt can use it. */
+  private interactionThreadIds = new Map<string, number | undefined>();
 
   // ---- streaming bridge -----------------------------------------------------
 
@@ -671,9 +652,10 @@ export class TelegramBot extends Bot {
         // MCP sendFile callback: sends files to IM in real-time during the stream
         const mcpSendFile = this.createMcpSendFileCallback(ctx, messageThreadId);
 
+        this.interactionThreadIds.set(taskId, messageThreadId);
         const result = await this.runStream(prompt, session, files, (nextText, nextThinking, nextActivity = '', meta, plan) => {
           livePreview?.update(nextText, nextThinking, nextActivity, meta, plan);
-        }, undefined, mcpSendFile, abortController.signal, this.createCodexHumanLoopHandler(ctx, taskId, messageThreadId), (steer) => {
+        }, undefined, mcpSendFile, abortController.signal, this.createInteractionHandler(ctx.chatId, taskId, session.key), (steer) => {
           const currentTask = this.activeTasks.get(taskId);
           if (!currentTask || currentTask.cancelled || currentTask.status !== 'running') return;
           currentTask.steer = steer;
@@ -721,6 +703,7 @@ export class TelegramBot extends Bot {
         await this.safeSetMessageReaction(ctx.chatId, ctx.messageId, ['⚠️']);
       } finally {
         livePreview?.dispose();
+        this.interactionThreadIds.delete(taskId);
         this.finishTask(taskId);
         this.syncSelectedChats(session);
       }

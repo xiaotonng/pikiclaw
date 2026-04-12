@@ -32,38 +32,58 @@ export interface CodexCumulativeUsage {
   cached: number;
 }
 
-/** A single selectable option within a Codex interaction question. */
-export interface CodexInteractionOption {
-  label: string;
-  description: string;
-}
-
-/** A question presented to the user during a Codex human-in-the-loop interaction. */
-export interface CodexInteractionQuestion {
-  id: string;
-  header: string;
-  question: string;
-  isOther: boolean;
-  isSecret: boolean;
-  options: CodexInteractionOption[] | null;
-}
-
-/** A request from the Codex agent for user input during a running turn. */
-export type CodexInteractionRequest =
-  | {
-    kind: 'requestUserInput';
-    requestId: string;
-    threadId: string;
-    turnId: string;
-    itemId: string;
-    questions: CodexInteractionQuestion[];
-  };
-
 /** Handle for steering a running Codex turn with follow-up input. */
 export interface CodexTurnControl {
   threadId: string;
   turnId: string;
   steer: (prompt: string, attachments?: string[]) => Promise<boolean>;
+}
+
+// ---------------------------------------------------------------------------
+// Agent interaction (human-in-the-loop) — driver-agnostic protocol
+// ---------------------------------------------------------------------------
+
+/** A single selectable option within an agent interaction question. */
+export interface AgentInteractionOption {
+  label: string;
+  description?: string | null;
+  value: string;
+}
+
+/** A question presented to the user during a human-in-the-loop interaction. */
+export interface AgentInteractionQuestion {
+  id: string;
+  header: string;
+  prompt: string;
+  options?: AgentInteractionOption[] | null;
+  allowFreeform?: boolean;
+  secret?: boolean;
+  allowEmpty?: boolean;
+}
+
+/**
+ * Driver-agnostic interaction request.
+ *
+ * Each driver converts its native "need human input" signal into this shape.
+ * The bot/channel/dashboard layers only deal with this interface.
+ */
+export interface AgentInteraction {
+  /** Semantic kind — consumers can use this for UI hints. */
+  kind: 'user-input' | 'permission' | 'confirmation';
+  /** Unique ID for correlating response back to the driver. */
+  id: string;
+  /** Human-readable title. */
+  title: string;
+  /** Optional hint text for the user. */
+  hint?: string | null;
+  /** The questions to present. */
+  questions: AgentInteractionQuestion[];
+  /**
+   * Driver-provided transform: converts the generic answer map into whatever
+   * the native agent protocol expects as a response.  All driver-specific
+   * serialisation is encapsulated here.
+   */
+  resolveWith: (answers: Record<string, string[]>) => Record<string, any> | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -141,8 +161,8 @@ export interface StreamOpts {
   extraEnv?: Record<string, string>;
   /** Abort the in-flight stream. */
   abortSignal?: AbortSignal;
-  /** Optional callback for Codex human-in-the-loop server requests. */
-  onCodexInteractionRequest?: (request: CodexInteractionRequest) => Promise<Record<string, any> | null>;
+  /** Optional callback for agent human-in-the-loop interactions (all drivers). */
+  onInteraction?: (request: AgentInteraction) => Promise<Record<string, any> | null>;
   /** Optional callback when a running agent can accept steer input in-place. */
   onSteerReady?: (steer: (prompt: string, attachments?: string[]) => Promise<boolean>) => void;
   /** Optional callback when a Codex turn can be steered in place. */

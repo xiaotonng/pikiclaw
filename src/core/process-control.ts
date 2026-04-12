@@ -121,10 +121,6 @@ export function getActiveTaskCount(): number {
   return total;
 }
 
-export function formatActiveTaskRestartError(activeTasks: number): string {
-  return `${activeTasks} task(s) still running. Wait for them to finish or try again.`;
-}
-
 export function createRestartStateFilePath(ownerPid = process.pid): string {
   const dir = path.join(os.tmpdir(), 'pikiclaw');
   fs.mkdirSync(dir, { recursive: true });
@@ -224,15 +220,6 @@ function spawnReplacementProcess(bin: string, args: string[], env: Record<string
 }
 
 export async function requestProcessRestart(opts: ProcessRestartOptions = {}): Promise<ProcessRestartResult> {
-  const activeTasks = getActiveTaskCount();
-  if (activeTasks > 0) {
-    return {
-      ok: false,
-      restarting: false,
-      error: formatActiveTaskRestartError(activeTasks),
-      activeTasks,
-    };
-  }
   if (restartInFlight) {
     return {
       ok: true,
