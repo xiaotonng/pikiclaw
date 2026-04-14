@@ -31,3 +31,8 @@ https://github.com/chenhg5/cc-connect/issues/541
 https://github.com/RichardAtCT/claude-code-telegram/issues/172
 https://github.com/chenhg5/cc-connect/issues/362
 https://github.com/BMeyn/claude_code_mobile/issues/1
+https://github.com/RichardAtCT/claude-code-telegram/issues/130
+https://github.com/anthropics/claude-code/issues/47058
+https://github.com/op7418/Claude-to-IM-skill/issues/44
+https://github.com/anthropics/claude-code/issues/35555
+https://github.com/chenhg5/cc-connect/issues/31

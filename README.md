@@ -30,6 +30,35 @@ npx pikiclaw@latest
 
 <img src="docs/promo-basic-ops.gif" alt="Basic operations" width="700">
 
+> Web Dashboard: multi-panel workspace with session list, conversation view, tool-use traces, and input composer (1 / 2 / 3 / 6 pane layouts).
+
+<img src="docs/promo-dashboard-workspace.png" alt="Workspace" width="700">
+
+<details>
+<summary>More dashboard pages</summary>
+
+**IM Access** — Telegram, Feishu, WeChat channel status and configuration
+
+<img src="docs/promo-dashboard-im.png" alt="IM Access" width="700">
+
+**Agent Config** — Default agent / model / reasoning effort, available agents overview
+
+<img src="docs/promo-dashboard-agents.png" alt="Agent Config" width="700">
+
+**System Permissions** — macOS accessibility, screen recording, disk access
+
+<img src="docs/promo-dashboard-permissions.png" alt="Permissions" width="700">
+
+**Extensions** — Global MCP servers, community skills, and built-in browser & desktop automation
+
+<img src="docs/promo-dashboard-extensions.png" alt="Extensions" width="700">
+
+**System Info** — Working directory, CPU / memory / disk monitoring
+
+<img src="docs/promo-dashboard-system.png" alt="System Info" width="700">
+
+</details>
+
 ---
 
 ## Why pikiclaw?
@@ -47,7 +76,7 @@ pikiclaw takes a different approach:
   You (Telegram / Feishu / WeChat)
           |
           v
-       pikiclaw  ←──  MCP servers & community skills
+       pikiclaw  <--  MCP servers & community skills
           |
           v
   Claude Code / Codex / Gemini CLI
@@ -101,39 +130,6 @@ npx pikiclaw@latest --doctor  # check environment only
 
 ---
 
-## Dashboard
-
-<details>
-<summary>Expand to see all dashboard pages</summary>
-
-**Workspace** — Multi-panel agent console with session list, conversation view, tool-use traces, and input composer
-
-<img src="docs/promo-dashboard-workspace.png" alt="Workspace" width="700">
-
-**IM Access** — Telegram, Feishu, WeChat channel status and configuration
-
-<img src="docs/promo-dashboard-im.png" alt="IM Access" width="700">
-
-**Agent Config** — Default agent / model / reasoning effort, available agents overview
-
-<img src="docs/promo-dashboard-agents.png" alt="Agent Config" width="700">
-
-**System Permissions** — macOS accessibility, screen recording, disk access
-
-<img src="docs/promo-dashboard-permissions.png" alt="Permissions" width="700">
-
-**Extensions** — Community MCP servers, skill repos, and built-in browser & desktop automation
-
-<img src="docs/promo-dashboard-extensions.png" alt="Extensions" width="700">
-
-**System Info** — Working directory, CPU / memory / disk monitoring
-
-<img src="docs/promo-dashboard-system.png" alt="System Info" width="700">
-
-</details>
-
----
-
 ## Features
 
 ### Channels & Agents
@@ -142,20 +138,21 @@ npx pikiclaw@latest --doctor  # check environment only
 - Claude Code, Codex CLI, and Gemini CLI via unified driver registry
 - Model listing, session management, and usage tracking through a single interface
 
-### Dashboard as Agent Console
-
-The web dashboard is a full-featured agent console — not just a settings panel. It provides complete conversation history with tool-use activity, thinking traces, plan progress, streaming output, image attachments, and an input composer. You can drive any agent session directly from the browser with a multi-panel workspace layout (1 / 2 / 3 / 6 panes), no IM required.
-
 ### Extensions & Community Plugins
 
-pikiclaw has a two-layer extension system — **global** extensions apply to all projects, **workspace** extensions are project-scoped:
+pikiclaw has a two-layer extension system — **global** extensions apply to all projects, **workspace** extensions are project-scoped.
+
+**MCP Servers** — browse recommended servers, search the [MCP Registry](https://registry.modelcontextprotocol.io), or add custom servers (stdio / HTTP):
 
 <img src="docs/promo-dashboard-extensions-add.png" alt="Add MCP Server" width="700">
 
-**MCP Servers**
+**Project Extensions** — each workspace has its own MCP servers (`.mcp.json`) and skills (`.pikiclaw/skills/`), managed from the workspace sidebar:
+
+<img src="docs/promo-workspace-extensions.png" alt="Project Extensions" width="700">
+
 - Browse recommended servers (GitHub, Filesystem, PostgreSQL, Slack, Brave Search, Memory, Fetch, SQLite, Git, Sentry)
-- Search the [MCP Registry](https://registry.modelcontextprotocol.io) for community servers
-- Add custom servers (stdio or HTTP) with environment variable configuration
+- Search the MCP Registry for community servers
+- Add custom servers with environment variable configuration
 - Health check with MCP protocol handshake and tool discovery
 - Enable / disable individual servers per scope
 
