@@ -192,9 +192,10 @@ export async function getSessionTurnPreviewData(
   agent: Agent,
   sessionId: string | null,
   limit = 50,
+  workdir?: string,
 ): Promise<SessionTurnPreviewData | null> {
   if (!sessionId) return null;
-  const tail = await bot.fetchSessionTail(agent, sessionId, limit);
+  const tail = await bot.fetchSessionTail(agent, sessionId, limit, workdir);
   if (!tail.ok || !tail.messages.length) return null;
   return extractLastSessionTurn(tail.messages);
 }
