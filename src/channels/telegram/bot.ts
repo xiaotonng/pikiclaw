@@ -1019,7 +1019,7 @@ export class TelegramBot extends Bot {
 
   private async previewCurrentSessionTurn(chatId: number, agent: Agent, sessionId: string | null) {
     try {
-      const preview = await getSessionTurnPreviewData(this, agent, sessionId, 50);
+      const preview = await getSessionTurnPreviewData(this, agent, sessionId, 50, this.chatWorkdir(chatId));
       if (!preview) return;
       const previewHtml = renderSessionTurnHtml(preview.userText, preview.assistantText);
       if (!previewHtml) return;

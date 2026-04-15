@@ -1032,7 +1032,7 @@ export class FeishuBot extends Bot {
 
   private async previewCurrentSessionTurn(chatId: string, agent: Agent, sessionId: string | null) {
     try {
-      const preview = await getSessionTurnPreviewData(this, agent, sessionId, 50);
+      const preview = await getSessionTurnPreviewData(this, agent, sessionId, 50, this.chatWorkdir(chatId));
       if (!preview) return;
       const previewMarkdown = renderSessionTurnMarkdown(preview.userText, preview.assistantText);
       if (!previewMarkdown) return;
