@@ -36,3 +36,8 @@ https://github.com/anthropics/claude-code/issues/47058
 https://github.com/op7418/Claude-to-IM-skill/issues/44
 https://github.com/anthropics/claude-code/issues/35555
 https://github.com/chenhg5/cc-connect/issues/31
+https://github.com/RichardAtCT/claude-code-telegram/issues/149
+https://github.com/DukeWood/claude-code-plugins-productivities/issues/1
+https://github.com/anthropics/claude-code/issues/48220
+https://github.com/Wechat-ggGitHub/wechat-claude-code/issues/23
+https://github.com/macrosak/macroclaw/issues/91

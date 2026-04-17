@@ -11,7 +11,7 @@ export function makeStreamResult(
     plan: null,
     sessionId: 'sess-1',
     workspacePath: null,
-    model: agent === 'codex' ? 'gpt-5.4' : 'claude-opus-4-6',
+    model: agent === 'codex' ? 'gpt-5.4' : 'claude-opus-4-7',
     thinkingEffort: 'high',
     elapsedS: 0.1,
     inputTokens: 0,

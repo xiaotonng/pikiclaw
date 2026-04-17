@@ -145,7 +145,7 @@ describe('buildCodexTurnInput and usage helpers', () => {
         agent: 'claude',
         workdir: tmpDir,
         workspacePath: '/tmp/pikiclaw/workspace',
-        model: 'claude-opus-4-6',
+        model: 'claude-opus-4-7',
         createdAt: '2026-03-16T00:00:00.000Z',
         title: 'stale title',
         running: false,
@@ -162,7 +162,7 @@ describe('buildCodexTurnInput and usage helpers', () => {
         agent: 'claude',
         workdir: tmpDir,
         workspacePath: null,
-        model: 'claude-opus-4-6',
+        model: 'claude-opus-4-7',
         createdAt: '2026-03-16T00:00:00.000Z',
         title: 'native title',
         running: false,
@@ -371,7 +371,7 @@ describe('stageSessionFiles', () => {
         createdAt: '2026-03-10T00:00:00.000Z',
         updatedAt: '2026-03-10T00:00:00.000Z',
         title: 'legacy session',
-        model: 'claude-opus-4-6',
+        model: 'claude-opus-4-7',
         stagedFiles: [],
       }],
     }, null, 2));
@@ -1026,7 +1026,7 @@ describe('claude stream', () => {
   it('parses text, thinking, tool activity, retries expired sessions, and marks edge cases correctly', async () => {
     const activities: string[] = [];
     writeFakeScript('claude', [
-      { type: 'system', session_id: 's-tools', model: 'claude-opus-4-6', thinking_level: 'high' },
+      { type: 'system', session_id: 's-tools', model: 'claude-opus-4-7', thinking_level: 'high' },
       {
         type: 'assistant',
         message: {
@@ -1047,7 +1047,7 @@ describe('claude stream', () => {
       },
       { type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: 'Hmm...' } } },
       { type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Hello world' } } },
-      { type: 'result', session_id: 's-tools', usage: { input_tokens: 150, cache_read_input_tokens: 30, output_tokens: 60 }, modelUsage: { 'claude-opus-4-6': { contextWindow: 200000, maxOutputTokens: 64000 } } },
+      { type: 'result', session_id: 's-tools', usage: { input_tokens: 150, cache_read_input_tokens: 30, output_tokens: 60 }, modelUsage: { 'claude-opus-4-7': { contextWindow: 200000, maxOutputTokens: 64000 } } },
     ]);
 
     const parsed = await doClaudeStream(baseOpts('claude', {
@@ -1058,7 +1058,7 @@ describe('claude stream', () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.message).toBe('Hello world');
     expect(parsed.thinking).toBe('Hmm...');
-    expect(parsed.model).toBe('claude-opus-4-6');
+    expect(parsed.model).toBe('claude-opus-4-7');
     expect(parsed.thinkingEffort).toBe('high');
     expect(parsed.inputTokens).toBe(150);
     expect(parsed.cachedInputTokens).toBe(30);
@@ -1069,7 +1069,7 @@ describe('claude stream', () => {
 
     const claudePreviewPercents: Array<number | null> = [];
     writeFakeScript('claude', [
-      { type: 'system', session_id: 's-ctx', model: 'claude-opus-4-6' },
+      { type: 'system', session_id: 's-ctx', model: 'claude-opus-4-7' },
       {
         type: 'stream_event',
         event: {
@@ -1115,7 +1115,7 @@ echo $COUNT > ${stateFile}
 if [ "$COUNT" = "1" ]; then
   echo '${JSON.stringify({ type: 'result', subtype: 'error_during_execution', is_error: true, session_id: 'new-sess', errors: ['No conversation found with session ID: old-sess'] })}'
 else
-  echo '${JSON.stringify({ type: 'system', session_id: 'new-sess', model: 'claude-opus-4-6' })}'
+  echo '${JSON.stringify({ type: 'system', session_id: 'new-sess', model: 'claude-opus-4-7' })}'
   echo '${JSON.stringify({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Fresh start' } } })}'
   echo '${JSON.stringify({ type: 'result', session_id: 'new-sess', usage: { input_tokens: 10, output_tokens: 5 } })}'
 fi`;
@@ -1766,10 +1766,10 @@ exit 0`;
 
       const claudeModels = await listModels('claude', {
         workdir: tmpDir,
-        currentModel: 'claude-opus-4-6',
+        currentModel: 'claude-opus-4-7',
       });
       expect(claudeModels.models.map(m => m.id)).toEqual([
-        'claude-opus-4-6',
+        'claude-opus-4-7',
         'claude-sonnet-4-6',
         'claude-haiku-4-5-20251001',
       ]);
@@ -1831,13 +1831,13 @@ exit 0`;
           event_data: {
             event_name: 'tengu_claudeai_limits_status_changed',
             client_timestamp: '2026-03-08T03:00:00.000Z',
-            model: 'claude-opus-4-6',
+            model: 'claude-opus-4-7',
             additional_metadata: JSON.stringify({ status: 'allowed_warning', hoursTillReset: 39 }),
           },
         }),
       ].join('\n'));
 
-      const claudeUsage = getUsage({ agent: 'claude', model: 'claude-opus-4-6' });
+      const claudeUsage = getUsage({ agent: 'claude', model: 'claude-opus-4-7' });
       expect(claudeUsage.ok).toBe(true);
       expect(claudeUsage.source).toBe('telemetry');
       expect(claudeUsage.status).toBe('warning');

@@ -108,7 +108,7 @@ export const EFFORT_OPTIONS: Record<Agent, string[]> = {
 
 /**
  * Shorten a model ID for compact display.
- *   claude-opus-4-6          → opus-4-6
+ *   claude-opus-4-7          → opus-4-7
  *   claude-sonnet-4-6        → sonnet-4-6
  *   claude-haiku-4-5-20251001 → haiku-4-5
  *   gemini-2.5-pro-preview   → 2.5-pro

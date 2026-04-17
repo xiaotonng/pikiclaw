@@ -7,7 +7,7 @@ import { normalizeClaudeModelId } from '../../agent/index.js';
 import type { UserConfig } from './user-config.js';
 
 export const DEFAULT_AGENT_MODELS: Record<Agent, string> = {
-  claude: 'claude-opus-4-6',
+  claude: 'claude-opus-4-7',
   codex: 'gpt-5.4',
   gemini: 'gemini-3.1-pro-preview',
 };

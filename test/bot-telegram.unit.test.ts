@@ -307,7 +307,7 @@ describe('TelegramBot status and session previews', () => {
         agent: 'claude',
         models: [
           { id: 'claude-sonnet-4-6', alias: 'sonnet' },
-          { id: 'claude-opus-4-6', alias: 'opus' },
+          { id: 'claude-opus-4-7', alias: 'opus' },
         ],
         sources: ['app-server model/list'],
         note: 'debug note should stay hidden while models exist',
@@ -320,7 +320,7 @@ describe('TelegramBot status and session previews', () => {
       expect(replies[0]?.text).toContain('Source: app-server model/list');
       expect(replies[0]?.text).toContain('debug note should stay hidden while models exist');
       const keyboard = replies[0]?.opts?.keyboard?.inline_keyboard || [];
-      expect(keyboard[0]).toEqual([{ text: '● opus', callback_data: 'md:claude-opus-4-6' }]);
+      expect(keyboard[0]).toEqual([{ text: '● opus', callback_data: 'md:claude-opus-4-7' }]);
       expect(keyboard[1]).toEqual([{ text: 'sonnet', callback_data: 'md:claude-sonnet-4-6' }]);
       const keyboardJson = JSON.stringify(keyboard);
       expect(keyboardJson).toContain('"callback_data":"ed:high"');
@@ -361,7 +361,7 @@ describe('TelegramBot status and session previews', () => {
           agent: 'claude',
           workdir: process.env.PIKICLAW_WORKDIR!,
           workspacePath: path.join(process.env.PIKICLAW_WORKDIR!, '.pikiclaw', 'sessions', 'claude', sessionId, 'workspace'),
-          model: 'claude-opus-4-6',
+          model: 'claude-opus-4-7',
           createdAt: new Date().toISOString(),
           title: 'history preview',
           running: false,
@@ -448,7 +448,7 @@ describe('TelegramBot status and session previews', () => {
         sessionId: 'sess-claude-thread',
         workdir,
         workspacePath: null,
-        model: 'claude-opus-4-6',
+        model: 'claude-opus-4-7',
         title: 'claude thread',
         threadId: 'thread-im',
       });

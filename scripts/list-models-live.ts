@@ -21,7 +21,7 @@ function getVersion(cmd: string): string | null {
 }
 
 const workdir = path.resolve(process.argv[2] || process.env.PIKICLAW_WORKDIR || process.cwd());
-const claudeCurrentModel = (process.env.CLAUDE_MODEL || 'claude-opus-4-6').trim();
+const claudeCurrentModel = (process.env.CLAUDE_MODEL || 'claude-opus-4-7').trim();
 const codexCurrentModel = (process.env.CODEX_MODEL || 'gpt-5.4').trim();
 
 const result = {

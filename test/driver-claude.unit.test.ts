@@ -41,7 +41,7 @@ describe('Claude usage resolution', () => {
         event_data: {
           event_name: 'tengu_claudeai_limits_status_changed',
           client_timestamp: new Date(Date.now() - 60_000).toISOString(), // 1 minute ago
-          model: 'claude-opus-4-6',
+          model: 'claude-opus-4-7',
           additional_metadata: JSON.stringify({ status: 'allowed_warning', hoursTillReset: 39 }),
         },
       }));
@@ -62,7 +62,7 @@ describe('Claude usage resolution', () => {
       });
 
       const { getUsage } = await import('../src/agent/index.ts');
-      const usage = getUsage({ agent: 'claude', model: 'claude-opus-4-6' });
+      const usage = getUsage({ agent: 'claude', model: 'claude-opus-4-7' });
 
       // Should fall through to telemetry, not report the OAuth error
       expect(usage.ok).toBe(true);
@@ -86,7 +86,7 @@ describe('Claude usage resolution', () => {
         event_data: {
           event_name: 'tengu_claudeai_limits_status_changed',
           client_timestamp: new Date(Date.now() - 5 * 60_000).toISOString(), // 5 minutes ago
-          model: 'claude-opus-4-6',
+          model: 'claude-opus-4-7',
           additional_metadata: JSON.stringify({ status: 'allowed_warning', hoursTillReset: 39 }),
         },
       }));
@@ -96,7 +96,7 @@ describe('Claude usage resolution', () => {
       });
 
       const { getUsage } = await import('../src/agent/index.ts');
-      const usage = getUsage({ agent: 'claude', model: 'claude-opus-4-6' });
+      const usage = getUsage({ agent: 'claude', model: 'claude-opus-4-7' });
 
       expect(usage.ok).toBe(true);
       expect(usage.source).toBe('telemetry');

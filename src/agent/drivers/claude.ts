@@ -918,7 +918,7 @@ function getClaudeSessionMessages(opts: SessionMessagesOpts): SessionMessagesRes
 // ---------------------------------------------------------------------------
 
 const CLAUDE_MODELS: ModelInfo[] = [
-  { id: 'claude-opus-4-6', alias: 'opus' },
+  { id: 'claude-opus-4-7', alias: 'opus' },
   { id: 'claude-sonnet-4-6', alias: 'sonnet' },
   { id: 'claude-haiku-4-5-20251001', alias: 'haiku' },
 ];
