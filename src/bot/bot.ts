@@ -7,7 +7,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import { execSync, spawn } from 'node:child_process';
-import { getActiveUserConfig, onUserConfigChange, resolveUserWorkdir, setUserWorkdir } from '../core/config/user-config.js';
+import { getActiveUserConfig, onUserConfigChange, resolveUserWorkdir, setUserWorkdir, updateUserConfig } from '../core/config/user-config.js';
 import {
   doStream, ensureManagedSession, findManagedThreadSession, findThreadSessionAcrossAgents, getSessionStoredConfig, getUsage, initializeProjectSkills, listAgents, listModels, listSkills, stageSessionFiles,
   type Agent, type CodexCumulativeUsage, type StreamOpts, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type SessionInfo, type UsageResult,
@@ -1365,12 +1365,16 @@ export class Bot {
     const cs = this.chat(chatId);
     this.setModelForAgent(cs.agent, modelId);
     this.resetChatConversation(cs);
+    this.persistAgentPreference(cs.agent, 'model', modelId);
     this.log(`model switched to ${modelId} for ${cs.agent} chat=${chatId}`);
   }
 
   switchEffortForChat(chatId: ChatId, effort: string) {
     const cs = this.chat(chatId);
     this.setEffortForAgent(cs.agent, effort);
+    const session = this.getSelectedSession(cs);
+    if (session) session.thinkingEffort = effort;
+    this.persistAgentPreference(cs.agent, 'effort', effort);
     this.log(`effort switched to ${effort} for ${cs.agent} chat=${chatId}`);
   }
 
@@ -1436,6 +1440,23 @@ export class Bot {
     const config = this.agentConfigs[agent];
     if (config) config.reasoningEffort = effort;
     this.log(`effort for ${agent} changed to ${effort}`);
+  }
+
+  private persistAgentPreference(agent: Agent, kind: 'model' | 'effort', value: string) {
+    try {
+      const patch: Record<string, string> = {};
+      if (kind === 'model') {
+        if (agent === 'claude') patch.claudeModel = value;
+        else if (agent === 'codex') patch.codexModel = value;
+        else if (agent === 'gemini') patch.geminiModel = value;
+      } else {
+        if (agent === 'claude') patch.claudeReasoningEffort = value;
+        else if (agent === 'codex') patch.codexReasoningEffort = value;
+      }
+      if (Object.keys(patch).length) updateUserConfig(patch);
+    } catch (e: any) {
+      this.warn(`persistAgentPreference failed: ${e?.message || e}`);
+    }
   }
 
   getStatusData(chatId: ChatId) {

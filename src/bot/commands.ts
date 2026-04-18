@@ -294,7 +294,7 @@ export interface ModelsListData {
   effort: { current: string; levels: EffortEntry[] } | null;
 }
 
-function claudeModelSelectionKey(modelId: string | null | undefined): string | null {
+function claudeModelFamily(modelId: string | null | undefined): string | null {
   const value = normalizeClaudeModelId(modelId).toLowerCase();
   if (!value) return null;
   if (value === 'opus' || value.startsWith('claude-opus-')) return 'opus';
@@ -303,11 +303,17 @@ function claudeModelSelectionKey(modelId: string | null | undefined): string | n
   return null;
 }
 
+function isClaudeFamilyAlias(modelId: string): boolean {
+  const v = modelId.trim().toLowerCase();
+  return v === 'opus' || v === 'sonnet' || v === 'haiku';
+}
+
 export function modelMatchesSelection(agent: Agent, selection: string, currentModel: string): boolean {
   if (selection === currentModel) return true;
   if (agent !== 'claude') return false;
-  const a = claudeModelSelectionKey(selection);
-  const b = claudeModelSelectionKey(currentModel);
+  if (!isClaudeFamilyAlias(selection) && !isClaudeFamilyAlias(currentModel)) return false;
+  const a = claudeModelFamily(selection);
+  const b = claudeModelFamily(currentModel);
   return !!a && a === b;
 }
 
