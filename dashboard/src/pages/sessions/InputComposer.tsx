@@ -690,7 +690,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
                           }
                           void applyCascade(finalAgent, m.id, null);
                         }}>
-                          <span className="font-mono text-[11px]">{m.alias || m.id}</span>
+                          <span className="font-mono text-[11px]">{m.id}</span>
                         </CascadeItem>
                       ))}
                       {models.length === 0 && <div className="px-3 py-3 text-[11px] text-fg-5 text-center">{t('config.noModel')}</div>}

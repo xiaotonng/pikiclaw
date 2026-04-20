@@ -78,7 +78,7 @@ export function ActivitySection({ blocks, notes, t }: { blocks: MessageBlock[]; 
     .filter(b => b.type === 'tool_use')
     .map(b => b.toolName || 'tool')
     .filter((name, i, list) => list.indexOf(name) === i);
-  const totalOps = blocks.length + notes.length;
+  const totalOps = blocks.filter(b => b.type === 'tool_use').length;
   const notePreview = notes.map(block => block.content.split('\n').find(Boolean)?.trim() || '').find(Boolean) || '';
   const preview = tools.length > 0 ? tools.join(' \u00b7 ') : notePreview;
 
