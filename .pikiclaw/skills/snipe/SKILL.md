@@ -16,7 +16,8 @@ argument-hint: "[keywords] or blank for default"
 用户验证过的高效打法：
 - 在 **同领域产品** 的推广帖下回复（流量越大越好）
 - **一句话差异化** + `npx pikiclaw@latest` + GitHub 链接
-- 开源、本地运行、多 agent、多 IM 是 pikiclaw 的核心差异点
+- pikiclaw 的核心差异点（按重要性）：**多 agent 会话并行管理**（dashboard 里同时操控 Claude/Codex/Gemini）、**丝滑的本地体验**（一行 npx 启动，零配置）、**实用的 skill/MCP 插件生态**（社区沉淀的 skill 和 MCP 开箱即用）、**IM 接入**（Telegram/飞书/微信随时接管同一个会话）、**完全开源 + 本地运行**
+- **IM 不是头条卖点，而是"体验"的一部分** — 头条永远是多会话管理 + 流畅度 + 插件生态
 
 历史案例参考：
 - 某远程 agent 管理工具推广帖下回复 → 7,792 views, 31 likes（原帖 14 万）
@@ -107,13 +108,14 @@ npx pikiclaw@latest
 GitHub: https://github.com/xiaotonng/pikiclaw
 ```
 
-**差异化切入角度（根据原帖产品特点选择最合适的一个）：**
-- 对方是闭源/SaaS → "完全开源，全部本地运行"
-- 对方只支持单个 agent → "一行命令同时接管 Claude/Codex/Gemini"
-- 对方没有 IM 通道 → "telegram/飞书直接对话，手机随时操控"
-- 对方只有 CLI → "自带 web dashboard，浏览器里完整控制"
-- 对方只支持英文/单平台 → "中英双语，macOS 桌面自动化 + Playwright 浏览器控制"
-- 对方需要复杂配置 → "一行 npx 启动，零配置"
+**差异化切入角度（从上到下是推荐优先级，挑与原帖产品最对得上的一个）：**
+- 对方只管单 agent / 单会话 → "Dashboard 里并行管理 Claude/Codex/Gemini 多会话，随时切换"
+- 对方体验粗糙 / 配置复杂 → "一行 npx 启动，dashboard 开箱即用，零配置"
+- 对方生态封闭 / 没有插件 → "开放的 skill/MCP 插件体系，社区沉淀的实用工具开箱即用"
+- 对方是闭源 / SaaS → "完全开源，会话和代码全部留在本机"
+- 对方只有 CLI → "自带 web dashboard，浏览器里完整控制多会话"
+- 对方只能在桌前使用 → "Telegram/飞书/微信直连，手机随时接管同一个会话"
+- 对方只支持英文 / 单平台 → "中英双语，macOS 桌面自动化 + Playwright 浏览器控制"
 
 **回复规则：**
 - 语言跟随原帖（中文帖用中文，英文帖用英文）
