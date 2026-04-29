@@ -76,7 +76,7 @@ export interface RecommendedMcpServer {
   homepage?: string;
 }
 
-export type SkillCategory = 'general' | 'dev' | 'productivity' | 'pikiclaw';
+export type SkillCategory = 'general' | 'dev' | 'productivity';
 
 export interface RecommendedSkillRepo {
   id: string;

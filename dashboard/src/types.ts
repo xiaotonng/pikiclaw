@@ -431,6 +431,8 @@ export interface SkillCatalogItem {
   installed: boolean;
   scope?: 'global' | 'project';
   installedNames: string[];
+  stars?: number;
+  pushedAt?: string;
 }
 
 export interface McpSearchResult {

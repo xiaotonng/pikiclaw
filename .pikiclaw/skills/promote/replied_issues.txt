@@ -41,3 +41,8 @@ https://github.com/DukeWood/claude-code-plugins-productivities/issues/1
 https://github.com/anthropics/claude-code/issues/48220
 https://github.com/Wechat-ggGitHub/wechat-claude-code/issues/23
 https://github.com/macrosak/macroclaw/issues/91
+https://github.com/RichardAtCT/claude-code-telegram/issues/138
+https://github.com/chenhg5/cc-connect/issues/740
+https://github.com/chenhg5/cc-connect/issues/733
+https://github.com/m1heng/clawdbot-feishu/issues/406
+https://github.com/chenhg5/cc-connect/issues/761

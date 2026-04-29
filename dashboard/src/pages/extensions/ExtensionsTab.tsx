@@ -194,37 +194,47 @@ const LOCAL_BRAND_SLUGS = new Set([
  * pretending to have a real logo.
  */
 const ICONIFY_ICONS: Record<string, string> = {
-  github:                    'logos:github',
+  // Prefer `-icon` (mark-only) variants over wordmarks so the logo renders
+  // legibly inside a 32–36px avatar. Fall back to wordmark only if no
+  // mark-only icon exists in the iconify catalogs.
+  github:                    'logos:github-icon',
   atlassian:                 'logos:atlassian',
-  notion:                    'logos:notion',
-  linear:                    'logos:linear',
-  sentry:                    'logos:sentry',
-  cloudflare:                'logos:cloudflare',
-  'cloudflare-docs':         'logos:cloudflare',
-  'cloudflare-bindings':     'logos:cloudflare',
-  'cloudflare-observability':'logos:cloudflare',
-  slack:                     'logos:slack',
+  notion:                    'logos:notion-icon',
+  linear:                    'logos:linear-icon',
+  sentry:                    'logos:sentry-icon',
+  cloudflare:                'logos:cloudflare-icon',
+  'cloudflare-docs':         'logos:cloudflare-icon',
+  'cloudflare-bindings':     'logos:cloudflare-icon',
+  'cloudflare-observability':'logos:cloudflare-icon',
+  slack:                     'logos:slack-icon',
   lark:                      'icon-park:lark',
   feishu:                    'icon-park:lark',
-  stripe:                    'logos:stripe',
-  perplexity:                'logos:perplexity',
-  brave:                     'logos:brave',
+  stripe:                    'logos:stripe',          // no -icon variant; wordmark only
+  perplexity:                'logos:perplexity-icon',
+  brave:                     'logos:brave',           // no -icon variant; lion mark
   'brave-search':            'logos:brave',
-  huggingface:               'simple-icons:huggingface',
+  huggingface:               'logos:hugging-face-icon',
   postgres:                  'logos:postgresql',
   postgresql:                'logos:postgresql',
   sqlite:                    'logos:sqlite',
-  vercel:                    'logos:vercel',
-  netlify:                   'logos:netlify',
+  vercel:                    'logos:vercel-icon',
+  netlify:                   'logos:netlify-icon',
   supabase:                  'logos:supabase-icon',
-  heroku:                    'logos:heroku',
-  docker:                    'logos:docker',
+  heroku:                    'logos:heroku-icon',
+  docker:                    'logos:docker-icon',
   pnpm:                      'logos:pnpm',
   aws:                       'logos:aws',
   'google-cloud':            'logos:google-cloud',
   googlecloud:               'logos:google-cloud',
   amazonwebservices:         'logos:aws',
 };
+
+/**
+ * Logos that are wordmarks (text-heavy) rather than icon-only marks. These need
+ * extra rendered size so the text inside the avatar circle stays legible.
+ * Everything else uses the standard square mark ratio.
+ */
+const WORDMARK_ICONS = new Set(['stripe']);
 
 function resolveBrandLogoUrl(iconSlug?: string, iconUrl?: string): string | undefined {
   if (iconUrl) return iconUrl;
@@ -257,7 +267,10 @@ function BrandAvatar({
   const useLocalBrand = iconSlug && LOCAL_BRAND_SLUGS.has(iconSlug);
   const useRemote = !!remoteUrl && !imgFailed;
   const useRealLogo = useLocalBrand || useRemote;
-  const logoSize = Math.round(size * 0.62);
+  // Mark-only logos render at ~76% of the avatar; wordmarks need ~92% so the
+  // text inside the chip is still readable at 32–36px.
+  const isWordmark = !!iconSlug && WORDMARK_ICONS.has(iconSlug);
+  const logoSize = Math.round(size * (isWordmark ? 0.92 : 0.76));
 
   if (useRealLogo) {
     return (
@@ -885,8 +898,20 @@ function SkillCard({
         )}
       </div>
 
-      <div className="mt-auto flex items-center justify-between">
-        <span className="truncate text-[11px] text-fg-5">{item.source}</span>
+      <div className="mt-auto flex items-center justify-between gap-2">
+        <div className="min-w-0 flex flex-col gap-0.5">
+          <span className="truncate text-[11px] text-fg-5">{item.source}</span>
+          {(item.stars !== undefined || item.pushedAt) && (
+            <span className="flex items-center gap-2 text-[10.5px] text-fg-5">
+              {item.stars !== undefined && (
+                <span className="inline-flex items-center gap-0.5 font-medium text-fg-4">
+                  <StarIcon size={10} />{formatStarCount(item.stars)}
+                </span>
+              )}
+              {item.pushedAt && <span>· {formatRelativeTime(item.pushedAt, locale)}</span>}
+            </span>
+          )}
+        </div>
         {item.installed ? (
           <Button variant="ghost" size="sm" onClick={onRemove} disabled={busy} className="hover:!text-err">
             {busy ? <Spinner /> : L(locale, '移除', 'Remove')}
@@ -899,6 +924,31 @@ function SkillCard({
       </div>
     </div>
   );
+}
+
+const StarIcon = ({ size = 12 }: { size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" stroke="none">
+    <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
+  </svg>
+);
+
+function formatStarCount(n: number): string {
+  if (n >= 10_000) return `${(n / 1000).toFixed(1).replace(/\.0$/, '')}k`;
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return String(n);
+}
+
+function formatRelativeTime(iso: string, locale: string): string {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return '';
+  const diff = Date.now() - t;
+  const day = 24 * 60 * 60 * 1000;
+  const days = Math.max(1, Math.floor(diff / day));
+  if (days < 30) return locale === 'zh-CN' ? `${days} 天前` : `${days}d ago`;
+  const months = Math.floor(days / 30);
+  if (months < 12) return locale === 'zh-CN' ? `${months} 个月前` : `${months}mo ago`;
+  const years = Math.floor(months / 12);
+  return locale === 'zh-CN' ? `${years} 年前` : `${years}y ago`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1273,7 +1323,7 @@ function SkillsCatalogSection({
 
   return (
     <section>
-      <div className="mb-3 flex items-center justify-between">
+      <div className="mb-3 flex items-center justify-between gap-2">
         <div className="flex items-center gap-2.5">
           <SectionLabel>Skills</SectionLabel>
           {!loading && (
@@ -1283,6 +1333,9 @@ function SkillsCatalogSection({
           )}
           {loading && <Spinner className="h-3 w-3" />}
         </div>
+        <Button variant="outline" size="sm" onClick={() => setCustomOpen(true)}>
+          + {L(locale, '从 GitHub 安装', 'Install from GitHub')}
+        </Button>
       </div>
 
       {showSpinner ? (
@@ -1337,15 +1390,6 @@ function SkillsCatalogSection({
           )}
         </div>
       )}
-
-      <div className="mt-3 flex justify-end">
-        <button
-          className="text-[12px] text-fg-4 hover:text-fg-2 transition-colors"
-          onClick={() => setCustomOpen(true)}
-        >
-          + {L(locale, '从 GitHub 安装自定义技能', 'Install custom skill from GitHub')}
-        </button>
-      </div>
 
       <CustomSkillDialog
         open={customOpen}

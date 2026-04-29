@@ -75,9 +75,16 @@ export const SessionPanel = memo(function SessionPanel({
   const [streamPollNonce, setStreamPollNonce] = useState(0);
   const [streamTaskId, setStreamTaskId] = useState<string | null>(null);
   const [queuedTaskIds, setQueuedTaskIds] = useState<string[]>([]);
+  const [queuedTasks, setQueuedTasks] = useState<Array<{ taskId: string; prompt: string }>>([]);
   const [pendingPrompt, setPendingPrompt] = useState<string | null>(initialPendingPrompt || null);
   const [pendingImageUrls, setPendingImageUrls] = useState<string[]>(initialPendingImageUrls || []);
   const [pendingQueued, setPendingQueued] = useState(false);
+  // The taskId backing pendingPrompt — needed because steer can promote a
+  // queued task to streaming while OTHER tasks remain queued (so the
+  // "no more queued" heuristic for clearing pendingQueued is wrong on its own).
+  const [pendingTaskId, setPendingTaskId] = useState<string | null>(null);
+  const pendingTaskIdRef = useRef<string | null>(null);
+  pendingTaskIdRef.current = pendingTaskId;
   const [editDraft, setEditDraft] = useState<string | null>(null);
   const pendingImageUrlsRef = useRef<string[]>(initialPendingImageUrls || []);
   const liveStreamRef = useRef(liveStream);
@@ -117,6 +124,7 @@ export const SessionPanel = memo(function SessionPanel({
     setPendingImageUrls(prev => { for (const u of prev) URL.revokeObjectURL(u); return []; });
     pendingImageUrlsRef.current = [];
     setPendingQueued(false);
+    setPendingTaskId(null);
   }, []);
 
   const handleSendStart = useCallback((prompt: string, imageUrls?: string[]) => {
@@ -128,6 +136,12 @@ export const SessionPanel = memo(function SessionPanel({
     pendingImageUrlsRef.current = urls;
     // If a stream is active, the message will be queued — don't show in conversation yet
     setPendingQueued(!!liveStreamRef.current || streamingRef.current);
+    // pendingTaskId resolves async via onSendTaskAssigned once the API returns.
+    setPendingTaskId(null);
+  }, []);
+
+  const handleSendTaskAssigned = useCallback((taskId: string) => {
+    setPendingTaskId(taskId);
   }, []);
 
   const fetchTurnWindow = useCallback(async (
@@ -245,12 +259,14 @@ export const SessionPanel = memo(function SessionPanel({
       setStreamTaskId(null);
       setStreamPhase(null);
       setQueuedTaskIds([]);
+      setQueuedTasks([]);
       prevPhaseRef.current = null;
       return;
     }
     setStreamPhase(state.phase);
     setStreamTaskId(state.taskId || null);
     setQueuedTaskIds(state.queuedTaskIds && state.queuedTaskIds.length ? state.queuedTaskIds : []);
+    setQueuedTasks(state.queuedTasks && state.queuedTasks.length ? state.queuedTasks : []);
     if (state.phase === 'streaming') {
       // Steer handoff: a previous task just ended ('done' triggered loadLatestTurns
       // and armed clearLiveStreamOnLoadRef). The new task's initial snapshot carries
@@ -274,9 +290,13 @@ export const SessionPanel = memo(function SessionPanel({
         });
       }
       setStreaming(true);
-      // Queued task is now active — show its bubble in conversation
+      // Reveal the optimistic bubble once the latest-sent task is the one
+      // streaming. Falls back to the FIFO "nothing left queued" heuristic for
+      // the legacy case where pendingTaskId hasn't resolved yet (very fast
+      // start before the send API returns).
+      const isPendingsTask = !!state.taskId && pendingTaskIdRef.current === state.taskId;
       const hasMoreQueued = !!state.queuedTaskIds?.length;
-      if (!hasMoreQueued) setPendingQueued(false);
+      if (isPendingsTask || !hasMoreQueued) setPendingQueued(false);
       if (stickToBottomRef.current) scrollToBottomRef.current = true;
     } else if (state.phase === 'queued') {
       setLiveStream(null);
@@ -309,9 +329,13 @@ export const SessionPanel = memo(function SessionPanel({
   const handleRecallTask = useCallback(async (taskId: string) => {
     try {
       await api.recallSessionMessage(taskId);
-      clearPending();
+      // Only wipe the optimistic pending state if it belongs to THIS task —
+      // recalling an older queued task shouldn't erase the still-in-flight
+      // latest-sent message's bubble.
+      if (pendingTaskIdRef.current === taskId) clearPending();
       // Optimistic: clear the specific task reference so UI responds immediately
-      setQueuedTaskId(prev => prev === taskId ? null : prev);
+      setQueuedTaskIds(prev => prev.filter(id => id !== taskId));
+      setQueuedTasks(prev => prev.filter(t => t.taskId !== taskId));
       setStreamTaskId(prev => prev === taskId ? null : prev);
     } catch {}
   }, [clearPending]);
@@ -349,7 +373,8 @@ export const SessionPanel = memo(function SessionPanel({
     setLiveStream(null);
     setStreaming(false);
     setStreamPhase(null);
-    setQueuedTaskId(null);
+    setQueuedTaskIds([]);
+    setQueuedTasks([]);
     stickToBottomRef.current = true;
     scrollToBottomRef.current = true;
     if (!isNewSession) {
@@ -401,12 +426,18 @@ export const SessionPanel = memo(function SessionPanel({
   }, [applyStreamSnapshot, session.agent, session.sessionId, loadLatestTurns]));
 
   /* ── Safety: clear stale pending state when session stops running ── */
+  // Must wait until the stream snapshot is gone (streamPhase null, no queued
+  // tasks). Otherwise a steer/recall mid-flight — where session.running can
+  // briefly flip to false between task A finishing and queued task B starting —
+  // would clear pendingPrompt and "lose" the optimistic bubble for the queued
+  // message until loadLatestTurns later picks it up as a persisted turn.
   useEffect(() => {
-    if (displayState !== 'running' && !streaming && !liveStream) {
+    if (displayState !== 'running' && !streaming && !liveStream
+        && !streamPhase && queuedTaskIds.length === 0) {
       clearPending();
       localStreamPendingRef.current = false;
     }
-  }, [displayState, streaming, liveStream, clearPending]);
+  }, [displayState, streaming, liveStream, streamPhase, queuedTaskIds.length, clearPending]);
 
   useLayoutEffect(() => {
     const anchor = prependAnchorRef.current;
@@ -528,11 +559,13 @@ export const SessionPanel = memo(function SessionPanel({
         workdir={workdir}
         onStreamQueued={requestStreamPolling}
         onSendStart={handleSendStart}
+        onSendTaskAssigned={handleSendTaskAssigned}
         onSessionChange={onSessionChange}
         t={t}
         streamPhase={streamPhase}
         streamTaskId={streamTaskId}
         queuedTaskIds={queuedTaskIds}
+        queuedTasks={queuedTasks}
         pendingPrompt={pendingPrompt}
         onRecall={handleRecallTask}
         onSteer={handleSteerTask}

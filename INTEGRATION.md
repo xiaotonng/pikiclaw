@@ -1,37 +1,38 @@
-# Integrating a New IM Platform
+# Integrating a New IM Channel
 
-This guide reflects the current `pikiclaw` architecture, where Telegram and Feishu already share the same core bot pipeline.
+This guide reflects the current `pikiclaw` source layout, where Telegram, Feishu, and WeChat already share the same `bot/` runtime and only differ in `channels/<name>/`.
 
 ## What Already Exists
 
 You do not need to reimplement:
 
-- session state
-- agent dispatch
-- live stream orchestration
-- command data fetching
-- session/model/skill selection logic
-- MCP-backed file return
+- session state and lifecycle
+- agent dispatch and stream orchestration
+- live-stream preview
+- command data fetching and selection UIs
+- session / model / agent / skill selection logic
+- MCP-backed file return and `im_ask_user` prompts
+- human-in-the-loop prompt state (Codex user-input + `im_ask_user`)
 
-Those pieces already live in shared modules.
+Those pieces live in `bot/` and are consumed by every channel.
 
 ## The Layers You Plug Into
 
 ```text
-cli.ts
-  -> bot-xxx.ts
-     -> bot-commands.ts
-     -> bot-command-ui.ts
-     -> bot-handler.ts
-     -> bot-telegram-live-preview.ts
-  -> channel-xxx.ts
+cli/main.ts
+  -> channels/<name>/bot.ts
+       -> bot/commands.ts
+       -> bot/command-ui.ts
+       -> bot/orchestration.ts          (handleIncomingMessage pipeline)
+       -> channels/telegram/live-preview.ts   (channel-agnostic; reuse it)
+  -> channels/<name>/channel.ts          (transport)
 ```
 
 ## Files to Add
 
-### 1. `channel-xxx.ts`
+### 1. `src/channels/<name>/channel.ts`
 
-Implement the transport by extending `Channel` from `src/channel-base.ts`.
+Implement the transport by extending `Channel` from `src/channels/base.ts`.
 
 Responsibilities:
 
@@ -43,26 +44,27 @@ Responsibilities:
 
 Your transport should not know about sessions, agents, or skills.
 
-### 2. `bot-xxx-render.ts`
+### 2. `src/channels/<name>/render.ts`
 
-Render shared data into platform-specific output.
+Render shared command data into platform-specific output.
 
 Typical responsibilities:
 
 - `/start` formatting
 - `/status` formatting
-- host/runtime formatting
+- host / runtime formatting
 - command selection cards or keyboards
 - live preview rendering
 - final reply rendering
 
 You can use:
 
-- `bot-commands.ts` for structured data
-- `bot-command-ui.ts` for shared session/agent/model/skill views
-- `bot-telegram-live-preview.ts` for throttled preview updates
+- `bot/commands.ts` for structured command data
+- `bot/command-ui.ts` for shared session / agent / model / skill views
+- `bot/render-shared.ts` for shared rendering primitives
+- `channels/telegram/live-preview.ts` for throttled preview updates (despite the path, `LivePreview` is channel-agnostic)
 
-### 3. `bot-xxx.ts`
+### 3. `src/channels/<name>/bot.ts`
 
 Create the thin orchestration layer.
 
@@ -70,19 +72,19 @@ Typical responsibilities:
 
 - wire channel handlers
 - route slash commands
-- call `handleIncomingMessage()` for free-text messages
-- bind IM-specific file send callbacks for MCP bridge delivery
+- call `handleIncomingMessage()` (from `bot/orchestration.ts`) for free-text messages
+- bind channel-specific file-send callbacks for the MCP bridge
 - create the platform renderer + preview controller
 
-### 4. `cli.ts`
+### 4. `src/cli/main.ts` and `src/cli/channels.ts`
 
-Register the new channel in the channel launcher.
+Register the new channel in the channel launcher and add it to the resolution helpers.
 
 ## Shared Modules You Should Reuse
 
-### `bot-commands.ts`
+### `src/bot/commands.ts`
 
-Use this for data, not rendering.
+Structured command data, no rendering.
 
 Key functions:
 
@@ -94,9 +96,9 @@ Key functions:
 - `getSkillsListData()`
 - `resolveSkillPrompt()`
 
-### `bot-command-ui.ts`
+### `src/bot/command-ui.ts`
 
-Use this when the channel needs session/agent/model/skill selection UIs.
+Shared selection UI when the channel needs session / agent / model / skill pickers.
 
 Key helpers:
 
@@ -109,9 +111,9 @@ Key helpers:
 
 This prevents each IM integration from inventing its own selection logic.
 
-### `bot-handler.ts`
+### `src/bot/orchestration.ts`
 
-This is the standard message pipeline:
+The standard message pipeline:
 
 1. resolve session
 2. create placeholder
@@ -120,13 +122,15 @@ This is the standard message pipeline:
 5. send final reply
 6. deliver artifacts / MCP file sends
 
-Your platform implementation mostly supplies hooks for those steps.
+Your channel implementation supplies hooks for those steps via a `MessagePipeline<Ctx>` object.
 
-### `bot-telegram-live-preview.ts`
+### `src/bot/human-loop.ts`
 
-Despite the filename, `LivePreview` is channel-agnostic.
+Single state machine for both Codex `user-input` requests and `im_ask_user` MCP calls. Channels render the question via `currentHumanLoopQuestion()` and submit answers via `humanLoopOptionSelected()` / freeform reply paths.
 
-You provide:
+### `src/channels/telegram/live-preview.ts`
+
+Despite the filename, `LivePreview` is channel-agnostic. Each channel provides:
 
 - `renderInitial(agent)`
 - `renderStream(input)`
@@ -136,12 +140,12 @@ and the controller handles edit throttling and heartbeat timing.
 ## Minimal Bot Skeleton
 
 ```ts
-import { Bot } from './bot.js';
-import { handleIncomingMessage, type MessagePipeline } from './bot-handler.js';
-import { LivePreview } from './bot-telegram-live-preview.js';
-import { getStartData, getStatusDataAsync } from './bot-commands.js';
-import { XxxChannel } from './channel-xxx.js';
-import { renderStart, renderStatus, xxxPreviewRenderer } from './bot-xxx-render.js';
+import { Bot } from '../../bot/bot.js';
+import { handleIncomingMessage, type MessagePipeline } from '../../bot/orchestration.js';
+import { LivePreview } from '../telegram/live-preview.js';
+import { getStartData, getStatusDataAsync } from '../../bot/commands.js';
+import { XxxChannel } from './channel.js';
+import { renderStart, renderStatus, xxxPreviewRenderer } from './render.js';
 
 export class XxxBot extends Bot {
   private channel!: XxxChannel;
@@ -194,14 +198,14 @@ export class XxxBot extends Bot {
 
 ## Channel Checklist
 
-- `channel-xxx.ts` implements `Channel`
-- `bot-xxx-render.ts` renders command and stream output
-- `bot-xxx.ts` uses shared pipeline
-- `cli.ts` launches the new bot
-- `user-config.ts` stores any new credentials
-- `config-validation.ts` validates those credentials if needed
-- `onboarding.ts` / `dashboard.ts` expose setup state if needed
-- unit tests cover transport and rendering
+- `src/channels/<name>/channel.ts` implements `Channel`
+- `src/channels/<name>/render.ts` renders command and stream output
+- `src/channels/<name>/bot.ts` uses the shared pipeline from `bot/orchestration.ts`
+- `src/cli/main.ts` launches the new bot; `src/cli/channels.ts` resolves it from config
+- `src/core/config/user-config.ts` stores any new credentials
+- `src/core/config/validation.ts` validates those credentials if needed
+- `src/cli/onboarding.ts` and `src/dashboard/runtime.ts` / `src/dashboard/routes/config.ts` expose setup state if needed
+- Unit tests cover transport and rendering
 
 ## Capability Questions To Answer Early
 
@@ -219,14 +223,19 @@ These answers drive the `ChannelCapabilities` flags and influence how previews a
 
 ## Good Reference Implementations
 
-- Telegram reference:
-  - `src/channel-telegram.ts`
-  - `src/bot-telegram.ts`
-  - `src/bot-telegram-render.ts`
+- **Telegram** — simplest, plain-text-friendly:
+  - `src/channels/telegram/channel.ts`
+  - `src/channels/telegram/bot.ts`
+  - `src/channels/telegram/render.ts`
+  - `src/channels/telegram/live-preview.ts`
 
-- Feishu reference:
-  - `src/channel-feishu.ts`
-  - `src/bot-feishu.ts`
-  - `src/bot-feishu-render.ts`
+- **Feishu** — best reference if your target platform prefers cards over plain text:
+  - `src/channels/feishu/channel.ts`
+  - `src/channels/feishu/bot.ts`
+  - `src/channels/feishu/render.ts`
+  - `src/channels/feishu/markdown.ts`
 
-Feishu is the better reference if your target platform prefers cards over plain text.
+- **WeChat** — best reference for an event-driven / webhook-style API:
+  - `src/channels/weixin/channel.ts`
+  - `src/channels/weixin/bot.ts`
+  - `src/channels/weixin/api.ts`

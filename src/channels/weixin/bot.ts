@@ -500,7 +500,7 @@ export class WeixinBot extends Bot {
         this.finishTask(taskId);
         this.syncSelectedChats(session);
       }
-    }).catch(error => {
+    }, taskId).catch(error => {
       this.finishTask(taskId);
       this.log(`weixin queue execution failed: ${describeError(error)}`);
     });
