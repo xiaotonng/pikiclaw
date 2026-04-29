@@ -743,7 +743,7 @@ export class TelegramBot extends Bot {
         this.finishTask(taskId);
         this.syncSelectedChats(session);
       }
-    }).catch(e => {
+    }, taskId).catch(e => {
       this.warn(`[handleMessage] queue execution failed: ${e}`);
       this.finishTask(taskId);
     });

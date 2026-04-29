@@ -390,10 +390,69 @@ interface SkillCatalogItem {
   installed: boolean;
   scope?: 'global' | 'project';
   installedNames: string[];
+  /** GitHub stars — undefined when the metadata fetch hasn't completed or failed. */
+  stars?: number;
+  /** ISO timestamp of the repo's most recent push. */
+  pushedAt?: string;
+}
+
+/**
+ * In-memory cache of GitHub repo metadata for skill catalog entries. We use
+ * stars as the authority signal — popular repos float to the top — and
+ * `pushedAt` to surface staleness. A single 24-hour TTL is enough; if the
+ * dashboard reloads more often we serve cached data instantly.
+ *
+ * The fetch is best-effort: rate limits or network failures leave the catalog
+ * intact (just without star counts), so the page never breaks because of
+ * GitHub being down.
+ */
+interface RepoMeta { stars: number; pushedAt: string }
+const githubMetaCache = new Map<string, { value: RepoMeta; cachedAt: number }>();
+const GITHUB_META_TTL_MS = 24 * 60 * 60 * 1000;
+let githubMetaInflight: Promise<void> | null = null;
+
+async function fetchOneRepoMeta(source: string): Promise<RepoMeta | null> {
+  // Accept either `owner/repo` or a full GitHub URL.
+  const slug = source.replace(/^https?:\/\/github\.com\//, '').replace(/\.git$/, '');
+  if (!/^[^/]+\/[^/]+$/.test(slug)) return null;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5_000);
+    const res = await fetch(`https://api.github.com/repos/${slug}`, {
+      signal: controller.signal,
+      headers: {
+        'Accept': 'application/vnd.github+json',
+        'User-Agent': 'pikiclaw-dashboard',
+        ...(process.env.GITHUB_TOKEN ? { Authorization: `Bearer ${process.env.GITHUB_TOKEN}` } : {}),
+      },
+    });
+    clearTimeout(timer);
+    if (!res.ok) return null;
+    const data = await res.json() as { stargazers_count?: number; pushed_at?: string };
+    if (typeof data.stargazers_count !== 'number') return null;
+    return { stars: data.stargazers_count, pushedAt: data.pushed_at || '' };
+  } catch { return null; }
+}
+
+async function ensureRepoMeta(sources: string[]): Promise<void> {
+  const now = Date.now();
+  const stale = sources.filter(s => {
+    const hit = githubMetaCache.get(s);
+    return !hit || now - hit.cachedAt > GITHUB_META_TTL_MS;
+  });
+  if (stale.length === 0) return;
+  if (githubMetaInflight) { await githubMetaInflight; return; }
+  githubMetaInflight = (async () => {
+    await Promise.all(stale.map(async s => {
+      const meta = await fetchOneRepoMeta(s);
+      if (meta) githubMetaCache.set(s, { value: meta, cachedAt: now });
+    }));
+  })();
+  try { await githubMetaInflight; } finally { githubMetaInflight = null; }
 }
 
 /** GET /api/extensions/skills/catalog — unified recommended + installed skills view. */
-app.get('/api/extensions/skills/catalog', (c) => {
+app.get('/api/extensions/skills/catalog', async (c) => {
   const workdir = c.req.query('workdir') || runtime.getRequestWorkdir();
   const scopeParam = c.req.query('scope');
   const scope = scopeParam === 'global' || scopeParam === 'workspace' || scopeParam === 'both'
@@ -409,36 +468,51 @@ app.get('/api/extensions/skills/catalog', (c) => {
   const installed = installedResult.skills || [];
   const recommended = getRecommendedSkillRepos();
 
-  const items: SkillCatalogItem[] = recommended
-    .filter(repo => {
-      if (!scope) return true;
-      return repo.recommendedScope === scope || repo.recommendedScope === 'both';
-    })
-    .map(repo => {
-      // Match recommended repo → installed skills. Skill-installer uses the repo's
-      // skill folder names as ids, so we don't have a perfect 1:1 mapping; for now
-      // we flag a repo as "installed" if any of its listed skills appear locally.
-      const hints = (repo.skills || []).map(s => s.toLowerCase());
-      const candidateMatches = installed.filter(s => hints.includes(s.name.toLowerCase()));
-      const matches = scope === 'global'
-        ? candidateMatches.filter(m => m.scope === 'global')
-        : scope === 'workspace'
-          ? candidateMatches.filter(m => m.scope === 'project')
-          : candidateMatches;
-      return {
-        id: repo.id,
-        name: repo.name,
-        description: repo.description,
-        descriptionZh: repo.descriptionZh,
-        source: repo.source,
-        category: repo.category,
-        recommendedScope: repo.recommendedScope,
-        homepage: repo.homepage,
-        installed: matches.length > 0,
-        scope: matches[0]?.scope,
-        installedNames: matches.map(m => m.name),
-      };
-    });
+  const filtered = recommended.filter(repo => {
+    if (!scope) return true;
+    return repo.recommendedScope === scope || repo.recommendedScope === 'both';
+  });
+
+  // Best-effort GitHub metadata. We don't await on a cold cache here so the
+  // first paint isn't blocked by GitHub latency — if results are still cold,
+  // they'll appear on the next refresh (the dashboard already does SWR).
+  const sources = filtered.map(r => r.source);
+  const allCached = sources.every(s => githubMetaCache.has(s));
+  if (allCached) {
+    // Cheap path: nothing to fetch, just return.
+  } else {
+    await ensureRepoMeta(sources).catch(() => { /* non-fatal */ });
+  }
+
+  const items: SkillCatalogItem[] = filtered.map(repo => {
+    const hints = (repo.skills || []).map(s => s.toLowerCase());
+    const candidateMatches = installed.filter(s => hints.includes(s.name.toLowerCase()));
+    const matches = scope === 'global'
+      ? candidateMatches.filter(m => m.scope === 'global')
+      : scope === 'workspace'
+        ? candidateMatches.filter(m => m.scope === 'project')
+        : candidateMatches;
+    const meta = githubMetaCache.get(repo.source)?.value;
+    return {
+      id: repo.id,
+      name: repo.name,
+      description: repo.description,
+      descriptionZh: repo.descriptionZh,
+      source: repo.source,
+      category: repo.category,
+      recommendedScope: repo.recommendedScope,
+      homepage: repo.homepage,
+      installed: matches.length > 0,
+      scope: matches[0]?.scope,
+      installedNames: matches.map(m => m.name),
+      stars: meta?.stars,
+      pushedAt: meta?.pushedAt,
+    };
+  });
+
+  // Authority = community popularity. Sort by stars desc, with no-data entries
+  // sinking to the bottom so the most-loved repos surface first.
+  items.sort((a, b) => (b.stars ?? -1) - (a.stars ?? -1));
 
   return c.json({ ok: true, items, installed });
 });

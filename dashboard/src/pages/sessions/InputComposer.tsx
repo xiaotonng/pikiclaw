@@ -1,6 +1,6 @@
 import { useState, useEffect, useLayoutEffect, useRef, useCallback, memo } from 'react';
 import { createPortal } from 'react-dom';
-import { cn, EFFORT_OPTIONS, getAgentMeta } from '../../utils';
+import { cn, EFFORT_OPTIONS, getAgentMeta, shortenModel } from '../../utils';
 import { api } from '../../api';
 import { useStore } from '../../store';
 import { Spinner } from '../../components/ui';
@@ -21,16 +21,18 @@ type CascadeStep = 'closed' | 'agent' | 'model' | 'effort';
 const draftStore = new Map<string, { text: string; files: File[] }>();
 function draftKey(agent: string, sessionId: string) { return `${agent}:${sessionId}`; }
 
-export const InputComposer = memo(function InputComposer({ session, workdir, onStreamQueued, onSendStart, onSessionChange, t, streamPhase, streamTaskId, queuedTaskIds, pendingPrompt, onRecall, onSteer, editDraft, onEditDraftConsumed }: {
+export const InputComposer = memo(function InputComposer({ session, workdir, onStreamQueued, onSendStart, onSendTaskAssigned, onSessionChange, t, streamPhase, streamTaskId, queuedTaskIds, queuedTasks, pendingPrompt, onRecall, onSteer, editDraft, onEditDraftConsumed }: {
   session: SessionInfo;
   workdir: string;
   onStreamQueued: () => void;
   onSendStart: (prompt: string, imageUrls?: string[]) => void;
+  onSendTaskAssigned?: (taskId: string) => void;
   onSessionChange?: (next: { agent: string; sessionId: string; workdir: string }) => void;
   t: (k: string) => string;
   streamPhase: string | null;
   streamTaskId?: string | null;
   queuedTaskIds?: string[];
+  queuedTasks?: Array<{ taskId: string; prompt: string }>;
   pendingPrompt?: string | null;
   onRecall?: (taskId: string) => void;
   onSteer?: (taskId: string) => void;
@@ -40,8 +42,13 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [localTaskId, setLocalTaskId] = useState<string | null>(null);
-  const [recallPending, setRecallPending] = useState(false);
-  const [steerPending, setSteerPending] = useState(false);
+  // Per-task in-flight tracking. A global boolean would freeze every row's
+  // button when one recall completes but other tasks remain queued/streaming
+  // (the "did the target resolve?" check can't distinguish which row's
+  // operation finished). Tracking the target taskId lets us clear the flag
+  // when that specific task disappears and disable only that row's button.
+  const [recallingIds, setRecallingIds] = useState<Set<string>>(() => new Set());
+  const [steeringIds, setSteeringIds] = useState<Set<string>>(() => new Set());
   // Stash last-sent content so recall can restore it to the input field
   const lastSentRef = useRef<{ prompt: string; files: File[] }>({ prompt: '', files: [] });
   const storeAgents = useStore(s => s.agentStatus?.agents ?? null);
@@ -253,7 +260,10 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
       effort: targetEffort,
     })
       .then(res => {
-        if (res.taskId) setLocalTaskId(res.taskId);
+        if (res.taskId) {
+          setLocalTaskId(res.taskId);
+          onSendTaskAssigned?.(res.taskId);
+        }
         if (!res.ok) return;
         const nextSession = typeof res.sessionKey === 'string' ? parseSessionKey(res.sessionKey) : null;
         const switchedSession = !!nextSession
@@ -270,6 +280,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
     imageAttachments,
     input,
     onSendStart,
+    onSendTaskAssigned,
     onSessionChange,
     onStreamQueued,
     selectedAgent,
@@ -305,13 +316,24 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   const hasQueuedTask = effectiveQueuedIds.length > 0;
   const showTaskBar = hasQueuedTask || isActiveStream;
 
-  // Clear action-pending flags when the target state resolves
+  // Clear per-task pending flags as their target tasks resolve.
+  // A target is "resolved" once it's no longer in the queued list and is no
+  // longer the active stream — i.e. the recall/steer landed on the server.
   useEffect(() => {
-    if (recallPending && !hasQueuedTask && !isActiveStream) setRecallPending(false);
-  }, [recallPending, hasQueuedTask, isActiveStream]);
-  useEffect(() => {
-    if (steerPending && !hasQueuedTask) setSteerPending(false);
-  }, [steerPending, hasQueuedTask]);
+    const isLive = (id: string) => effectiveQueuedIds.includes(id) || id === streamTaskId;
+    setRecallingIds(prev => {
+      let changed = false;
+      const next = new Set<string>();
+      for (const id of prev) { if (isLive(id)) next.add(id); else changed = true; }
+      return changed ? next : prev;
+    });
+    setSteeringIds(prev => {
+      let changed = false;
+      const next = new Set<string>();
+      for (const id of prev) { if (isLive(id)) next.add(id); else changed = true; }
+      return changed ? next : prev;
+    });
+  }, [effectiveQueuedIds, streamTaskId]);
   // Clear stashed files once queued task starts streaming (no longer recallable)
   useEffect(() => {
     if (!hasQueuedTask && lastSentRef.current.files.length) {
@@ -320,8 +342,8 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   }, [hasQueuedTask]);
 
   const handleRecallQueued = useCallback((taskId: string) => {
-    if (recallPending) return;
-    setRecallPending(true);
+    if (recallingIds.has(taskId)) return;
+    setRecallingIds(prev => { const next = new Set(prev); next.add(taskId); return next; });
     // Only the most-recent queued task corresponds to the input the user just
     // sent; restoring stash for an older queued task would dump someone else's
     // prompt into the composer.
@@ -333,20 +355,20 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
     }
     onRecall?.(taskId);
     if (taskId === localTaskId) setLocalTaskId(null);
-  }, [recallPending, effectiveQueuedId, localTaskId, onRecall]);
+  }, [recallingIds, effectiveQueuedId, localTaskId, onRecall]);
 
   const handleStop = useCallback(() => {
-    if (recallPending || !streamTaskId) return;
-    setRecallPending(true);
+    if (!streamTaskId || recallingIds.has(streamTaskId)) return;
+    setRecallingIds(prev => { const next = new Set(prev); next.add(streamTaskId); return next; });
     onRecall?.(streamTaskId);
-  }, [recallPending, streamTaskId, onRecall]);
+  }, [recallingIds, streamTaskId, onRecall]);
 
   const handleSteerQueued = useCallback((taskId: string) => {
-    if (steerPending) return;
-    setSteerPending(true);
+    if (steeringIds.has(taskId)) return;
+    setSteeringIds(prev => { const next = new Set(prev); next.add(taskId); return next; });
     onSteer?.(taskId);
     if (taskId === localTaskId) setLocalTaskId(null);
-  }, [steerPending, localTaskId, onSteer]);
+  }, [steeringIds, localTaskId, onSteer]);
 
   const selectSkill = useCallback((skill: SkillInfo) => {
     setInput(`/${skill.name} `);
@@ -453,9 +475,10 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   const displayMeta = getAgentMeta(displayAgent);
   const displayModel = pendingModel ?? currentModel;
   const displayEffort = pendingEffort ?? currentEffort;
+  const shortModel = displayModel ? shortenModel(displayModel) : '';
   const cascadeLabel = [
-    displayMeta.label,
-    displayModel ? (displayModel.length > 18 ? displayModel.slice(0, 18) + '\u2026' : displayModel) : null,
+    displayMeta.shortLabel,
+    shortModel ? (shortModel.length > 18 ? shortModel.slice(0, 18) + '\u2026' : shortModel) : null,
     displayEffort ? displayEffort.charAt(0).toUpperCase() + displayEffort.slice(1) : null,
   ].filter(Boolean).join(' / ');
 
@@ -473,11 +496,11 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
                 <span className="flex-1 min-w-0 text-[12px] font-medium text-fg-3 truncate">{t('hub.running')}</span>
                 <button
                   onClick={handleStop}
-                  disabled={!streamTaskId || recallPending}
+                  disabled={!streamTaskId || (streamTaskId ? recallingIds.has(streamTaskId) : false)}
                   title={t('hub.stopHint')}
                   className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-fg-4 hover:text-err hover:bg-err/10 transition-colors disabled:opacity-30 disabled:pointer-events-none shrink-0"
                 >
-                  {recallPending && !hasQueuedTask
+                  {streamTaskId && recallingIds.has(streamTaskId)
                     ? <Spinner className="h-2.5 w-2.5" />
                     : <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2" /></svg>}
                   {t('hub.stop')}
@@ -488,6 +511,11 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
             {effectiveQueuedIds.map((taskId, idx) => {
               const isLatest = idx === effectiveQueuedIds.length - 1;
               const positionLabel = effectiveQueuedIds.length > 1 ? `${t('hub.queued')} #${idx + 1}` : t('hub.queued');
+              // Per-task prompt comes from the server snapshot. Fall back to
+              // pendingPrompt only for the latest row (covers the brief moment
+              // before the snapshot catches up after a fresh send).
+              const taskPrompt = queuedTasks?.find(qt => qt.taskId === taskId)?.prompt
+                || (isLatest ? pendingPrompt : null);
               return (
                 <div
                   key={taskId}
@@ -496,29 +524,29 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
                   <span className="h-1.5 w-1.5 rounded-full bg-warn animate-pulse shrink-0" />
                   <div className="flex-1 min-w-0 flex items-baseline gap-2">
                     <span className="text-[12px] font-medium text-warn shrink-0">{positionLabel}</span>
-                    {isLatest && pendingPrompt && (
-                      <span className="text-[11px] text-fg-5/60 truncate">{pendingPrompt}</span>
+                    {taskPrompt && (
+                      <span className="text-[11px] text-fg-5/60 truncate">{taskPrompt}</span>
                     )}
                   </div>
                   <div className="flex items-center gap-1 shrink-0">
                     <button
                       onClick={() => handleSteerQueued(taskId)}
-                      disabled={steerPending}
+                      disabled={steeringIds.has(taskId)}
                       title={t('hub.steerHint')}
                       className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-fg-4 hover:text-blue-400 hover:bg-blue-400/10 transition-colors disabled:opacity-30 disabled:pointer-events-none"
                     >
-                      {steerPending
+                      {steeringIds.has(taskId)
                         ? <Spinner className="h-2.5 w-2.5" />
                         : <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polyline points="9 6 15 12 9 18" /></svg>}
                       {t('hub.steer')}
                     </button>
                     <button
                       onClick={() => handleRecallQueued(taskId)}
-                      disabled={recallPending}
+                      disabled={recallingIds.has(taskId)}
                       title={t('hub.recallHint')}
                       className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-fg-4 hover:text-err hover:bg-err/10 transition-colors disabled:opacity-30 disabled:pointer-events-none"
                     >
-                      {recallPending
+                      {recallingIds.has(taskId)
                         ? <Spinner className="h-2.5 w-2.5" />
                         : <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M18 6 6 18" /><path d="M6 6l12 12" /></svg>}
                       {t('hub.recall')}
@@ -655,7 +683,7 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
               {agents.length
                 ? <BrandIcon brand={displayAgent} size={12} />
                 : <Spinner className="h-3 w-3" />}
-              <span className="max-w-[200px] truncate">{agents.length ? cascadeLabel : t('hub.selectAgent')}</span>
+              <span className="max-w-[320px] truncate">{agents.length ? cascadeLabel : t('hub.selectAgent')}</span>
               <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
                 className={cn('text-fg-5/30 transition-transform duration-200', cascadeStep !== 'closed' && 'rotate-180')}>
                 <polyline points="6 9 12 15 18 9" />

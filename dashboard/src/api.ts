@@ -398,6 +398,8 @@ export interface StreamSnapshot {
   taskId: string;
   /** Task IDs queued behind the currently displayed one, in enqueue order. */
   queuedTaskIds?: string[];
+  /** Per-queued-task prompt previews (same order as queuedTaskIds). */
+  queuedTasks?: Array<{ taskId: string; prompt: string }>;
   text?: string;
   thinking?: string;
   activity?: string;

@@ -198,6 +198,12 @@ export interface StreamSnapshot {
    * can recall/steer them separately.
    */
   queuedTaskIds?: string[];
+  /**
+   * Per-queued-task prompt previews, keyed by taskId. Derived at delivery time
+   * from the live RunningTask records so each queued row can render its own
+   * content. Same order as queuedTaskIds.
+   */
+  queuedTasks?: Array<{ taskId: string; prompt: string }>;
   incomplete?: boolean;
   text?: string;
   thinking?: string;
@@ -226,6 +232,13 @@ export interface RunningTask {
   steer?: ((prompt: string, attachments?: string[]) => Promise<boolean>) | null;
   freezePreviewOnAbort?: boolean;
   placeholderMessageIds?: Array<number | string>;
+  /**
+   * Set when steerTask() wants this queued task to yield its current chain slot
+   * to a later-enqueued task. The queue wrapper bails out early and re-enqueues
+   * itself at the tail; the steered task gets to run when its slot fires.
+   * Reset to false on the second wrapper invocation so the task runs normally.
+   */
+  deferForSteer?: boolean;
 }
 
 export interface BeginHumanLoopPromptOpts {
@@ -316,14 +329,24 @@ export class Bot {
    *  If the session was promoted (pending → native), follows the redirect transparently. */
   getStreamSnapshot(sessionKey: string): StreamSnapshot | null {
     const snap = this.streamSnapshots.get(sessionKey);
-    if (snap) return snap;
+    if (snap) return this.enrichSnapshot(snap);
     // Follow promotion redirect: pending_XXX → native ID
     const promotedKey = this.promotedSessionKeys.get(sessionKey);
     if (promotedKey) {
       const promotedSnap = this.streamSnapshots.get(promotedKey);
-      if (promotedSnap) return promotedSnap;
+      if (promotedSnap) return this.enrichSnapshot(promotedSnap);
     }
     return null;
+  }
+
+  /** Attach per-queued-task prompts by looking up live RunningTask records. */
+  private enrichSnapshot(snap: StreamSnapshot): StreamSnapshot {
+    if (!snap.queuedTaskIds?.length) return snap;
+    const queuedTasks = snap.queuedTaskIds.map(taskId => ({
+      taskId,
+      prompt: this.activeTasks.get(taskId)?.prompt || '',
+    }));
+    return { ...snap, queuedTasks };
   }
 
   /* ── Dashboard SSE push (injected by dashboard layer to avoid circular import) ── */
@@ -341,11 +364,12 @@ export class Bot {
     const snap = this.streamSnapshots.get(sessionKey) ?? null;
     const cb = this._onStreamSnapshot;
     const emitAll = () => {
-      cb(sessionKey, snap ? { ...snap } : null);
+      const enriched = snap ? this.enrichSnapshot(snap) : null;
+      cb(sessionKey, enriched);
       // Also broadcast on promoted-from aliases so clients still listening
       // on the old (pending) key receive updates after session promotion.
       const aliases = this.promotedFromAliases.get(sessionKey);
-      if (aliases) for (const alias of aliases) cb(alias, snap ? { ...snap } : null);
+      if (aliases) for (const alias of aliases) cb(alias, enriched ? { ...enriched } : null);
     };
     if (immediate) {
       const timer = this.streamPushTimers.get(sessionKey);
@@ -780,7 +804,7 @@ export class Bot {
     // Notify dashboard clients still tracking the old (pending) key via SSE
     // so they can detect the promotion and navigate to the correct session
     if (this._onStreamSnapshot && promotedSnap) {
-      this._onStreamSnapshot(previousKey, { ...promotedSnap });
+      this._onStreamSnapshot(previousKey, this.enrichSnapshot(promotedSnap));
     }
 
     for (const [, cs] of this.chats) {
@@ -985,6 +1009,29 @@ export class Bot {
   }
 
   /**
+   * Mark all queued tasks ahead of `targetTaskId` (in this session) so their
+   * chain wrappers re-enqueue and yield to the steered task. Repeated steers
+   * reset prior defer flags so only the latest target's predecessors defer.
+   */
+  protected markQueueDeferralsForSteer(targetTaskId: string): void {
+    const target = this.activeTasks.get(targetTaskId);
+    if (!target) return;
+    const snapshot = this.streamSnapshots.get(target.sessionKey);
+    const queuedIds = snapshot?.queuedTaskIds || [];
+    // Reset any previous defer flags for this session's queued tasks first so
+    // a new steer call doesn't stack on top of an earlier (now-stale) decision.
+    for (const id of queuedIds) {
+      const t = this.activeTasks.get(id);
+      if (t) t.deferForSteer = false;
+    }
+    const targetIdx = queuedIds.indexOf(targetTaskId);
+    for (let i = 0; i < targetIdx; i++) {
+      const t = this.activeTasks.get(queuedIds[i]);
+      if (t && t.status === 'queued' && !t.cancelled) t.deferForSteer = true;
+    }
+  }
+
+  /**
    * Steer hands off to the queued task's own placeholder card. Interrupt the
    * active task so the queued task can run next and the current preview can be
    * frozen in place instead of being rewritten as an error.
@@ -994,6 +1041,7 @@ export class Bot {
     if (!taskId) return { task: null, interrupted: false, steered: false };
     const task = this.activeTasks.get(taskId) || null;
     if (!task || task.status !== 'queued') return { task, interrupted: false, steered: false };
+    this.markQueueDeferralsForSteer(taskId);
     const interrupted = this.interruptRunningTask(task.sessionKey, { freezePreview: true });
     return { task, interrupted, steered: false };
   }
@@ -1036,9 +1084,29 @@ export class Bot {
     return `${String(chatId)}:${String(sourceMessageId)}`;
   }
 
-  protected queueSessionTask<T>(session: SessionRuntime, task: () => Promise<T>): Promise<T> {
+  protected queueSessionTask<T>(session: SessionRuntime, task: () => Promise<T>, taskId?: string): Promise<T> {
+    // Wrap the user task with a defer check. When steerTask() flags this task
+    // to yield its chain slot to a steered task, the wrapper re-enqueues the
+    // same fn at the tail and returns immediately so the next chain wrapper
+    // (the steered task's) fires next. Tasks without a taskId (e.g. file
+    // staging) skip the check.
+    const runner = async (): Promise<T> => {
+      if (taskId) {
+        const t = this.activeTasks.get(taskId);
+        if (t?.deferForSteer && !t.cancelled) {
+          t.deferForSteer = false;
+          // Re-enqueue at the tail. Don't await — let the current slot finish
+          // immediately so the chain advances to the steered task. The new
+          // wrapper preserves the original fn so the deferred task still runs
+          // (just after the steered one).
+          void this.queueSessionTask(session, task, taskId);
+          return undefined as unknown as T;
+        }
+      }
+      return await task();
+    };
     const prev = this.sessionChains.get(session.key) || Promise.resolve();
-    const current = prev.catch(() => {}).then(task);
+    const current = prev.catch(() => {}).then(runner);
     const settled = current.then(() => {}, () => {});
     const chained = settled.finally(() => {
       if (this.sessionChains.get(session.key) === chained) this.sessionChains.delete(session.key);
@@ -1330,7 +1398,7 @@ export class Bot {
         this.finishTask(taskId);
         this.syncSelectedChats(session);
       }
-    }).catch(error => {
+    }, taskId).catch(error => {
       this.finishTask(taskId);
       this.error(`[submitSessionTask] queue failed task=${taskId} error=${error?.message || error}`);
     });
@@ -1357,6 +1425,7 @@ export class Bot {
   async steerTask(taskId: string): Promise<{ task: RunningTask | null; interrupted: boolean; steered: boolean }> {
     const task = this.activeTasks.get(taskId) || null;
     if (!task || task.status !== 'queued') return { task, interrupted: false, steered: false };
+    this.markQueueDeferralsForSteer(taskId);
     const interrupted = this.interruptRunningTask(task.sessionKey, { freezePreview: true });
     return { task, interrupted, steered: interrupted || !!task };
   }

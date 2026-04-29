@@ -227,6 +227,29 @@ function cmdSummary(config: McpServerConfig): string {
   return [cmd, ...args].join(' ').trim();
 }
 
+/**
+ * Generic @modelcontextprotocol/server-* demos that historically shipped in the
+ * recommended list but were later removed (no product identity, overlap with
+ * built-in agent capabilities like search/time). We hide them from the catalog
+ * UI so old installs don't clutter the Connected section. The configs are kept
+ * in setting.json untouched — users can still edit by hand if they want.
+ */
+const HIDDEN_GENERIC_DEMO_PACKAGES = new Set([
+  '@modelcontextprotocol/server-time',
+  '@modelcontextprotocol/server-fetch',
+  '@modelcontextprotocol/server-memory',
+  'mcp-server-time',
+  'mcp-server-fetch',
+  'mcp-server-memory',
+]);
+const HIDDEN_GENERIC_DEMO_NAMES = new Set(['time', 'fetch', 'memory']);
+
+function isGenericDemoEntry(entry: McpExtensionEntry): boolean {
+  if (HIDDEN_GENERIC_DEMO_NAMES.has(entry.name.toLowerCase())) return true;
+  const args = entry.config.args || [];
+  return args.some(a => HIDDEN_GENERIC_DEMO_PACKAGES.has(a));
+}
+
 function transportSummary(transport: RecommendedMcpServer['transport']): string {
   if (transport.type === 'http') return transport.url;
   return [transport.command, ...transport.args.filter(a => a !== '-y')].join(' ');
@@ -333,6 +356,7 @@ export function getCatalogItems(opts: {
   // 2. Custom entries — user-added servers not in the recommended registry.
   for (const entry of customEntries) {
     if (!scopeMatchesEntry(entry)) continue;
+    if (isGenericDemoEntry(entry)) continue;
     const auth: McpAuthSpec = { type: 'none' };
     const state = computeStateForInstalled(entry.config, auth, entry.name, opts.unhealthyIds);
     items.push({
