@@ -308,14 +308,44 @@ function findGeminiSessionFile(workdir: string, sessionId: string): string | nul
   try { entries = fs.readdirSync(chatsDir, { withFileTypes: true }); } catch { return null; }
 
   for (const entry of entries) {
-    if (!entry.isFile() || !entry.name.startsWith('session-') || !entry.name.endsWith('.json')) continue;
+    if (!entry.isFile() || !entry.name.startsWith('session-')) continue;
+    if (!entry.name.endsWith('.json') && !entry.name.endsWith('.jsonl')) continue;
     const filePath = path.join(chatsDir, entry.name);
     try {
-      const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      const data = loadGeminiSessionData(filePath);
       if (data?.sessionId === sessionId) return filePath;
     } catch { /* skip */ }
   }
   return null;
+}
+
+function loadGeminiSessionData(filePath: string): any {
+  try {
+    const content = fs.readFileSync(filePath, 'utf8');
+    if (filePath.endsWith('.json')) return JSON.parse(content);
+
+    // JSONL format: first line is metadata, subsequent lines are messages or $set updates
+    const lines = content.split('\n');
+    let data: any = {};
+    const messages: any[] = [];
+    for (const line of lines) {
+      if (!line.trim() || line[0] !== '{') continue;
+      try {
+        const obj = JSON.parse(line);
+        if (obj.sessionId && !data.sessionId) {
+          data = { ...obj };
+        } else if (obj.$set) {
+          if (obj.$set.lastUpdated) data.lastUpdated = obj.$set.lastUpdated;
+        } else if (obj.type === 'user' || obj.type === 'gemini' || obj.type === 'model' || obj.type === 'assistant') {
+          messages.push(obj);
+        }
+      } catch { /* skip */ }
+    }
+    data.messages = messages;
+    return data;
+  } catch {
+    return null;
+  }
 }
 
 /** Read native Gemini CLI sessions from ~/.gemini/tmp/{projectName}/chats/ */
@@ -323,16 +353,27 @@ function getNativeGeminiSessionsFromFiles(workdir: string): SessionInfo[] {
   const chatsDir = geminiChatsDir(workdir);
   if (!chatsDir || !fs.existsSync(chatsDir)) return [];
 
-  const sessions: SessionInfo[] = [];
+  const sessionsById = new Map<string, SessionInfo>();
   let entries: fs.Dirent[];
   try { entries = fs.readdirSync(chatsDir, { withFileTypes: true }); } catch { return []; }
 
   for (const entry of entries) {
-    if (!entry.isFile() || !entry.name.startsWith('session-') || !entry.name.endsWith('.json')) continue;
+    if (!entry.isFile() || !entry.name.startsWith('session-')) continue;
+    if (!entry.name.endsWith('.json') && !entry.name.endsWith('.jsonl')) continue;
     const filePath = path.join(chatsDir, entry.name);
     try {
-      const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-      if (!data.sessionId) continue;
+      const data = loadGeminiSessionData(filePath);
+      if (!data?.sessionId) continue;
+
+      const sessionId = String(data.sessionId);
+      const updatedAt = data.lastUpdated || data.startTime || data.createdAt || null;
+
+      // If we already saw this sessionId, only replace it if this file is newer
+      const existing = sessionsById.get(sessionId);
+      if (existing && updatedAt && existing.runUpdatedAt && Date.parse(updatedAt) <= Date.parse(existing.runUpdatedAt)) {
+        continue;
+      }
+
       // Extract title from first user message + last Q&A from tail
       let title: string | null = null;
       let lastQuestion: string | null = null;
@@ -347,7 +388,7 @@ function getNativeGeminiSessionsFromFiles(workdir: string): SessionInfo[] {
             lastQuestion = shortValue(text, 500);
             lastMessageText = shortValue(text, 500);
           }
-        } else if (msg.type === 'model' || msg.type === 'assistant') {
+        } else if (msg.type === 'model' || msg.type === 'assistant' || msg.type === 'gemini') {
           const text = extractGeminiText(msg.content);
           if (text) {
             lastAnswer = shortValue(text, 500);
@@ -356,18 +397,18 @@ function getNativeGeminiSessionsFromFiles(workdir: string): SessionInfo[] {
         }
       }
       const numTurns = messages.filter((m: any) => m.type === 'user' && extractGeminiText(m.content)).length;
-      sessions.push({
-        sessionId: data.sessionId,
+      sessionsById.set(sessionId, {
+        sessionId,
         agent: 'gemini',
         workdir,
         workspacePath: null,
         model: null,
-        createdAt: data.startTime || null,
+        createdAt: data.startTime || data.createdAt || null,
         title,
         running: data.lastUpdated ? Date.now() - Date.parse(data.lastUpdated) < SESSION_RUNNING_THRESHOLD_MS : false,
         runState: data.lastUpdated && Date.now() - Date.parse(data.lastUpdated) < SESSION_RUNNING_THRESHOLD_MS ? 'running' : 'completed',
         runDetail: null,
-        runUpdatedAt: data.lastUpdated || data.startTime || null,
+        runUpdatedAt: updatedAt || null,
         classification: null,
         userStatus: null,
         userNote: null,
@@ -381,7 +422,7 @@ function getNativeGeminiSessionsFromFiles(workdir: string): SessionInfo[] {
       });
     } catch { /* skip */ }
   }
-  return sessions;
+  return [...sessionsById.values()];
 }
 
 function getNativeGeminiSessions(workdir: string): SessionInfo[] {
@@ -434,12 +475,12 @@ function getGeminiSessionTail(opts: SessionTailOpts): SessionTailResult {
   if (!filePath) return { ok: false, messages: [], error: 'Session file not found' };
 
   try {
-    const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    const data = loadGeminiSessionData(filePath);
     const messages = Array.isArray(data?.messages) ? data.messages : [];
     const allMsgs: { role: 'user' | 'assistant'; text: string }[] = [];
     for (const msg of messages) {
       const type = typeof msg?.type === 'string' ? msg.type.trim().toLowerCase() : '';
-      const role = type === 'user' ? 'user' : type === 'gemini' ? 'assistant' : null;
+      const role = type === 'user' ? 'user' : (type === 'gemini' || type === 'model' || type === 'assistant') ? 'assistant' : null;
       if (!role) continue;
       const text = extractGeminiText(msg?.content);
       if (text) allMsgs.push({ role, text });
@@ -459,12 +500,12 @@ function getGeminiSessionMessages(opts: SessionMessagesOpts): SessionMessagesRes
   if (!filePath) return { ok: false, messages: [], totalTurns: 0, error: 'Session file not found' };
 
   try {
-    const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    const data = loadGeminiSessionData(filePath);
     const messages = Array.isArray(data?.messages) ? data.messages : [];
     const allMsgs: TailMessage[] = [];
     for (const msg of messages) {
       const type = typeof msg?.type === 'string' ? msg.type.trim().toLowerCase() : '';
-      const role = type === 'user' ? 'user' : type === 'gemini' ? 'assistant' : null;
+      const role = type === 'user' ? 'user' : (type === 'gemini' || type === 'model' || type === 'assistant') ? 'assistant' : null;
       if (!role) continue;
       const text = extractGeminiText(msg?.content);
       if (text) allMsgs.push({ role, text });
