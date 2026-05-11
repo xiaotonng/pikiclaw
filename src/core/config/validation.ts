@@ -37,12 +37,56 @@ export interface WeixinConfigCheckResult {
   normalizedBaseUrl: string;
 }
 
+export interface SlackBotIdentity {
+  userId: string;
+  team: string | null;
+  username: string | null;
+}
+
+export interface SlackConfigCheckResult {
+  state: ChannelSetupState;
+  bot: SlackBotIdentity | null;
+}
+
+export interface DiscordBotIdentity {
+  userId: string;
+  username: string;
+  applicationId: string | null;
+}
+
+export interface DiscordConfigCheckResult {
+  state: ChannelSetupState;
+  bot: DiscordBotIdentity | null;
+}
+
+export interface DingtalkAppIdentity {
+  clientId: string;
+}
+
+export interface DingtalkConfigCheckResult {
+  state: ChannelSetupState;
+  app: DingtalkAppIdentity | null;
+}
+
+export interface WecomBotIdentity {
+  botId: string;
+}
+
+export interface WecomConfigCheckResult {
+  state: ChannelSetupState;
+  bot: WecomBotIdentity | null;
+}
+
 interface FeishuValidationOptions {
   timeoutMs?: number;
 }
 
 const DEFAULT_FEISHU_VALIDATION_TIMEOUT_MS = VALIDATION_TIMEOUTS.feishuDefault;
 const DEFAULT_WEIXIN_VALIDATION_TIMEOUT_MS = VALIDATION_TIMEOUTS.weixinDefault;
+const DEFAULT_SLACK_VALIDATION_TIMEOUT_MS = VALIDATION_TIMEOUTS.slackDefault;
+const DEFAULT_DISCORD_VALIDATION_TIMEOUT_MS = VALIDATION_TIMEOUTS.discordDefault;
+const DEFAULT_DINGTALK_VALIDATION_TIMEOUT_MS = VALIDATION_TIMEOUTS.dingtalkDefault;
+const DEFAULT_WECOM_VALIDATION_TIMEOUT_MS = VALIDATION_TIMEOUTS.wecomDefault;
 
 function feishuValidationLog(appId: string, message: string): void {
   writeScopedLog('feishu-validate', `app=${appId} ${message}`, { level: 'debug' });
@@ -383,16 +427,246 @@ export async function validateWeixinConfig(
   }
 }
 
+export async function validateSlackConfig(
+  botToken: string | null | undefined,
+  appToken: string | null | undefined,
+  options: { timeoutMs?: number } = {},
+): Promise<SlackConfigCheckResult> {
+  const trimmedBot = String(botToken || '').trim();
+  const trimmedApp = String(appToken || '').trim();
+  const timeoutMs = Number.isFinite(options.timeoutMs) && Number(options.timeoutMs) > 0
+    ? Math.round(Number(options.timeoutMs))
+    : DEFAULT_SLACK_VALIDATION_TIMEOUT_MS;
+
+  if (!trimmedBot && !trimmedApp) {
+    return {
+      state: missingChannelState('slack', 'Slack credentials are not configured.'),
+      bot: null,
+    };
+  }
+  if (!trimmedBot || !trimmedApp) {
+    return {
+      state: invalidChannelState('slack', 'Slack requires both Bot Token (xoxb-) and App-Level Token (xapp-).'),
+      bot: null,
+    };
+  }
+  if (!trimmedBot.startsWith('xoxb-')) {
+    return {
+      state: invalidChannelState('slack', 'Slack Bot Token must start with "xoxb-".'),
+      bot: null,
+    };
+  }
+  if (!trimmedApp.startsWith('xapp-')) {
+    return {
+      state: invalidChannelState('slack', 'Slack App-Level Token must start with "xapp-".'),
+      bot: null,
+    };
+  }
+
+  try {
+    const data: any = await withTimeout(
+      fetch('https://slack.com/api/auth.test', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${trimmedBot}`,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: '',
+      }).then(r => r.json()),
+      timeoutMs,
+      'Slack auth.test',
+    );
+    if (!data?.ok) {
+      const detail = String(data?.error || 'credentials rejected');
+      return {
+        state: invalidChannelState('slack', `Slack rejected these credentials: ${detail}`),
+        bot: null,
+      };
+    }
+    const bot: SlackBotIdentity = {
+      userId: String(data.user_id || ''),
+      team: data.team ? String(data.team) : null,
+      username: data.user ? String(data.user) : null,
+    };
+    const identity = bot.username
+      ? `@${bot.username}${bot.team ? ` (${bot.team})` : ''}`
+      : `Slack bot ${bot.userId} verified.`;
+    return { state: readyChannelState('slack', identity), bot };
+  } catch (err) {
+    if (err instanceof ValidationTimeoutError) {
+      return { state: errorChannelState('slack', `Failed to reach Slack: ${err.message}`), bot: null };
+    }
+    return {
+      state: errorChannelState('slack', `Failed to reach Slack: ${err instanceof Error ? err.message : String(err)}`),
+      bot: null,
+    };
+  }
+}
+
+export async function validateDiscordConfig(
+  botToken: string | null | undefined,
+  options: { timeoutMs?: number } = {},
+): Promise<DiscordConfigCheckResult> {
+  const trimmed = String(botToken || '').trim();
+  const timeoutMs = Number.isFinite(options.timeoutMs) && Number(options.timeoutMs) > 0
+    ? Math.round(Number(options.timeoutMs))
+    : DEFAULT_DISCORD_VALIDATION_TIMEOUT_MS;
+
+  if (!trimmed) {
+    return {
+      state: missingChannelState('discord', 'Discord bot token is not configured.'),
+      bot: null,
+    };
+  }
+
+  try {
+    const resp: any = await withTimeout(
+      fetch('https://discord.com/api/v10/users/@me', {
+        method: 'GET',
+        headers: { Authorization: `Bot ${trimmed}` },
+      }).then(async r => ({ status: r.status, body: await r.json().catch(() => ({})) })),
+      timeoutMs,
+      'Discord users/@me',
+    );
+    if (resp.status !== 200) {
+      const detail = resp.body?.message || `HTTP ${resp.status}`;
+      return {
+        state: invalidChannelState('discord', `Discord rejected this token: ${detail}`),
+        bot: null,
+      };
+    }
+    const body = resp.body || {};
+    const bot: DiscordBotIdentity = {
+      userId: String(body.id || ''),
+      username: String(body.username || ''),
+      applicationId: body.application_id ? String(body.application_id) : null,
+    };
+    const identity = bot.username
+      ? `@${bot.username}${bot.userId ? ` (id=${bot.userId.slice(-6)})` : ''}`
+      : 'Discord bot verified.';
+    return { state: readyChannelState('discord', identity), bot };
+  } catch (err) {
+    if (err instanceof ValidationTimeoutError) {
+      return { state: errorChannelState('discord', `Failed to reach Discord: ${err.message}`), bot: null };
+    }
+    return {
+      state: errorChannelState('discord', `Failed to reach Discord: ${err instanceof Error ? err.message : String(err)}`),
+      bot: null,
+    };
+  }
+}
+
+export async function validateDingtalkConfig(
+  clientId: string | null | undefined,
+  clientSecret: string | null | undefined,
+  options: { timeoutMs?: number } = {},
+): Promise<DingtalkConfigCheckResult> {
+  const trimmedId = String(clientId || '').trim();
+  const trimmedSecret = String(clientSecret || '').trim();
+  const timeoutMs = Number.isFinite(options.timeoutMs) && Number(options.timeoutMs) > 0
+    ? Math.round(Number(options.timeoutMs))
+    : DEFAULT_DINGTALK_VALIDATION_TIMEOUT_MS;
+
+  if (!trimmedId && !trimmedSecret) {
+    return {
+      state: missingChannelState('dingtalk', 'DingTalk credentials are not configured.'),
+      app: null,
+    };
+  }
+  if (!trimmedId || !trimmedSecret) {
+    return {
+      state: invalidChannelState('dingtalk', 'DingTalk requires both Client ID (AppKey) and Client Secret (AppSecret).'),
+      app: null,
+    };
+  }
+
+  try {
+    const url = `https://oapi.dingtalk.com/gettoken?appkey=${encodeURIComponent(trimmedId)}&appsecret=${encodeURIComponent(trimmedSecret)}`;
+    const data: any = await withTimeout(
+      fetch(url, { method: 'GET' }).then(r => r.json()),
+      timeoutMs,
+      'DingTalk gettoken',
+    );
+    if (typeof data?.errcode === 'number' && data.errcode !== 0) {
+      const detail = String(data.errmsg || 'credentials rejected');
+      return {
+        state: invalidChannelState('dingtalk', `DingTalk rejected these credentials: ${detail}`),
+        app: null,
+      };
+    }
+    if (!data?.access_token) {
+      return {
+        state: invalidChannelState('dingtalk', 'DingTalk did not return an access token.'),
+        app: null,
+      };
+    }
+    const masked = trimmedId.length > 12
+      ? `${trimmedId.slice(0, 6)}...${trimmedId.slice(-4)}`
+      : trimmedId;
+    return {
+      state: readyChannelState('dingtalk', `DingTalk app ${masked} verified.`),
+      app: { clientId: trimmedId },
+    };
+  } catch (err) {
+    if (err instanceof ValidationTimeoutError) {
+      return { state: errorChannelState('dingtalk', `Failed to reach DingTalk: ${err.message}`), app: null };
+    }
+    return {
+      state: errorChannelState('dingtalk', `Failed to reach DingTalk: ${err instanceof Error ? err.message : String(err)}`),
+      app: null,
+    };
+  }
+}
+
+export async function validateWecomConfig(
+  botId: string | null | undefined,
+  botSecret: string | null | undefined,
+  _options: { timeoutMs?: number } = {},
+): Promise<WecomConfigCheckResult> {
+  const trimmedId = String(botId || '').trim();
+  const trimmedSecret = String(botSecret || '').trim();
+
+  if (!trimmedId && !trimmedSecret) {
+    return {
+      state: missingChannelState('wecom', 'WeChat Work credentials are not configured.'),
+      bot: null,
+    };
+  }
+  if (!trimmedId || !trimmedSecret) {
+    return {
+      state: invalidChannelState('wecom', 'WeChat Work requires both Bot ID and Bot Secret.'),
+      bot: null,
+    };
+  }
+
+  // The Smart Bot WS endpoint cannot be probed via a simple HTTP request;
+  // we accept the configured credentials and let the websocket subscribe ack
+  // surface real auth errors at runtime. A non-empty pair already covers the
+  // most common configuration mistake.
+  return {
+    state: readyChannelState('wecom', `WeChat Work bot ${trimmedId} configured.`),
+    bot: { botId: trimmedId },
+  };
+}
+
 export async function collectChannelSetupStates(config: Partial<UserConfig>): Promise<ChannelSetupState[]> {
-  const [telegram, feishu, weixin] = await Promise.all([
+  const [telegram, feishu, weixin, slack, discord, dingtalk, wecom] = await Promise.all([
     validateTelegramConfig(config.telegramBotToken, config.telegramAllowedChatIds),
     validateFeishuConfig(config.feishuAppId, config.feishuAppSecret),
     validateWeixinConfig(config.weixinBaseUrl, config.weixinBotToken, config.weixinAccountId),
+    validateSlackConfig(config.slackBotToken, config.slackAppToken),
+    validateDiscordConfig(config.discordBotToken),
+    validateDingtalkConfig(config.dingtalkClientId, config.dingtalkClientSecret),
+    validateWecomConfig(config.wecomBotId, config.wecomBotSecret),
   ]);
 
   return [
     weixin.state,
     telegram.state,
     feishu.state,
+    slack.state,
+    discord.state,
+    dingtalk.state,
+    wecom.state,
   ];
 }

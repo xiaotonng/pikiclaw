@@ -9,7 +9,7 @@ import type { Agent } from '../../agent/index.js';
 import { USER_CONFIG_SYNC_DEFAULT_INTERVAL_MS } from '../constants.js';
 import { expandTilde } from '../platform.js';
 
-export type ChannelName = 'telegram' | 'feishu' | 'weixin';
+export type ChannelName = 'telegram' | 'feishu' | 'weixin' | 'slack' | 'discord' | 'dingtalk' | 'wecom';
 
 /** MCP server configuration — compatible with .mcp.json standard format. */
 export interface McpServerConfig {
@@ -90,6 +90,18 @@ export interface UserConfig {
   weixinBaseUrl?: string;
   weixinBotToken?: string;
   weixinAccountId?: string;
+  /** Slack — Socket Mode requires both bot token (xoxb-) and app token (xapp-). */
+  slackBotToken?: string;
+  slackAppToken?: string;
+  /** Discord — Bot token from Developer Portal (Bot page). */
+  discordBotToken?: string;
+  /** DingTalk — Stream Mode auth: AppKey (clientId) + AppSecret (clientSecret). */
+  dingtalkClientId?: string;
+  dingtalkClientSecret?: string;
+  /** WeChat Work / 企业微信 智能机器人 — Smart Bot WebSocket auth. */
+  wecomBotId?: string;
+  wecomBotSecret?: string;
+  wecomEndpoint?: string;
   browserEnabled?: boolean;
   browserHeadless?: boolean;
   /** Extension configuration — global MCP servers, OAuth tokens, and skills. */
@@ -134,6 +146,14 @@ const MANAGED_ENV_KEYS = [
   'WEIXIN_BASE_URL',
   'WEIXIN_BOT_TOKEN',
   'WEIXIN_ACCOUNT_ID',
+  'SLACK_BOT_TOKEN',
+  'SLACK_APP_TOKEN',
+  'DISCORD_BOT_TOKEN',
+  'DINGTALK_CLIENT_ID',
+  'DINGTALK_CLIENT_SECRET',
+  'WECOM_BOT_ID',
+  'WECOM_BOT_SECRET',
+  'WECOM_ENDPOINT',
 ] as const;
 const USER_CONFIG_DIRNAME = '.pikiclaw';
 const USER_CONFIG_FILENAME = 'setting.json';
@@ -282,6 +302,14 @@ function buildManagedEnv(config: Partial<UserConfig>): Record<(typeof MANAGED_EN
     WEIXIN_BASE_URL: String(config.weixinBaseUrl || '').trim(),
     WEIXIN_BOT_TOKEN: String(config.weixinBotToken || '').trim(),
     WEIXIN_ACCOUNT_ID: String(config.weixinAccountId || '').trim(),
+    SLACK_BOT_TOKEN: String(config.slackBotToken || '').trim(),
+    SLACK_APP_TOKEN: String(config.slackAppToken || '').trim(),
+    DISCORD_BOT_TOKEN: String(config.discordBotToken || '').trim(),
+    DINGTALK_CLIENT_ID: String(config.dingtalkClientId || '').trim(),
+    DINGTALK_CLIENT_SECRET: String(config.dingtalkClientSecret || '').trim(),
+    WECOM_BOT_ID: String(config.wecomBotId || '').trim(),
+    WECOM_BOT_SECRET: String(config.wecomBotSecret || '').trim(),
+    WECOM_ENDPOINT: String(config.wecomEndpoint || '').trim(),
   };
 }
 

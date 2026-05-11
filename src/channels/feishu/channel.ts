@@ -21,6 +21,7 @@ import {
   sleep,
 } from '../base.js';
 import { FEISHU_LIMITS } from '../../core/constants.js';
+import { ChannelHealth } from '../health.js';
 import { adaptMarkdownForFeishu } from './markdown.js';
 import { writeScopedLog, type LogLevel } from '../../core/logging.js';
 
@@ -366,7 +367,14 @@ class FeishuChannel extends Channel {
   async listen(): Promise<void> {
     this.running = true;
 
-    let retryDelayMs = FEISHU_LIMITS.wsStartRetryInitialDelay;
+    const health = new ChannelHealth({
+      label: 'Feishu',
+      opAction: 'WS start',
+      initialDelayMs: FEISHU_LIMITS.wsStartRetryInitialDelay,
+      maxDelayMs: FEISHU_WS_START_RETRY_MAX_DELAY_MS,
+      sustainedFailureHint: 'verify feishuAppId / feishuAppSecret in setting.json',
+      log: (msg, level) => this._log(msg, level),
+    });
     while (this.running) {
       const sdkDomain = this.domain.includes('larksuite.com')
         ? lark.Domain.Lark
@@ -386,15 +394,14 @@ class FeishuChannel extends Channel {
       try {
         await this.wsClient.start({ eventDispatcher: this.eventDispatcher });
         this._debug('[ws] WSClient started, listening for events');
+        health.recordSuccess();
         break;
       } catch (err) {
         try { this.wsClient.close({ force: true }); } catch {}
         this.wsClient = null;
         if (!this.running) return;
         if (!isRetryableWsStartError(err)) throw err;
-        this._log(`[ws] start failed: ${describeError(err)} — retrying in ${Math.ceil(retryDelayMs / 1000)}s`, 'warn');
-        await sleep(retryDelayMs);
-        retryDelayMs = Math.min(retryDelayMs * 2, FEISHU_WS_START_RETRY_MAX_DELAY_MS);
+        await sleep(health.recordFailure(err));
       }
     }
 

@@ -51,6 +51,12 @@ export interface AgentNativeConfig {
 export interface AgentRuntimeStatus extends AgentInfo {
   selectedModel: string | null;
   selectedEffort: string | null;
+  /** Native-auth model/effort, independent of any active BYOK Profile.
+   *  AgentTab uses these when the user toggles a card back to "Native"
+   *  provider, so a previously-active BYOK model id doesn't leak in as the
+   *  initial value of the native-mode model field. */
+  nativeSelectedModel?: string | null;
+  nativeSelectedEffort?: string | null;
   isDefault: boolean;
   models: ModelInfo[];
   usage: UsageResult | null;
@@ -58,6 +64,15 @@ export interface AgentRuntimeStatus extends AgentInfo {
   nativeConfig?: AgentNativeConfig | null;
   /** Static driver capability flags, e.g. fork support. */
   capabilities?: { fork?: boolean; modelSwitch?: boolean };
+  /** BYOK provider name (e.g. "OpenRouter") when this agent has a Profile
+   *  bound; null otherwise. Drives the dashboard "via <provider>" tag on
+   *  turns where the bound model id matches the saved turn's model. */
+  byokProviderName?: string | null;
+  /** Cached model list of the BYOK-bound provider (from `/models`). Surfaced
+   *  separately from the native `models` field so AgentTab can still list the
+   *  CLI's native catalogue when the user previews the "native" provider.
+   *  InputComposer's cascade prefers this when `byokProviderName` is set. */
+  byokModels?: { id: string; alias: string | null }[] | null;
   latestVersion?: string | null;
   updateAvailable?: boolean;
   updateStatus?: string | null;
@@ -73,7 +88,7 @@ export interface AgentStatusResponse {
 export type ChannelStatus = 'ready' | 'missing' | 'invalid' | 'error' | 'checking';
 
 export interface ChannelSetupState {
-  channel: 'telegram' | 'feishu' | 'weixin';
+  channel: 'telegram' | 'feishu' | 'weixin' | 'slack' | 'discord' | 'dingtalk' | 'wecom';
   configured: boolean;
   ready: boolean;
   validated: boolean;
@@ -133,6 +148,14 @@ export interface UserConfig {
   weixinBaseUrl?: string;
   weixinBotToken?: string;
   weixinAccountId?: string;
+  slackBotToken?: string;
+  slackAppToken?: string;
+  discordBotToken?: string;
+  dingtalkClientId?: string;
+  dingtalkClientSecret?: string;
+  wecomBotId?: string;
+  wecomBotSecret?: string;
+  wecomEndpoint?: string;
   channels?: string[];
   browserEnabled?: boolean;
   browserHeadless?: boolean;
@@ -316,6 +339,9 @@ export interface StreamPreviewMeta {
   contextUsedTokens?: number | null;
   contextPercent: number | null;
   subAgents?: StreamSubAgent[];
+  /** BYOK provider name (e.g. "OpenRouter") when the agent is bound to a
+   *  Profile; absent for native-auth turns. Drives the "via <provider>" tag. */
+  providerName?: string | null;
 }
 
 export interface StreamSubAgent {

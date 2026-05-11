@@ -352,7 +352,11 @@ function modelLabel(model: ModelInfo | null | undefined): string {
 }
 
 function defaultNativeModel(agent: AgentRuntimeStatus): string {
-  if (agent.selectedModel) return agent.selectedModel;
+  // Prefer the agent's *native* model surface — `selectedModel` is now
+  // BYOK-overridden when a Profile is bound, so falling through to it would
+  // seed the native editor with a BYOK model id that the CLI can't run.
+  if (agent.nativeSelectedModel) return agent.nativeSelectedModel;
+  if (agent.nativeConfig?.model) return agent.nativeConfig.model;
   if (agent.models.length) return agent.models[0].id;
   return '';
 }
@@ -633,7 +637,11 @@ function AgentInlineConfig({
               const next: ConfigDraft = { ...d, providerId: v, modelId: '', modelMode: 'list' };
               if (v === NATIVE_PROVIDER_VALUE) {
                 next.modelId = defaultNativeModel(agentStatus);
-                next.effort = agentStatus.nativeConfig?.effort || agentStatus.selectedEffort || '';
+                // Same reasoning as defaultNativeModel: don't carry the BYOK
+                // profile's effort into native mode.
+                next.effort = agentStatus.nativeSelectedEffort
+                  || agentStatus.nativeConfig?.effort
+                  || '';
               }
               return next;
             })}

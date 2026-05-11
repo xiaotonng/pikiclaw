@@ -191,6 +191,7 @@ export function buildStreamPreviewMeta(s: {
   inputTokens: number | null; outputTokens: number | null;
   cachedInputTokens: number | null; cacheCreationInputTokens: number | null;
   contextWindow: number | null; contextUsedTokens?: number | null;
+  byokProviderName?: string | null;
   subAgents?: ReadonlyMap<string, StreamSubAgent> | null;
 }): StreamPreviewMeta {
   const ctx = computeContext(s);
@@ -199,6 +200,7 @@ export function buildStreamPreviewMeta(s: {
     cachedInputTokens: s.cachedInputTokens,
     contextUsedTokens: ctx.contextUsedTokens, contextPercent: ctx.contextPercent,
   };
+  if (s.byokProviderName) meta.providerName = s.byokProviderName;
   if (s.subAgents && s.subAgents.size > 0) meta.subAgents = Array.from(s.subAgents.values());
   return meta;
 }

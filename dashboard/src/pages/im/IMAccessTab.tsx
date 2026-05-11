@@ -11,9 +11,13 @@ type IMAccessTabProps = {
   onOpenWeixin: () => void;
   onOpenTelegram: () => void;
   onOpenFeishu: () => void;
+  onOpenSlack: () => void;
+  onOpenDiscord: () => void;
+  onOpenDingtalk: () => void;
+  onOpenWeCom: () => void;
 };
 
-type ChannelKey = 'weixin' | 'telegram' | 'feishu';
+type ChannelKey = 'weixin' | 'telegram' | 'feishu' | 'slack' | 'discord' | 'dingtalk' | 'wecom';
 
 type ChannelRowMeta = {
   key: ChannelKey;
@@ -46,6 +50,10 @@ type CopyPack = {
   noWeixin: string;
   noTelegram: string;
   noFeishu: string;
+  noSlack: string;
+  noDiscord: string;
+  noDingtalk: string;
+  noWeCom: string;
   pendingValidation: string;
   connectedReady: string;
   validationFailed: string;
@@ -73,6 +81,10 @@ function getCopy(locale: Locale): CopyPack {
       noWeixin: '尚未登录微信账号',
       noTelegram: '未配置 Bot Token',
       noFeishu: '未配置 App ID 与应用凭证',
+      noSlack: '未配置 Bot Token 与 App-Level Token',
+      noDiscord: '未配置 Bot Token',
+      noDingtalk: '未配置 AppKey/AppSecret',
+      noWeCom: '未配置智能机器人 Bot ID 与 Secret',
       pendingValidation: '凭证已保存，等待验证。',
       connectedReady: '机器人已可正常接收消息。',
       validationFailed: '校验失败，请检查凭证或网络。',
@@ -99,6 +111,10 @@ function getCopy(locale: Locale): CopyPack {
     noWeixin: 'Weixin account not connected yet',
     noTelegram: 'Bot token not configured',
     noFeishu: 'App ID and credentials not configured',
+    noSlack: 'Bot Token and App-Level Token not configured',
+    noDiscord: 'Bot Token not configured',
+    noDingtalk: 'AppKey / AppSecret not configured',
+    noWeCom: 'Smart Bot ID and Secret not configured',
     pendingValidation: 'Credentials are saved and waiting for validation.',
     connectedReady: 'This channel can receive messages.',
     validationFailed: 'Validation failed. Check credentials or network.',
@@ -156,10 +172,38 @@ function buildChannelSummary(key: ChannelKey, config: Partial<UserConfig>, copy:
       : copy.tokenSaved;
   }
 
-  const appId = getConfigValue(config, 'feishuAppId');
-  const appSecret = getConfigValue(config, 'feishuAppSecret');
-  if (!appId || !appSecret) return copy.noFeishu;
-  return `App ID ${maskValue(appId)} · ${copy.appCredentialsSaved}`;
+  if (key === 'feishu') {
+    const appId = getConfigValue(config, 'feishuAppId');
+    const appSecret = getConfigValue(config, 'feishuAppSecret');
+    if (!appId || !appSecret) return copy.noFeishu;
+    return `App ID ${maskValue(appId)} · ${copy.appCredentialsSaved}`;
+  }
+
+  if (key === 'slack') {
+    const bot = getConfigValue(config, 'slackBotToken');
+    const app = getConfigValue(config, 'slackAppToken');
+    if (!bot || !app) return copy.noSlack;
+    return `Bot ${maskValue(bot, 6, 4)} · App ${maskValue(app, 6, 4)}`;
+  }
+
+  if (key === 'discord') {
+    const token = getConfigValue(config, 'discordBotToken');
+    if (!token) return copy.noDiscord;
+    return `${copy.tokenSaved} · ${maskValue(token, 6, 4)}`;
+  }
+
+  if (key === 'dingtalk') {
+    const id = getConfigValue(config, 'dingtalkClientId');
+    const secret = getConfigValue(config, 'dingtalkClientSecret');
+    if (!id || !secret) return copy.noDingtalk;
+    return `AppKey ${maskValue(id, 4, 4)} · ${copy.appCredentialsSaved}`;
+  }
+
+  // wecom
+  const botId = getConfigValue(config, 'wecomBotId');
+  const botSecret = getConfigValue(config, 'wecomBotSecret');
+  if (!botId || !botSecret) return copy.noWeCom;
+  return `Bot ${maskValue(botId, 4, 4)} · ${copy.appCredentialsSaved}`;
 }
 
 function getStatusPresentation(
@@ -213,7 +257,8 @@ function ChannelRow({
   return (
     <SettingRowCard>
       <SettingRowLead
-        icon={<BrandIcon brand={meta.key} size={22} />}
+        icon={<BrandIcon brand={meta.key} size={32} className="rounded-md" />}
+        iconWrap={false}
         title={meta.title}
         subtitle={meta.subtitle}
       />
@@ -244,11 +289,24 @@ function ChannelRow({
   );
 }
 
-export function IMAccessTab({
-  onOpenWeixin,
-  onOpenTelegram,
-  onOpenFeishu,
-}: IMAccessTabProps) {
+const CHANNEL_DEFS: ReadonlyArray<{
+  key: ChannelKey;
+  titleZh: string;
+  titleEn: string;
+  subtitleZh: string;
+  subtitleEn: string;
+  actionProp: keyof Pick<IMAccessTabProps, 'onOpenWeixin' | 'onOpenTelegram' | 'onOpenFeishu' | 'onOpenSlack' | 'onOpenDiscord' | 'onOpenDingtalk' | 'onOpenWeCom'>;
+}> = [
+  { key: 'weixin', titleZh: '微信', titleEn: 'Weixin', subtitleZh: '二维码登录与账号接入', subtitleEn: 'QR login and account routing', actionProp: 'onOpenWeixin' },
+  { key: 'telegram', titleZh: 'Telegram', titleEn: 'Telegram', subtitleZh: 'Bot Token 与 chat allowlist', subtitleEn: 'Bot token and chat allowlist', actionProp: 'onOpenTelegram' },
+  { key: 'feishu', titleZh: '飞书', titleEn: 'Lark / Feishu', subtitleZh: '应用凭证与机器人身份', subtitleEn: 'App credentials and bot identity', actionProp: 'onOpenFeishu' },
+  { key: 'slack', titleZh: 'Slack', titleEn: 'Slack', subtitleZh: 'Socket Mode (xoxb / xapp)', subtitleEn: 'Socket Mode (xoxb / xapp)', actionProp: 'onOpenSlack' },
+  { key: 'discord', titleZh: 'Discord', titleEn: 'Discord', subtitleZh: 'Gateway 长连接 (需开启 Message Content Intent)', subtitleEn: 'Gateway WebSocket (requires Message Content Intent)', actionProp: 'onOpenDiscord' },
+  { key: 'dingtalk', titleZh: '钉钉', titleEn: 'DingTalk', subtitleZh: 'Stream 长连接 (AppKey / AppSecret)', subtitleEn: 'Stream Mode (AppKey / AppSecret)', actionProp: 'onOpenDingtalk' },
+  { key: 'wecom', titleZh: '企业微信', titleEn: 'WeCom', subtitleZh: '智能机器人 WebSocket (Bot ID / Secret)', subtitleEn: 'Smart Bot WebSocket (Bot ID / Secret)', actionProp: 'onOpenWeCom' },
+];
+
+export function IMAccessTab(props: IMAccessTabProps) {
   const state = useStore(s => s.state);
   const locale = useStore(s => s.locale);
   const copy = getCopy(locale);
@@ -257,16 +315,17 @@ export function IMAccessTab({
   const config = state?.config || {};
 
   const rows = useMemo<ChannelRowMeta[]>(() => {
-    const weixin = channels.find(channel => channel.channel === 'weixin') || null;
-    const telegram = channels.find(channel => channel.channel === 'telegram') || null;
-    const feishu = channels.find(channel => channel.channel === 'feishu') || null;
+    return CHANNEL_DEFS.map(def => {
+      const setup = channels.find(channel => channel.channel === def.key) || null;
+      const title = locale === 'zh-CN' ? def.titleZh : def.titleEn;
+      const subtitle = locale === 'zh-CN' ? def.subtitleZh : def.subtitleEn;
+      const onAction = props[def.actionProp];
 
-    if (loading) {
-      return [
-        {
-          key: 'weixin',
-          title: 'Weixin',
-          subtitle: locale === 'zh-CN' ? '二维码登录与账号接入' : 'QR login and account routing',
+      if (loading) {
+        return {
+          key: def.key,
+          title,
+          subtitle,
           channel: null,
           loading: true,
           summary: copy.loading,
@@ -276,77 +335,23 @@ export function IMAccessTab({
           statusDescription: copy.loading,
           actionLabel: copy.loading,
           actionDisabled: true,
-          onAction: onOpenWeixin,
-        },
-        {
-          key: 'telegram',
-          title: 'Telegram',
-          subtitle: locale === 'zh-CN' ? 'Bot Token 与 chat allowlist' : 'Bot token and chat allowlist',
-          channel: null,
-          loading: true,
-          summary: copy.loading,
-          summaryLabel: copy.summary,
-          statusLabel: copy.loading,
-          statusVariant: 'muted',
-          statusDescription: copy.loading,
-          actionLabel: copy.loading,
-          actionDisabled: true,
-          onAction: onOpenTelegram,
-        },
-        {
-          key: 'feishu',
-          title: 'Feishu',
-          subtitle: locale === 'zh-CN' ? '应用凭证与机器人身份' : 'App credentials and bot identity',
-          channel: null,
-          loading: true,
-          summary: copy.loading,
-          summaryLabel: copy.summary,
-          statusLabel: copy.loading,
-          statusVariant: 'muted',
-          statusDescription: copy.loading,
-          actionLabel: copy.loading,
-          actionDisabled: true,
-          onAction: onOpenFeishu,
-        },
-      ];
-    }
+          onAction,
+        };
+      }
 
-    return [
-      {
-        key: 'weixin',
-        title: 'Weixin',
-        subtitle: locale === 'zh-CN' ? '二维码登录与账号接入' : 'QR login and account routing',
-        channel: weixin,
-        summary: buildChannelSummary('weixin', config, copy),
+      return {
+        key: def.key,
+        title,
+        subtitle,
+        channel: setup,
+        summary: buildChannelSummary(def.key, config, copy),
         summaryLabel: copy.summary,
-        ...getStatusPresentation(weixin, copy),
+        ...getStatusPresentation(setup, copy),
         actionDisabled: false,
-        onAction: onOpenWeixin,
-      },
-      {
-        key: 'telegram',
-        title: 'Telegram',
-        subtitle: locale === 'zh-CN' ? 'Bot Token 与 chat allowlist' : 'Bot token and chat allowlist',
-        channel: telegram,
-        summary: buildChannelSummary('telegram', config, copy),
-        summaryLabel: copy.summary,
-        ...getStatusPresentation(telegram, copy),
-        actionDisabled: false,
-        onAction: onOpenTelegram,
-      },
-      {
-        key: 'feishu',
-        title: 'Feishu',
-        subtitle: locale === 'zh-CN' ? '应用凭证与机器人身份' : 'App credentials and bot identity',
-        channel: feishu,
-        summary: buildChannelSummary('feishu', config, copy),
-        summaryLabel: copy.summary,
-        ...getStatusPresentation(feishu, copy),
-        actionDisabled: false,
-        onAction: onOpenFeishu,
-      },
-    ];
-  }, [channels, config, copy, loading, locale, onOpenFeishu, onOpenTelegram, onOpenWeixin]);
+        onAction,
+      };
+    });
+  }, [channels, config, copy, loading, locale, props]);
 
   return (
     <div className="animate-in space-y-3">

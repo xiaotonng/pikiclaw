@@ -90,6 +90,12 @@ export function footerStatusSymbol(status: FooterStatus): string {
 export interface FooterDecorations {
   model?: string | null;
   effort?: string | null;
+  /**
+   * BYOK provider name (e.g. "OpenRouter"). Optional fallback for callers
+   * that don't pipe `meta.providerName`; preview-meta-based renders should
+   * not need to set this explicitly.
+   */
+  provider?: string | null;
 }
 
 export interface FooterParts {
@@ -133,6 +139,12 @@ export function formatFooterParts(
   const ctx = contextPercent ?? meta?.contextPercent ?? null;
   if (ctx != null) runtimeParts.push(`${ctx}%`);
   runtimeParts.push(fmtCompactUptime(Math.max(0, Math.round(elapsedMs))));
+  // BYOK attribution — tells the user the turn is being routed through a
+  // third-party provider rather than the agent CLI's native auth path.
+  // Tucked at the end of the runtime line so it doesn't crowd the (often
+  // long) identity line on narrow IM clients.
+  const providerName = meta?.providerName ?? decorations?.provider ?? null;
+  if (providerName) runtimeParts.push(`via ${providerName}`);
 
   return {
     identity: identityParts.join(' · '),

@@ -132,6 +132,30 @@ export const api = {
       { baseUrl, botToken, accountId },
       opts,
     ),
+  validateSlackConfig: (botToken: string, appToken: string, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; error?: string | null; bot?: { userId: string; team: string | null; username: string | null } | null }>(
+      '/api/validate-slack-config',
+      { botToken, appToken },
+      opts,
+    ),
+  validateDiscordConfig: (botToken: string, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; error?: string | null; bot?: { userId: string; username: string; applicationId: string | null } | null }>(
+      '/api/validate-discord-config',
+      { botToken },
+      opts,
+    ),
+  validateDingtalkConfig: (clientId: string, clientSecret: string, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; error?: string | null; app?: { clientId: string } | null }>(
+      '/api/validate-dingtalk-config',
+      { clientId, clientSecret },
+      opts,
+    ),
+  validateWecomConfig: (botId: string, botSecret: string, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; error?: string | null; bot?: { botId: string } | null }>(
+      '/api/validate-wecom-config',
+      { botId, botSecret },
+      opts,
+    ),
   startWeixinLogin: (baseUrl: string, opts?: ApiRequestOptions) =>
     post<WeixinLoginStartResult>(
       '/api/weixin-login/start',

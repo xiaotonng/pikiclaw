@@ -10,7 +10,7 @@ import { execSync, spawn } from 'node:child_process';
 import { getActiveUserConfig, loadWorkspaces, onUserConfigChange, resolveUserWorkdir, setUserWorkdir, updateUserConfig } from '../core/config/user-config.js';
 import {
   doStream, ensureManagedSession, findManagedThreadSession, findThreadSessionAcrossAgents, getSessionStoredConfig, getUsage, initializeProjectSkills, listAgents, resolveAgentModels, listSkills, stageSessionFiles,
-  reconcileOrphanedRunningSessions, getAgentBoundModelId, setAgentBoundModelId,
+  reconcileOrphanedRunningSessions, getAgentBoundModelId, setAgentBoundModelId, collapseSkillPrompt,
   type Agent, type CodexCumulativeUsage, type StreamOpts, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type StreamSubAgent, type SessionInfo, type UsageResult,
   type AgentInteraction, type CodexTurnControl,
   type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult,
@@ -356,10 +356,12 @@ export class Bot {
   /** Attach per-queued-task prompts by looking up live RunningTask records. */
   private enrichSnapshot(snap: StreamSnapshot): StreamSnapshot {
     if (!snap.queuedTaskIds?.length) return snap;
-    const queuedTasks = snap.queuedTaskIds.map(taskId => ({
-      taskId,
-      prompt: this.activeTasks.get(taskId)?.prompt || '',
-    }));
+    const queuedTasks = snap.queuedTaskIds.map(taskId => {
+      const raw = this.activeTasks.get(taskId)?.prompt || '';
+      // Show `/skillname` instead of the long expansion we synthesized for the
+      // agent — matches what the user actually typed in the queued row.
+      return { taskId, prompt: collapseSkillPrompt(raw) ?? raw };
+    });
     return { ...snap, queuedTasks };
   }
 

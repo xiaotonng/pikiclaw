@@ -8,10 +8,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { getAgentInstallCommand, getAgentLabel, getAgentPackage } from '../../agent/npm.js';
 import { loadUserConfig, saveUserConfig, applyUserConfig, type UserConfig } from '../../core/config/user-config.js';
-import { resolveAgentModels, setAgentBoundModelId, type AgentDetectOptions, type UsageResult } from '../../agent/index.js';
+import { setAgentBoundModelId, type AgentDetectOptions, type UsageResult } from '../../agent/index.js';
 import { getAgentUpdateState, checkAgentLatestVersion, manualAgentUpdate } from '../../agent/auto-update.js';
 import type { Agent } from '../../agent/index.js';
 import { getDriver, getDriverCapabilities } from '../../agent/driver.js';
+import {
+  getActiveProfile, getProvider,
+  peekProviderModelList, prefetchProviderModels,
+} from '../../model/index.js';
 import { DASHBOARD_TIMEOUTS } from '../../core/constants.js';
 import { withTimeoutFallback } from '../../core/utils.js';
 import { runtime } from '../runtime.js';
@@ -168,9 +172,16 @@ async function buildAgentStatusResponse(config = loadUserConfig(), agentOptions:
         }
         const modelFallback = runtimeSelectedModel ? [{ id: runtimeSelectedModel, alias: null }] : [];
         const cachedUsage = driver.getUsage({ agent: agentId, model: runtimeSelectedModel });
+        // The dashboard agent card lets the user *edit* the binding — when
+        // they toggle the provider to "Native", the model field must show
+        // the agent CLI's own catalogue, not the provider's. We deliberately
+        // call the driver's `listModels` directly (bypassing
+        // `resolveAgentModels`'s BYOK substitution) so `models` is always the
+        // native list; the BYOK catalogue is exposed separately as
+        // `byokModels` below.
         const [resolvedModels, resolvedUsage] = await Promise.all([
           withTimeoutFallback(
-            resolveAgentModels(agentId, { workdir, currentModel: runtimeSelectedModel }).then(result => dedupeModels([
+            driver.listModels({ workdir, currentModel: runtimeSelectedModel }).then(result => dedupeModels([
               ...modelFallback,
               ...result.models,
             ])),
@@ -193,23 +204,60 @@ async function buildAgentStatusResponse(config = loadUserConfig(), agentOptions:
       }
     }
 
-    // Effective model/effort surfaced to the UI:
-    //   1) explicit pikiclaw runtime override wins
-    //   2) otherwise fall back to the driver's native config (e.g. ~/.hermes/config.yaml)
-    //   3) otherwise null
-    const selectedModel = runtimeSelectedModel || nativeConfig?.model || null;
-    const selectedEffort = runtimeSelectedEffort || nativeConfig?.effort || null;
-
     const updateState = getAgentUpdateState(agentId);
+
+    // BYOK binding — when an active Profile exists, it overrides the native
+    // model/effort surfaces. Otherwise the values fall through to the user's
+    // runtime override and then to the driver's native config.
+    const activeProfile = getActiveProfile(agentId);
+    const byokProvider = activeProfile ? getProvider(activeProfile.providerId) : null;
+    const byokProviderName = byokProvider?.name || null;
+
+    // Native model/effort — what the user would run under the agent CLI's
+    // own auth, independent of any active BYOK Profile. AgentTab uses these
+    // as defaults when the user toggles a card's provider back to "Native".
+    const nativeSelectedModel = runtimeSelectedModel || nativeConfig?.model || null;
+    const nativeSelectedEffort = runtimeSelectedEffort || nativeConfig?.effort || null;
+    // The BYOK-bound model is what the agent will ACTUALLY run (the injector
+    // overrides `--model`/codex `model` at spawn). Surface it everywhere the
+    // UI quotes "current model" — the InputComposer pill, the cascade label,
+    // the agent card. Falling back to the native values when no Profile is
+    // bound preserves the existing native-auth path.
+    const selectedModel = activeProfile?.modelId || nativeSelectedModel;
+    const selectedEffort = activeProfile?.effort || nativeSelectedEffort;
+
+    // Likewise, the InputComposer cascade should list the bound provider's
+    // catalogue — those are the models the agent can actually serve through
+    // BYOK, not the native CLI's hardcoded list. We expose it as a SEPARATE
+    // `byokModels` field rather than overwriting `models`, because AgentTab's
+    // provider/model row falls back to `models` whenever the user temporarily
+    // switches the editor to the native provider — we mustn't silently leak
+    // BYOK ids into that view. Read from the provider-models cache
+    // synchronously; miss triggers a background refresh and we degrade to the
+    // bound model id alone so the user can at least see it selected.
+    let byokModels: { id: string; alias: string | null }[] | null = null;
+    if (activeProfile && byokProvider) {
+      const cachedList = peekProviderModelList(byokProvider.id);
+      if (cachedList && cachedList.length) {
+        byokModels = cachedList.map(info => ({ id: info.id, alias: info.name || null }));
+      } else {
+        prefetchProviderModels(byokProvider.id);
+        byokModels = [{ id: activeProfile.modelId, alias: null }];
+      }
+    }
 
     return {
       ...agentState,
       selectedModel,
       selectedEffort,
+      nativeSelectedModel,
+      nativeSelectedEffort,
       isDefault: agentId === defaultAgent,
       models,
       usage,
       nativeConfig,
+      byokProviderName,
+      byokModels,
       capabilities: getDriverCapabilities(agentId),
       latestVersion: updateState?.latestVersion || null,
       updateAvailable: updateState?.updateAvailable || false,

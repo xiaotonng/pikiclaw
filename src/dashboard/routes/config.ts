@@ -10,7 +10,15 @@ import { spawn, spawnSync } from 'node:child_process';
 import { loadUserConfig, saveUserConfig, applyUserConfig, hasUserConfigFile } from '../../core/config/user-config.js';
 import { expandTilde } from '../../core/platform.js';
 import { isSetupReady } from '../../cli/onboarding.js';
-import { validateFeishuConfig, validateTelegramConfig, validateWeixinConfig } from '../../core/config/validation.js';
+import {
+  validateDingtalkConfig,
+  validateDiscordConfig,
+  validateFeishuConfig,
+  validateSlackConfig,
+  validateTelegramConfig,
+  validateWecomConfig,
+  validateWeixinConfig,
+} from '../../core/config/validation.js';
 import { resolveGuiIntegrationConfig } from '../../agent/mcp/bridge.js';
 import {
   normalizeWeixinBaseUrl,
@@ -251,6 +259,50 @@ app.post('/api/validate-weixin-config', async (c) => {
     error: result.state.ready ? null : result.state.detail,
     account: result.account,
     normalizedBaseUrl: result.normalizedBaseUrl,
+  });
+});
+
+// Validate Slack credentials
+app.post('/api/validate-slack-config', async (c) => {
+  const body = await c.req.json();
+  const result = await validateSlackConfig(body.botToken || '', body.appToken || '');
+  return c.json({
+    ok: result.state.ready,
+    error: result.state.ready ? null : result.state.detail,
+    bot: result.bot,
+  });
+});
+
+// Validate Discord credentials
+app.post('/api/validate-discord-config', async (c) => {
+  const body = await c.req.json();
+  const result = await validateDiscordConfig(body.botToken || '');
+  return c.json({
+    ok: result.state.ready,
+    error: result.state.ready ? null : result.state.detail,
+    bot: result.bot,
+  });
+});
+
+// Validate DingTalk credentials
+app.post('/api/validate-dingtalk-config', async (c) => {
+  const body = await c.req.json();
+  const result = await validateDingtalkConfig(body.clientId || '', body.clientSecret || '');
+  return c.json({
+    ok: result.state.ready,
+    error: result.state.ready ? null : result.state.detail,
+    app: result.app,
+  });
+});
+
+// Validate WeChat Work (企业微信) credentials
+app.post('/api/validate-wecom-config', async (c) => {
+  const body = await c.req.json();
+  const result = await validateWecomConfig(body.botId || '', body.botSecret || '');
+  return c.json({
+    ok: result.state.ready,
+    error: result.state.ready ? null : result.state.detail,
+    bot: result.bot,
   });
 });
 

@@ -86,6 +86,7 @@ export {
 // ── Re-export: skills ───────────────────────────────────────────────────────
 export {
   getProjectSkillPaths, initializeProjectSkills, listSkills, getGlobalSkillsRoot,
+  collapseSkillPrompt,
   type ProjectSkillPaths, type SkillInfo, type SkillListResult, type SkillScope,
 } from './skills.js';
 

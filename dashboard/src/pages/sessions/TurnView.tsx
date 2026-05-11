@@ -10,8 +10,12 @@ import { AssistantMsg } from './AssistantContent';
 import type { MessageBlock, StreamPreviewMeta } from '../../types';
 import type { Turn } from './utils';
 
-export const TurnView = memo(function TurnView({ turn, turnIndex, agent, meta, model, effort, t, onResend, onEdit, onFork }: {
+export const TurnView = memo(function TurnView({ turn, turnIndex, agent, meta, model, effort, providerName, t, onResend, onEdit, onFork }: {
   turn: Turn; turnIndex?: number; agent: string; meta: ReturnType<typeof getAgentMeta>; model?: string | null; effort?: string | null; t: (k: string) => string;
+  /** BYOK provider name shown on the assistant turn header — set when the
+   *  agent is currently bound to a Profile. Saved turns lack this in their
+   *  usage payload, so we accept it from the caller as a session-level prop. */
+  providerName?: string | null;
   onResend?: (text: string) => void;
   onEdit?: (text: string) => void;
   /** When defined, the user-bubble shows a fork action that opens a fork composer scoped to this turn. */
@@ -35,7 +39,7 @@ export const TurnView = memo(function TurnView({ turn, turnIndex, agent, meta, m
           </ReactMarkdown>
         </div>
       )}
-      {turn.assistant && <TurnDivider agent={agent} meta={meta} model={model} effort={effort} previewMeta={turn.assistant.usage ?? null} />}
+      {turn.assistant && <TurnDivider agent={agent} meta={meta} model={model} effort={effort} providerName={providerName} previewMeta={turn.assistant.usage ?? null} />}
       {turn.assistant && (
         <div className="mb-6">
           <AssistantMsg message={turn.assistant} t={t} />
@@ -162,11 +166,14 @@ export function BubbleAction({ label, onClick, children }: { label: string; onCl
   );
 }
 
-export function TurnDivider({ agent, meta, model, effort, previewMeta }: {
+export function TurnDivider({ agent, meta, model, effort, providerName: providerNameProp, previewMeta }: {
   agent: string;
   meta: ReturnType<typeof getAgentMeta>;
   model?: string | null;
   effort?: string | null;
+  /** Session-level BYOK provider fallback used when previewMeta lacks one
+   *  (saved messages don't carry usage / providerName). */
+  providerName?: string | null;
   /** Live token / context-window stats — when present, rendered as a trailing chip. */
   previewMeta?: StreamPreviewMeta | null;
 }) {
@@ -176,6 +183,9 @@ export function TurnDivider({ agent, meta, model, effort, previewMeta }: {
   // which double-count the same cached prefix on every tool roundtrip.
   const ctxTokens = previewMeta?.contextUsedTokens ?? 0;
   const showCtx = ctxPct != null || ctxTokens > 0;
+  // Prefer live preview's providerName (most accurate per-turn); fall back to
+  // the session-level prop for saved turns whose `usage` lacks the field.
+  const providerName = previewMeta?.providerName ?? providerNameProp ?? null;
   return (
     <div className="flex items-center gap-1.5 mt-1 mb-3">
       <BrandIcon brand={agent} size={13} />
@@ -183,6 +193,14 @@ export function TurnDivider({ agent, meta, model, effort, previewMeta }: {
       {(model || effort) && (
         <span className="text-[10px] font-mono text-fg-5/50">
           {model || ''}{model && effort ? ' · ' : ''}{effort || ''}
+        </span>
+      )}
+      {providerName && (
+        <span
+          className="text-[10px] font-mono text-fg-5/70 px-1.5 py-px rounded bg-fg-5/8"
+          title={`This turn is routed through ${providerName} (BYOK), not the agent CLI's native auth.`}
+        >
+          via {providerName}
         </span>
       )}
       {showCtx && (

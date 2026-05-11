@@ -29,6 +29,7 @@ import {
   ensureSessionWorkspace, importFilesIntoWorkspace, syncManagedSessionIdentity,
   summarizePromptTitle, recordFork,
 } from './session.js';
+import { collapseSkillPrompt } from './skills.js';
 
 // ---------------------------------------------------------------------------
 // Private helpers
@@ -183,11 +184,22 @@ export async function run(
   let lineCount = 0;
   let timedOut = false;
   let interrupted = false;
+  // BYOK: seed contextWindow from the provider-cached value so the live
+  // preview percent uses the real denominator (e.g. 1M for DeepSeek v4 Pro
+  // via OpenRouter) instead of whatever the CLI happens to report later.
+  // Parsers gate their cc/codex-advertised updates on `s.byokContextWindow`.
+  const byokWindow = opts.byokContextWindow && opts.byokContextWindow > 0
+    ? opts.byokContextWindow
+    : null;
+  const byokProvider = opts.byokProviderName || null;
   const s = {
     sessionId: opts.sessionId, text: '', thinking: '', msgs: [] as string[], thinkParts: [] as string[],
     model: opts.model, thinkingEffort: opts.thinkingEffort, errors: null as unknown[] | null,
     inputTokens: null as number | null, outputTokens: null as number | null, cachedInputTokens: null as number | null,
-    cacheCreationInputTokens: null as number | null, contextWindow: null as number | null,
+    cacheCreationInputTokens: null as number | null,
+    contextWindow: byokWindow as number | null,
+    byokContextWindow: byokWindow as number | null,
+    byokProviderName: byokProvider as string | null,
     contextUsedTokens: null as number | null,
     codexCumulative: null as CodexCumulativeUsage | null,
     stopReason: null as string | null, activity: '',
@@ -317,15 +329,20 @@ export async function run(
 // ---------------------------------------------------------------------------
 
 function prepareStreamOpts(opts: StreamOpts): { prepared: StreamOpts; session: SessionWorkspaceInfo; attachments: string[]; stagedFiles: string[] } {
-  const session = ensureSessionWorkspace({ agent: opts.agent, workdir: opts.workdir, sessionId: opts.sessionId, title: opts.prompt });
+  // For display fields (title / lastQuestion / lastMessageText) prefer the
+  // `/skillname` shorthand the user typed over the long expansion we
+  // synthesized for the agent — the expanded form is what the CLI consumes,
+  // but it shouldn't leak into session list previews or sidebar tabs.
+  const displayPrompt = collapseSkillPrompt(opts.prompt) ?? opts.prompt;
+  const session = ensureSessionWorkspace({ agent: opts.agent, workdir: opts.workdir, sessionId: opts.sessionId, title: displayPrompt });
   const importedFiles = importFilesIntoWorkspace(session.workspacePath, opts.attachments || []);
   const attachmentRelPaths = dedupeStrings([...session.record.stagedFiles, ...importedFiles]);
   // Capture staged files for MCP bridge before clearing
   const stagedFiles = [...session.record.stagedFiles];
   session.record.stagedFiles = [];
-  if (!session.record.title) session.record.title = summarizePromptTitle(opts.prompt) || null;
-  session.record.lastQuestion = shortValue(opts.prompt, 500);
-  session.record.lastMessageText = shortValue(opts.prompt, 500);
+  if (!session.record.title) session.record.title = summarizePromptTitle(displayPrompt) || null;
+  session.record.lastQuestion = shortValue(displayPrompt, 500);
+  session.record.lastMessageText = shortValue(displayPrompt, 500);
   setSessionRunState(session.record, 'running', null);
   saveSessionRecord(opts.workdir, session.record);
 
@@ -360,10 +377,11 @@ function finalizeStreamResult(result: StreamResult, workdir: string, prompt: str
   if (result.sessionId) syncManagedSessionIdentity(session, workdir, result.sessionId);
   session.record.model = result.model || session.record.model;
   if (result.thinkingEffort) session.record.thinkingEffort = result.thinkingEffort;
-  if (!session.record.title) session.record.title = summarizePromptTitle(prompt);
-  session.record.lastQuestion = shortValue(prompt, 500);
+  const displayPrompt = collapseSkillPrompt(prompt) ?? prompt;
+  if (!session.record.title) session.record.title = summarizePromptTitle(displayPrompt);
+  session.record.lastQuestion = shortValue(displayPrompt, 500);
   session.record.lastAnswer = shortValue(result.message, 500);
-  session.record.lastMessageText = shortValue(result.message, 500) || shortValue(prompt, 500);
+  session.record.lastMessageText = shortValue(result.message, 500) || shortValue(displayPrompt, 500);
   session.record.lastThinking = trimSessionText(result.thinking);
   session.record.lastPlan = normalizeStreamPreviewPlan(result.plan);
   applySessionRunResult(session.record, result);
@@ -450,7 +468,24 @@ export async function doStream(opts: StreamOpts): Promise<StreamResult> {
       if (injection.argvAppend?.length) {
         prepared.byokArgvAppend = injection.argvAppend;
       }
+      if (injection.codexConfigOverrides?.length) {
+        const flags = injection.codexConfigOverrides.flatMap(o => ['-c', o]);
+        prepared.codexExtraArgs = [...(prepared.codexExtraArgs || []), ...flags];
+      }
+      if (injection.contextWindow && injection.contextWindow > 0) {
+        prepared.byokContextWindow = injection.contextWindow;
+      }
+      if (injection.providerName) {
+        prepared.byokProviderName = injection.providerName;
+      }
       agentLog(`[byok] ${injection.detail}`);
+    }
+    // resolveAgentEffort (runtime-config) reads only the top-level hermesReasoningEffort
+    // field and cannot see the effort stored inside models.profiles[].effort. Override
+    // thinkingEffort here so the Profile's effort wins over the config default.
+    const activeProfile = getActiveProfile(prepared.agent);
+    if (activeProfile?.effort) {
+      prepared.thinkingEffort = activeProfile.effort;
     }
   } catch (e: any) {
     agentWarn(`[byok] failed to apply Profile injection: ${e?.message || e}`);
@@ -501,9 +536,10 @@ export async function doStream(opts: StreamOpts): Promise<StreamResult> {
       activity: null,
       plan: null,
     };
-    session.record.lastQuestion = shortValue(opts.prompt, 500);
+    const failureDisplayPrompt = collapseSkillPrompt(opts.prompt) ?? opts.prompt;
+    session.record.lastQuestion = shortValue(failureDisplayPrompt, 500);
     session.record.lastAnswer = shortValue(failedResult.message, 500);
-    session.record.lastMessageText = shortValue(failedResult.message, 500) || shortValue(opts.prompt, 500);
+    session.record.lastMessageText = shortValue(failedResult.message, 500) || shortValue(failureDisplayPrompt, 500);
     session.record.lastThinking = null;
     session.record.lastPlan = null;
     applySessionRunResult(session.record, failedResult);

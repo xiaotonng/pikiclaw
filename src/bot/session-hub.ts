@@ -23,6 +23,7 @@ import {
   importSession as _importSession,
   findPikiclawSession,
   updateSessionMeta,
+  collapseSkillPrompt,
   type Agent, type SessionInfo, type SessionListResult,
   type SessionTailResult, type SessionTailOpts,
   type SessionMessagesOpts, type SessionMessagesResult,
@@ -228,6 +229,37 @@ export async function querySessionTail(opts: SessionTailOpts): Promise<SessionTa
   return result;
 }
 
+/**
+ * Replace canonical skill-execution expansions in a user message with the
+ * `/skillname` shorthand the user originally typed. The expanded text is what
+ * the agent CLI consumed and persisted; we collapse on read so the dashboard
+ * chat shows the slash command instead of the long instruction we synthesized
+ * for dispatch. Non-user messages and non-skill prompts pass through unchanged.
+ */
+function collapseSkillPromptsInResult(result: SessionMessagesResult): SessionMessagesResult {
+  if (!result.ok) return result;
+  const messages = result.messages.map(m => {
+    if (m.role !== 'user') return m;
+    const collapsed = collapseSkillPrompt(m.text);
+    return collapsed ? { ...m, text: collapsed } : m;
+  });
+  const richMessages = result.richMessages?.map(m => {
+    if (m.role !== 'user') return m;
+    const collapsed = collapseSkillPrompt(m.text);
+    if (!collapsed) return m;
+    // The user's text content lives in one or more `text` blocks; collapse any
+    // whose individual content also matches the expansion. Non-text blocks
+    // (images, attachments) pass through untouched.
+    const blocks = m.blocks.map(b => {
+      if (b.type !== 'text') return b;
+      const blockCollapsed = collapseSkillPrompt(b.content);
+      return blockCollapsed ? { ...b, content: blockCollapsed } : b;
+    });
+    return { ...m, text: collapsed, blocks };
+  });
+  return { ...result, messages, richMessages };
+}
+
 /** Get full session messages (with optional turn filtering). */
 export async function querySessionMessages(opts: SessionMessagesOpts & { agent: Agent }): Promise<SessionMessagesResult> {
   const result = await _getSessionMessages(opts);
@@ -239,15 +271,15 @@ export async function querySessionMessages(opts: SessionMessagesOpts & { agent: 
       limit: result.messages.length || undefined,
     });
     if (fallback) {
-      return {
+      return collapseSkillPromptsInResult({
         ok: true,
         messages: fallback.messages.map(m => ({ role: m.role, text: m.text })),
         totalTurns: fallback.messages.filter(m => m.role === 'user').length,
         error: null,
-      };
+      });
     }
   }
-  return result;
+  return collapseSkillPromptsInResult(result);
 }
 
 // ---------------------------------------------------------------------------

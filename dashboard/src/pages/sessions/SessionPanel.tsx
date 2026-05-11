@@ -55,6 +55,11 @@ export const SessionPanel = memo(function SessionPanel({
   const agentRuntime = useStore(s => s.agentStatus?.agents?.find(a => a.agent === session.agent) ?? null);
   const globalEffort = agentRuntime?.selectedEffort ?? null;
   const globalModel = agentRuntime?.selectedModel ?? null;
+  // BYOK attribution surfaces on every turn so the user knows the agent is
+  // routing through a third-party provider. `agentRuntime.byokProviderName`
+  // is null when no Profile is bound (native auth) — falsy values hide the
+  // tag, so we don't need to gate display further.
+  const byokProviderName = agentRuntime?.byokProviderName ?? null;
   const t = useMemo(() => createT(locale), [locale]);
   const meta = getAgentMeta(session.agent || '');
   const displayState = sessionDisplayState(session);
@@ -616,7 +621,7 @@ export const SessionPanel = memo(function SessionPanel({
                 <TurnView key={`${history?.startTurn || 0}:${i}`}
                   turn={turn}
                   turnIndex={absoluteTurnIndex}
-                  agent={session.agent || ''} meta={meta} model={displayModelShort} effort={displayEffort} t={t}
+                  agent={session.agent || ''} meta={meta} model={displayModelShort} effort={displayEffort} providerName={byokProviderName} t={t}
                   onResend={(txt) => {
                     scrollToBottomRef.current = true;
                     handleSendStart(txt);
@@ -654,7 +659,7 @@ export const SessionPanel = memo(function SessionPanel({
             {/* Live stream preview */}
             {liveStream && (
               <div className="mb-6">
-                <TurnDivider agent={session.agent || ''} meta={meta} model={displayModelShort} effort={displayEffort} previewMeta={liveStream.previewMeta} />
+                <TurnDivider agent={session.agent || ''} meta={meta} model={displayModelShort} effort={displayEffort} providerName={byokProviderName} previewMeta={liveStream.previewMeta} />
                 <LivePreview stream={liveStream} t={t} />
               </div>
             )}

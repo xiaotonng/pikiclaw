@@ -107,6 +107,12 @@ export interface StreamPreviewMeta {
    * tool stream and model/effort don't bleed into the parent agent's view.
    */
   subAgents?: StreamSubAgent[];
+  /**
+   * BYOK provider display name (e.g. "OpenRouter") — set only when the agent
+   * is bound to a Profile. Renders use it to surface "via <provider>" so the
+   * user knows the turn is being routed through a third-party provider.
+   */
+  providerName?: string | null;
 }
 
 /** A single step within a streaming plan preview. */
@@ -208,6 +214,23 @@ export interface StreamOpts {
    * their own argv (Hermes via ACP) read this and append it after their own flags.
    */
   byokArgvAppend?: string[];
+  /**
+   * BYOK-resolved context window for the bound model (from the provider's
+   * cached `/models` listing). When set, drivers must use this verbatim as
+   * the denominator for context-percent — agent CLIs report their own
+   * fallback default for unknown model ids (cc → 200k, codex → similar),
+   * which produces wildly wrong percentages on, e.g., a 1M-token DeepSeek
+   * model. `undefined` means we don't know; drivers fall back to whatever
+   * the CLI advertises.
+   */
+  byokContextWindow?: number;
+  /**
+   * Display name of the BYOK provider routing this turn (e.g. "OpenRouter").
+   * Renders include this in IM footers and the dashboard turn header so the
+   * user can tell the turn is being served via a third-party provider rather
+   * than the agent CLI's native auth path. `undefined` when no Profile bound.
+   */
+  byokProviderName?: string;
   /** Abort the in-flight stream. */
   abortSignal?: AbortSignal;
   /** Optional callback for agent human-in-the-loop interactions (all drivers). */

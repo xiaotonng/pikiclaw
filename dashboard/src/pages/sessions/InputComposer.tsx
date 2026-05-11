@@ -419,7 +419,13 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   const currentAgent = agents.find(a => a.agent === effectiveAgent) || null;
   const cascadeAgentId = pendingAgent || effectiveAgent;
   const cascadeAgent = agents.find(a => a.agent === cascadeAgentId) || currentAgent;
-  const models = cascadeAgent?.models || [];
+  // When the cascading agent is BYOK-bound, the relevant catalogue is the
+  // provider's, not the agent CLI's native list. byokModels is provided by
+  // the server when an active Profile is bound; otherwise we fall back to
+  // the native models list so this is a no-op for native-auth agents.
+  const models = (cascadeAgent?.byokProviderName && cascadeAgent.byokModels?.length)
+    ? cascadeAgent.byokModels
+    : (cascadeAgent?.models || []);
   // Runtime agent status is the source of truth; applied cascade choice is a fallback
   // only for the brief window before agents loads.
   const currentModel = currentAgent?.selectedModel || selectedModel || '';

@@ -41,6 +41,7 @@ import {
   agentLog,
 } from './utils.js';
 import { getDriver } from './driver.js';
+import { collapseSkillPrompt } from './skills.js';
 
 // ---------------------------------------------------------------------------
 // Private helpers
@@ -614,6 +615,13 @@ export function ensureSessionWorkspace(opts: EnsureSessionWorkspaceOpts): Sessio
 // ---------------------------------------------------------------------------
 
 function managedRecordToSessionInfo(record: ManagedSessionRecord): SessionInfo {
+  // Collapse pre-fix records that stored the canonical skill expansion as the
+  // title / lastQuestion / lastMessageText. New records get collapsed at write
+  // time in `prepareStreamOpts`; this read-time pass keeps existing sessions
+  // from showing the long instruction in the sidebar after the fix lands.
+  const title = collapseSkillPrompt(record.title) ?? record.title;
+  const lastQuestion = collapseSkillPrompt(record.lastQuestion) ?? record.lastQuestion;
+  const lastMessageText = collapseSkillPrompt(record.lastMessageText) ?? record.lastMessageText;
   return {
     sessionId: record.sessionId,
     agent: record.agent,
@@ -623,7 +631,7 @@ function managedRecordToSessionInfo(record: ManagedSessionRecord): SessionInfo {
     model: record.model,
     thinkingEffort: record.thinkingEffort,
     createdAt: record.createdAt,
-    title: record.title,
+    title,
     running: record.runState === 'running',
     runState: record.runState,
     runDetail: record.runDetail,
@@ -632,9 +640,9 @@ function managedRecordToSessionInfo(record: ManagedSessionRecord): SessionInfo {
     classification: record.classification,
     userStatus: record.userStatus,
     userNote: record.userNote,
-    lastQuestion: record.lastQuestion,
+    lastQuestion,
     lastAnswer: record.lastAnswer,
-    lastMessageText: record.lastMessageText,
+    lastMessageText,
     migratedFrom: record.migratedFrom,
     migratedTo: record.migratedTo,
     linkedSessions: record.linkedSessions,

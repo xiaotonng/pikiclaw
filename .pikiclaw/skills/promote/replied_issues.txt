@@ -55,3 +55,6 @@ https://github.com/chenhg5/cc-connect/issues/807
 https://github.com/RichardAtCT/claude-code-telegram/issues/173
 https://github.com/a5c-ai/claude-code-telegram-bot/issues/4
 https://github.com/m1heng/clawdbot-feishu/issues/406
+https://github.com/chenhg5/cc-connect/issues/916
+https://github.com/chenhg5/cc-connect/issues/910
+https://github.com/a5c-ai/claude-code-telegram-bot/issues/5

@@ -184,18 +184,28 @@ export function SettingRowLead({
   subtitle,
   badge,
   className,
+  iconWrap = true,
 }: {
   icon: ReactNode;
   title: ReactNode;
   subtitle?: ReactNode;
   badge?: ReactNode;
   className?: string;
+  /** When false, skip the bordered 32x32 wrapper so brand-colored logos
+   *  render edge-to-edge without a light frame. */
+  iconWrap?: boolean;
 }) {
   return (
     <div className={cn('flex items-center gap-2.5', className)}>
-      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-edge bg-panel-alt text-fg-3">
-        {icon}
-      </div>
+      {iconWrap ? (
+        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-edge bg-panel-alt text-fg-3">
+          {icon}
+        </div>
+      ) : (
+        <div className="flex h-8 w-8 shrink-0 items-center justify-center">
+          {icon}
+        </div>
+      )}
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2">
           <div className="text-[14px] font-semibold text-fg">{title}</div>

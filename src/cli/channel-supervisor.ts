@@ -31,6 +31,14 @@ const CHANNEL_AFFECTING_KEYS = new Set<keyof UserConfig>([
   'weixinBaseUrl',
   'weixinBotToken',
   'weixinAccountId',
+  'slackBotToken',
+  'slackAppToken',
+  'discordBotToken',
+  'dingtalkClientId',
+  'dingtalkClientSecret',
+  'wecomBotId',
+  'wecomBotSecret',
+  'wecomEndpoint',
 ]);
 
 /**
@@ -49,6 +57,14 @@ const CHANNEL_REPLACE_SETTLE_MS: Record<ChannelName, number> = {
   telegram: 0,
   weixin: 0,
   feishu: 5_000,
+  // The Slack / Discord / DingTalk / WeChat-Work providers all hold the
+  // single-bot socket slot for a moment after disconnect; give them a
+  // small grace window so token rotation doesn't trip "already connected"
+  // style errors on the immediate replacement connection.
+  slack: 3_000,
+  discord: 3_000,
+  dingtalk: 3_000,
+  wecom: 3_000,
 };
 
 function sleep(ms: number): Promise<void> {
@@ -73,6 +89,26 @@ function snapshotCredsForChannel(channel: ChannelName, config: Partial<UserConfi
         token: String(config.weixinBotToken || '').trim(),
         accountId: String(config.weixinAccountId || '').trim(),
       });
+    case 'slack':
+      return JSON.stringify({
+        botToken: String(config.slackBotToken || '').trim(),
+        appToken: String(config.slackAppToken || '').trim(),
+      });
+    case 'discord':
+      return JSON.stringify({
+        botToken: String(config.discordBotToken || '').trim(),
+      });
+    case 'dingtalk':
+      return JSON.stringify({
+        clientId: String(config.dingtalkClientId || '').trim(),
+        clientSecret: String(config.dingtalkClientSecret || '').trim(),
+      });
+    case 'wecom':
+      return JSON.stringify({
+        botId: String(config.wecomBotId || '').trim(),
+        botSecret: String(config.wecomBotSecret || '').trim(),
+        endpoint: String(config.wecomEndpoint || '').trim(),
+      });
   }
 }
 
@@ -89,6 +125,22 @@ async function createBotForChannel(channel: ChannelName): Promise<Bot> {
     case 'weixin': {
       const { WeixinBot } = await import('../channels/weixin/bot.js');
       return new WeixinBot();
+    }
+    case 'slack': {
+      const { SlackBot } = await import('../channels/slack/bot.js');
+      return new SlackBot();
+    }
+    case 'discord': {
+      const { DiscordBot } = await import('../channels/discord/bot.js');
+      return new DiscordBot();
+    }
+    case 'dingtalk': {
+      const { DingtalkBot } = await import('../channels/dingtalk/bot.js');
+      return new DingtalkBot();
+    }
+    case 'wecom': {
+      const { WeComBot } = await import('../channels/wecom/bot.js');
+      return new WeComBot();
     }
   }
 }

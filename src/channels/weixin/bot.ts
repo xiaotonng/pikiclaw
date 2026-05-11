@@ -588,7 +588,8 @@ export class WeixinBot extends Bot {
       this.log(`config: agent=${this.defaultAgent} workdir=${this.workdir} timeout=${this.runTimeout}s`);
 
       this.channel.onMessage((msg, ctx) => this.handleMessage(msg, ctx));
-      this.channel.onError(error => this.log(`error: ${describeError(error)}`));
+      this.channel.onError(error => this.log(`error: ${describeError(error)}`, 'warn'));
+      this.channel.onLog((msg, level) => this.log(msg, level));
 
       this.startKeepAlive();
       this.log('✓ Weixin connected, long-polling started — ready to receive messages');

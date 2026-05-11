@@ -15,7 +15,7 @@ import { TelegramChannel } from '../src/channels/telegram/channel.ts';
 import * as agentDriver from '../src/agent/driver.ts';
 import type { Agent, StreamResult } from '../src/agent/index.ts';
 import { ensureManagedSession } from '../src/agent/index.ts';
-import { makeTmpDir } from './support/env.ts';
+import { captureEnv, makeTmpDir, restoreEnv } from './support/env.ts';
 import { makeStreamResult } from './support/stream-result.ts';
 import { createTelegramBotHarness } from './support/telegram-bot-harness.ts';
 
@@ -55,9 +55,16 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+const envSnapshot = captureEnv(['PIKICLAW_CONFIG', 'PIKICLAW_WORKDIR', 'TELEGRAM_BOT_TOKEN', 'DEFAULT_AGENT', 'PIKICLAW_RESTART_CMD', 'npm_config_yes']);
+
 beforeEach(() => {
+  restoreEnv(envSnapshot);
   vi.clearAllMocks();
   const tmpDir = makeTmpDir('bot-tg-unit-');
+  // Isolate setting.json so switchWorkdir / setUserWorkdir can never touch the real
+  // ~/.pikiclaw/setting.json. Without this, any test that calls switchWorkdir
+  // without { persist: false } will pollute the user's production config.
+  process.env.PIKICLAW_CONFIG = `${makeTmpDir('bot-tg-config-')}/setting.json`;
   process.env.TELEGRAM_BOT_TOKEN = 'test-token';
   process.env.PIKICLAW_WORKDIR = tmpDir;
   process.env.DEFAULT_AGENT = 'claude';
@@ -799,7 +806,7 @@ describe('TelegramBot.handleMessage streaming', () => {
     });
 
     const repliedMessageId = 3000;
-    bot.switchWorkdir(switchedWorkdir);
+    bot.switchWorkdir(switchedWorkdir, { persist: false });
     bot.switchAgentForChat(ctx.chatId, 'claude');
 
     const ctx2 = {

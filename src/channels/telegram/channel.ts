@@ -67,6 +67,7 @@ import {
   sleep,
 } from '../base.js';
 import { TELEGRAM_LIMITS } from '../../core/constants.js';
+import { ChannelHealth } from '../health.js';
 import { formatScopedLogLine, shouldLog, writeScopedLog, type LogLevel } from '../../core/logging.js';
 
 // ---------------------------------------------------------------------------
@@ -335,7 +336,14 @@ class TelegramChannel extends Channel {
 
   async listen(): Promise<void> {
     this.running = true;
-    let backoff = 3000;
+    const health = new ChannelHealth({
+      label: 'Telegram',
+      opAction: 'polling',
+      initialDelayMs: 3_000,
+      maxDelayMs: TELEGRAM_LIMITS.maxRetryDelay,
+      sustainedFailureHint: 'verify telegramBotToken in setting.json (or check network connectivity to api.telegram.org)',
+      log: (msg, level) => this._log(msg, level),
+    });
     while (this.running) {
       try {
         const requestOffset = this.skipPendingOnNextListen ? -1 : this.offset;
@@ -345,7 +353,7 @@ class TelegramChannel extends Channel {
         });
         const skippedPending = this.skipPendingOnNextListen;
         if (skippedPending) this.skipPendingOnNextListen = false;
-        backoff = 3000; // reset on success
+        health.recordSuccess();
         const results = data.result || [];
         if (skippedPending && !results.length) this.offset = 0;
         for (const update of results) {
@@ -361,10 +369,8 @@ class TelegramChannel extends Channel {
           this._hError?.(err);
           break;
         }
-        this._log(`[poll] error: ${e.message ?? e} — retrying in ${backoff / 1000}s`, 'warn');
         this._hError?.(e);
-        await sleep(backoff);
-        backoff = Math.min(backoff * 2, TELEGRAM_LIMITS.maxRetryDelay);
+        await sleep(health.recordFailure(e));
       }
     }
   }

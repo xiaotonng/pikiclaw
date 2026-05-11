@@ -190,6 +190,70 @@ export const WEIXIN_LIMITS = {
 };
 
 // ---------------------------------------------------------------------------
+// Channels — Slack
+// ---------------------------------------------------------------------------
+
+/** Slack channel transport constants. */
+export const SLACK_LIMITS = {
+  /** Slack chat.postMessage hard limit is 40000; cap at 35k for safety. */
+  maxMessageLength: 35_000,
+  /** Slack file upload size cap (1 GB); we keep parity with other channels at 20 MB. */
+  fileMaxBytes: 20 * 1024 * 1024,
+  /** Maximum back-off delay for socket-mode reconnect retries. */
+  maxRetryDelay: 60_000,
+  /** Initial back-off delay for socket-mode reconnect. */
+  initialRetryDelay: 3_000,
+};
+
+// ---------------------------------------------------------------------------
+// Channels — Discord
+// ---------------------------------------------------------------------------
+
+/** Discord channel transport constants. */
+export const DISCORD_LIMITS = {
+  /** Hard message cap is 2000 chars; leave a small buffer. */
+  maxMessageLength: 1900,
+  /** File size cap for non-Nitro guilds is 25 MB; we keep parity at 20 MB. */
+  fileMaxBytes: 20 * 1024 * 1024,
+  /** Maximum back-off delay for gateway reconnect retries. */
+  maxRetryDelay: 60_000,
+  /** Initial back-off delay for gateway reconnect. */
+  initialRetryDelay: 3_000,
+};
+
+// ---------------------------------------------------------------------------
+// Channels — DingTalk
+// ---------------------------------------------------------------------------
+
+/** DingTalk channel transport constants. */
+export const DINGTALK_LIMITS = {
+  /** Conservative text limit per message (markdown segments split here). */
+  maxMessageLength: 5_000,
+  /** Maximum back-off delay for stream reconnect retries. */
+  maxRetryDelay: 60_000,
+  /** Initial back-off delay for stream reconnect. */
+  initialRetryDelay: 3_000,
+};
+
+// ---------------------------------------------------------------------------
+// Channels — WeChat Work (企业微信 智能机器人)
+// ---------------------------------------------------------------------------
+
+/** WeChat Work Smart Bot WebSocket transport constants. */
+export const WECOM_LIMITS = {
+  /** Smart Bot text message hard cap is roughly 5KB chars. */
+  maxMessageLength: 4_000,
+  /** Heartbeat interval to keep the websocket alive. */
+  heartbeatInterval: 30_000,
+  /** Maximum back-off delay for websocket reconnect retries. */
+  maxRetryDelay: 60_000,
+  /** Initial back-off delay for websocket reconnect. */
+  initialRetryDelay: 1_000,
+  /** Default smart bot websocket endpoint. */
+  defaultEndpoint: 'wss://openws.work.weixin.qq.com/wssvr/',
+};
+
+// ---------------------------------------------------------------------------
 // Config validation
 // ---------------------------------------------------------------------------
 
@@ -205,6 +269,14 @@ export const VALIDATION_TIMEOUTS = {
   weixinDefault: 8_000,
   /** Long-poll timeout for dashboard QR login wait calls. */
   weixinQrPoll: 35_000,
+  /** Default timeout for Slack credential validation. */
+  slackDefault: 8_000,
+  /** Default timeout for Discord credential validation. */
+  discordDefault: 8_000,
+  /** Default timeout for DingTalk credential validation (gettoken endpoint). */
+  dingtalkDefault: 8_000,
+  /** Default timeout for WeChat Work bot validation handshake. */
+  wecomDefault: 8_000,
 };
 
 // ---------------------------------------------------------------------------

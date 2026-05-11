@@ -24,6 +24,7 @@ import {
   mergeManagedAndNativeSessions,
   readTailLines, stripInjectedPrompts, sanitizeSessionUserPreviewText, SESSION_PREVIEW_IMAGE_PLACEHOLDER_RE, applyTurnWindow, shortValue,
   roundPercent, toIsoFromEpochSeconds, modelFamily, normalizeClaudeModelId, emptyUsage, normalizeUsageStatus,
+  collapseSkillPrompt,
 } from '../index.js';
 import { AGENT_STREAM_HARD_KILL_GRACE_MS, AGENT_GRACEFUL_ABORT_GRACE_MS, SESSION_RUNNING_THRESHOLD_MS } from '../../core/constants.js';
 import { terminateProcessTree } from '../../core/process-control.js';
@@ -251,8 +252,10 @@ function claudeParse(ev: any, s: any) {
     s.sessionId = ev.session_id ?? s.sessionId;
     s.model = ev.model ?? s.model;
     s.thinkingEffort = ev.thinking_level ?? s.thinkingEffort;
-    const advertised = claudeContextWindowFromModel(s.model);
-    s.contextWindow = claudeEffectiveContextWindow(advertised) ?? s.contextWindow;
+    if (!s.byokContextWindow) {
+      const advertised = claudeContextWindowFromModel(s.model);
+      s.contextWindow = claudeEffectiveContextWindow(advertised) ?? s.contextWindow;
+    }
   }
 
   if (t === 'stream_event') {
@@ -302,7 +305,7 @@ function claudeParse(ev: any, s: any) {
     }
     s.sessionId = ev.session_id ?? s.sessionId;
     s.model = ev.model ?? s.model;
-    {
+    if (!s.byokContextWindow) {
       const advertised = claudeContextWindowFromModel(s.model);
       s.contextWindow = claudeEffectiveContextWindow(advertised) ?? s.contextWindow;
     }
@@ -401,7 +404,7 @@ function claudeParse(ev: any, s: any) {
       recomputeClaudeContextUsed(s);
     }
     const mu = ev.modelUsage;
-    if (mu && typeof mu === 'object') {
+    if (mu && typeof mu === 'object' && !s.byokContextWindow) {
       for (const info of Object.values(mu) as any[]) {
         // cc reports the *advertised* contextWindow on result.modelUsage; we
         // store the *effective* (post-reservation) window so the percent
@@ -416,6 +419,15 @@ function claudeParse(ev: any, s: any) {
 }
 
 function createClaudeStreamState(opts: StreamOpts) {
+  // When BYOK is bound, the real context window (e.g. 1M for DeepSeek v4 Pro
+  // via OpenRouter) comes from the provider's cached /models listing — cc
+  // reports its own Claude-shaped fallback (200k) for unknown model ids, so
+  // we lock in the real value upfront and refuse to overwrite it from cc's
+  // event stream below.
+  const byokWindow = opts.byokContextWindow && opts.byokContextWindow > 0
+    ? opts.byokContextWindow
+    : null;
+  const byokProvider = opts.byokProviderName || null;
   return {
     sessionId: opts.sessionId,
     text: '',
@@ -429,7 +441,11 @@ function createClaudeStreamState(opts: StreamOpts) {
     outputTokens: null as number | null,
     cachedInputTokens: null as number | null,
     cacheCreationInputTokens: null as number | null,
-    contextWindow: null as number | null,
+    contextWindow: byokWindow as number | null,
+    /** When set, ignore cc-advertised contextWindow updates from the stream. */
+    byokContextWindow: byokWindow as number | null,
+    /** BYOK provider display name surfaced in preview meta + IM footers. */
+    byokProviderName: byokProvider as string | null,
     contextUsedTokens: null as number | null,
     codexCumulative: null,
     stopReason: null as string | null,
@@ -515,16 +531,52 @@ async function doClaudeInteractiveStream(opts: StreamOpts): Promise<StreamResult
     s.stopReason = 'interrupted';
     closeInput();
     agentWarn(`[abort] user interrupt, closing stdin for graceful shutdown pid=${proc.pid}`);
-    // Claude CLI writes each stream_event to the session JSONL incrementally
-    // and records a `[Request interrupted by user]` marker on shutdown. Give
-    // it a short grace window to finish the in-flight event before SIGTERM.
-    // proc.on('close', …) below resolves the run naturally if the CLI exits
-    // on its own; this fallback only fires when it doesn't.
-    setTimeout(() => {
+    // Wait until the session JSONL has stopped being written before SIGTERM.
+    // Claude CLI streams events on stdout (which we observe in real time) BEFORE
+    // flushing the matching JSONL line — and its signal handler is just
+    // `process.exit()`, which doesn't drain the async write queue. SIGTERMing
+    // on a fixed window races that flush: the dashboard's live snapshot would
+    // show N tool calls, then once it reloads from disk the persisted turn
+    // regresses below N (e.g. 30 → 27). Poll the JSONL size and SIGTERM only
+    // after it's been stable for FILE_STABLE_MS, or after MAX_WAIT_MS as a
+    // hard cap (a still-active LLM stream would never go stable on its own).
+    const sessionFile = s.sessionId
+      ? path.join(getHome(), '.claude', 'projects', claudeProjectDirName(opts.workdir), `${s.sessionId}.jsonl`)
+      : null;
+    const FILE_STABLE_MS = 600;
+    const POLL_MS = 100;
+    const MAX_WAIT_MS = 6000;
+    const startedAt = Date.now();
+    let lastSize = -1;
+    let lastChangedAt = startedAt;
+    const tick = () => {
       if (proc.exitCode != null || proc.killed) return;
-      agentWarn(`[abort] graceful window elapsed (${AGENT_GRACEFUL_ABORT_GRACE_MS}ms), killing process tree pid=${proc.pid}`);
-      terminateProcessTree(proc, { signal: 'SIGTERM', forceSignal: 'SIGKILL', forceAfterMs: 5000 });
-    }, AGENT_GRACEFUL_ABORT_GRACE_MS);
+      let curSize = lastSize;
+      if (sessionFile) {
+        try { curSize = fs.statSync(sessionFile).size; } catch { /* file not yet created */ }
+      }
+      if (curSize !== lastSize) {
+        lastSize = curSize;
+        lastChangedAt = Date.now();
+      }
+      const stableFor = Date.now() - lastChangedAt;
+      const totalElapsed = Date.now() - startedAt;
+      // Without a JSONL path (very early abort, before sessionId is known) fall
+      // back to the legacy fixed grace window.
+      const shouldKill = !sessionFile
+        ? totalElapsed >= AGENT_GRACEFUL_ABORT_GRACE_MS
+        : (stableFor >= FILE_STABLE_MS || totalElapsed >= MAX_WAIT_MS);
+      if (shouldKill) {
+        const reason = !sessionFile
+          ? `no JSONL, fixed grace ${totalElapsed}ms`
+          : (stableFor >= FILE_STABLE_MS ? `JSONL stable ${stableFor}ms` : `max wait ${totalElapsed}ms`);
+        agentWarn(`[abort] ${reason}, killing process tree pid=${proc.pid}`);
+        terminateProcessTree(proc, { signal: 'SIGTERM', forceSignal: 'SIGKILL', forceAfterMs: 5000 });
+        return;
+      }
+      setTimeout(tick, POLL_MS);
+    };
+    setTimeout(tick, POLL_MS);
   };
   if (opts.abortSignal?.aborted) abortStream();
   opts.abortSignal?.addEventListener('abort', abortStream, { once: true });
@@ -755,7 +807,7 @@ function extractClaudeTailQA(filePath: string): { lastQuestion: string | null; l
     if (!raw || raw[0] !== '{') continue;
     try {
       const ev = JSON.parse(raw);
-      if (ev.type === 'user') {
+      if (ev.type === 'user' && ev.isMeta !== true) {
         const text = sanitizeSessionUserPreviewText(extractClaudeText(ev.message?.content, true));
         if (text) {
           lastQuestion = shortValue(text, 500);
@@ -804,9 +856,12 @@ function getNativeClaudeSessions(workdir: string): SessionInfo[] {
         if (!line || line[0] !== '{') continue;
         try {
           const ev = JSON.parse(line);
-          if (!title && ev.type === 'user') {
+          if (!title && ev.type === 'user' && ev.isMeta !== true) {
             const text = sanitizeSessionUserPreviewText(extractClaudeText(ev.message?.content, true));
-            if (text) title = text.length <= 120 ? text : `${text.slice(0, 117).trimEnd()}...`;
+            if (text) {
+              const display = collapseSkillPrompt(text) ?? text;
+              title = display.length <= 120 ? display : `${display.slice(0, 117).trimEnd()}...`;
+            }
           }
           if (!model && ev.type === 'assistant' && ev.message?.model) {
             model = ev.message.model;
@@ -838,18 +893,22 @@ function getNativeClaudeSessions(workdir: string): SessionInfo[] {
           if (!raw || raw.startsWith('<') || raw.startsWith('[Image:')) continue;
           raw = stripInjectedPrompts(raw);
           if (!raw) continue;
-          title = raw.length <= 120 ? raw : `${raw.slice(0, 117).trimEnd()}...`;
+          const display = collapseSkillPrompt(raw) ?? raw;
+          title = display.length <= 120 ? display : `${display.slice(0, 117).trimEnd()}...`;
           break;
         }
       }
 
-      // Quick turn count: count real user messages (exclude tool_result)
+      // Quick turn count: count real user messages (exclude tool_result and
+      // system-injected isMeta events — Skill outputs, resume prompts, etc.).
       let numTurns = 0;
       try {
         const raw = fs.readFileSync(filePath, 'utf8');
         const rawLines = raw.split('\n');
         for (const rl of rawLines) {
-          if (rl.length > 2 && rl.includes('"type":"user"') && !rl.includes('"tool_result"')) numTurns++;
+          if (rl.length <= 2 || !rl.includes('"type":"user"')) continue;
+          if (rl.includes('"tool_result"') || rl.includes('"isMeta":true')) continue;
+          numTurns++;
         }
       } catch { /* ignore count errors */ }
 
@@ -1151,6 +1210,28 @@ function getClaudeSessionMessages(opts: SessionMessagesOpts): SessionMessagesRes
         }
 
         if (ev.type === 'user') {
+          // System-injected meta events (Skill tool results, /command stdout,
+          // resume prompts) come through with `type:user` + `isMeta:true`. The
+          // accompanying `message.content` is plain text (NOT a tool_result
+          // block), so the regular `isToolResult` check below misses them and
+          // they would otherwise render as a fake user bubble — splitting the
+          // conversation into a phantom new turn (visible as a fresh
+          // "Claude Code" divider mid-session). Re-attach the text to the
+          // originating tool's activity feed when sourceToolUseID is known,
+          // otherwise drop silently.
+          if (ev.isMeta === true) {
+            if (pendingRole === 'assistant') {
+              const toolUseId = typeof ev.sourceToolUseID === 'string' ? ev.sourceToolUseID : '';
+              if (toolUseId && !todoWriteToolIds.has(toolUseId) && !subAgentToolIds.has(toolUseId)) {
+                const text = extractClaudeText(ev.message?.content, false);
+                if (text) {
+                  pendingBlocks.push({ type: 'tool_result', content: text, toolId: toolUseId });
+                }
+              }
+            }
+            continue;
+          }
+
           const contentArr = ev.message?.content;
           const isToolResult = Array.isArray(contentArr)
             && contentArr.length > 0

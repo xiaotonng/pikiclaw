@@ -14,7 +14,15 @@ import type { SetupState } from '../cli/onboarding.js';
 import { loadUserConfig, resolveUserWorkdir } from '../core/config/user-config.js';
 import { listAgents } from '../agent/index.js';
 import { collectSetupState } from '../cli/onboarding.js';
-import { validateFeishuConfig, validateTelegramConfig, validateWeixinConfig } from '../core/config/validation.js';
+import {
+  validateDingtalkConfig,
+  validateDiscordConfig,
+  validateFeishuConfig,
+  validateSlackConfig,
+  validateTelegramConfig,
+  validateWecomConfig,
+  validateWeixinConfig,
+} from '../core/config/validation.js';
 import { shouldCacheChannelStates } from '../channels/states.js';
 import { DASHBOARD_TIMEOUTS } from '../core/constants.js';
 import { withTimeoutFallback } from '../core/utils.js';
@@ -60,6 +68,20 @@ function buildLocalChannelStates(config: Partial<UserConfig>): NonNullable<Setup
   const feishuSecret = String(config.feishuAppSecret || '').trim();
   const feishuConfigured = !!(feishuAppId || feishuSecret);
   const feishuReady = !!(feishuAppId && feishuSecret);
+  const slackBot = String(config.slackBotToken || '').trim();
+  const slackApp = String(config.slackAppToken || '').trim();
+  const slackConfigured = !!(slackBot || slackApp);
+  const slackReady = !!(slackBot && slackApp);
+  const discordToken = String(config.discordBotToken || '').trim();
+  const discordConfigured = !!discordToken;
+  const dingtalkId = String(config.dingtalkClientId || '').trim();
+  const dingtalkSecret = String(config.dingtalkClientSecret || '').trim();
+  const dingtalkConfigured = !!(dingtalkId || dingtalkSecret);
+  const dingtalkReady = !!(dingtalkId && dingtalkSecret);
+  const wecomId = String(config.wecomBotId || '').trim();
+  const wecomSecret = String(config.wecomBotSecret || '').trim();
+  const wecomConfigured = !!(wecomId || wecomSecret);
+  const wecomReady = !!(wecomId && wecomSecret);
 
   return [
     {
@@ -93,6 +115,50 @@ function buildLocalChannelStates(config: Partial<UserConfig>): NonNullable<Setup
         : feishuReady
           ? 'Validating Feishu credentials…'
           : 'Both App ID and App Secret are required.',
+    },
+    {
+      channel: 'slack',
+      configured: slackConfigured,
+      ready: false,
+      validated: false,
+      status: !slackConfigured ? 'missing' : slackReady ? 'checking' : 'invalid',
+      detail: !slackConfigured
+        ? 'Slack is not configured.'
+        : slackReady
+          ? 'Validating Slack credentials…'
+          : 'Both Bot Token (xoxb-) and App-Level Token (xapp-) are required.',
+    },
+    {
+      channel: 'discord',
+      configured: discordConfigured,
+      ready: false,
+      validated: false,
+      status: discordConfigured ? 'checking' : 'missing',
+      detail: discordConfigured ? 'Validating Discord credentials…' : 'Discord is not configured.',
+    },
+    {
+      channel: 'dingtalk',
+      configured: dingtalkConfigured,
+      ready: false,
+      validated: false,
+      status: !dingtalkConfigured ? 'missing' : dingtalkReady ? 'checking' : 'invalid',
+      detail: !dingtalkConfigured
+        ? 'DingTalk is not configured.'
+        : dingtalkReady
+          ? 'Validating DingTalk credentials…'
+          : 'Both Client ID and Client Secret are required.',
+    },
+    {
+      channel: 'wecom',
+      configured: wecomConfigured,
+      ready: false,
+      validated: false,
+      status: !wecomConfigured ? 'missing' : wecomReady ? 'checking' : 'invalid',
+      detail: !wecomConfigured
+        ? 'WeChat Work is not configured.'
+        : wecomReady
+          ? 'Validating WeChat Work credentials…'
+          : 'Both Bot ID and Bot Secret are required.',
     },
   ];
 }
@@ -248,6 +314,23 @@ class Runtime {
           appId: String(config.feishuAppId || '').trim(),
           appSecret: String(config.feishuAppSecret || '').trim(),
         });
+      case 'slack':
+        return JSON.stringify({
+          botToken: String(config.slackBotToken || '').trim(),
+          appToken: String(config.slackAppToken || '').trim(),
+        });
+      case 'discord':
+        return JSON.stringify({ botToken: String(config.discordBotToken || '').trim() });
+      case 'dingtalk':
+        return JSON.stringify({
+          clientId: String(config.dingtalkClientId || '').trim(),
+          clientSecret: String(config.dingtalkClientSecret || '').trim(),
+        });
+      case 'wecom':
+        return JSON.stringify({
+          botId: String(config.wecomBotId || '').trim(),
+          botSecret: String(config.wecomBotSecret || '').trim(),
+        });
     }
   }
 
@@ -274,6 +357,14 @@ class Runtime {
         return validateTelegramConfig(config.telegramBotToken, config.telegramAllowedChatIds).then(r => r.state);
       case 'feishu':
         return validateFeishuConfig(config.feishuAppId, config.feishuAppSecret).then(r => r.state);
+      case 'slack':
+        return validateSlackConfig(config.slackBotToken, config.slackAppToken).then(r => r.state);
+      case 'discord':
+        return validateDiscordConfig(config.discordBotToken).then(r => r.state);
+      case 'dingtalk':
+        return validateDingtalkConfig(config.dingtalkClientId, config.dingtalkClientSecret).then(r => r.state);
+      case 'wecom':
+        return validateWecomConfig(config.wecomBotId, config.wecomBotSecret).then(r => r.state);
     }
   }
 

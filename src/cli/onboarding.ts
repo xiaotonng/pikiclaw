@@ -6,7 +6,7 @@ import type { AgentInfo } from '../agent/index.js';
 import { getAgentInstallCommand, getAgentLabel } from '../agent/npm.js';
 
 export type ChannelStatus = 'ready' | 'missing' | 'invalid' | 'error' | 'checking';
-export type SetupChannel = 'telegram' | 'feishu' | 'weixin';
+export type SetupChannel = 'telegram' | 'feishu' | 'weixin' | 'slack' | 'discord' | 'dingtalk' | 'wecom';
 
 export interface AgentSetupState extends AgentInfo {
   label: string;
@@ -71,6 +71,46 @@ function defaultChannelState(channel: string, tokenProvided: boolean): ChannelSe
       detail: tokenProvided ? 'Weixin credentials are configured.' : 'Weixin is not configured.',
     };
   }
+  if (channel === 'slack') {
+    return {
+      channel: 'slack',
+      configured: tokenProvided,
+      ready: tokenProvided,
+      validated: false,
+      status: tokenProvided ? 'ready' : 'missing',
+      detail: tokenProvided ? 'Slack credentials are configured.' : 'Slack is not configured.',
+    };
+  }
+  if (channel === 'discord') {
+    return {
+      channel: 'discord',
+      configured: tokenProvided,
+      ready: tokenProvided,
+      validated: false,
+      status: tokenProvided ? 'ready' : 'missing',
+      detail: tokenProvided ? 'Discord credentials are configured.' : 'Discord is not configured.',
+    };
+  }
+  if (channel === 'dingtalk') {
+    return {
+      channel: 'dingtalk',
+      configured: tokenProvided,
+      ready: tokenProvided,
+      validated: false,
+      status: tokenProvided ? 'ready' : 'missing',
+      detail: tokenProvided ? 'DingTalk credentials are configured.' : 'DingTalk is not configured.',
+    };
+  }
+  if (channel === 'wecom') {
+    return {
+      channel: 'wecom',
+      configured: tokenProvided,
+      ready: tokenProvided,
+      validated: false,
+      status: tokenProvided ? 'ready' : 'missing',
+      detail: tokenProvided ? 'WeChat Work credentials are configured.' : 'WeChat Work is not configured.',
+    };
+  }
   return {
     channel: 'telegram',
     configured: tokenProvided,
@@ -131,7 +171,15 @@ export function buildSetupGuide(state: SetupState, version: string, options?: { 
       ? 'Feishu'
       : state.channel === 'weixin'
         ? 'Weixin'
-        : 'your chat app';
+        : state.channel === 'slack'
+          ? 'Slack'
+          : state.channel === 'discord'
+            ? 'Discord'
+            : state.channel === 'dingtalk'
+              ? 'DingTalk'
+              : state.channel === 'wecom'
+                ? 'WeChat Work'
+                : 'your chat app';
   const lines: string[] = [
     `pikiclaw v${version}`,
     '',
@@ -177,6 +225,34 @@ export function buildSetupGuide(state: SetupState, version: string, options?: { 
     lines.push(
       'MISSING  No Weixin credentials configured in ~/.pikiclaw/setting.json',
       '         Run `pikiclaw` to open the dashboard, scan the QR code, and validate the channel before enabling it.',
+    );
+  } else if (state.channel === 'slack' && state.tokenProvided) {
+    lines.push('OK       Slack credentials provided (slackBotToken + slackAppToken).');
+  } else if (state.channel === 'slack') {
+    lines.push(
+      'MISSING  No Slack credentials configured in ~/.pikiclaw/setting.json',
+      '         Add slackBotToken (xoxb-…) and slackAppToken (xapp-…) from your Slack App Dashboard.',
+    );
+  } else if (state.channel === 'discord' && state.tokenProvided) {
+    lines.push('OK       Discord bot token provided (discordBotToken).');
+  } else if (state.channel === 'discord') {
+    lines.push(
+      'MISSING  No Discord credentials configured in ~/.pikiclaw/setting.json',
+      '         Add discordBotToken from the Discord Developer Portal (Bot page) — and enable Message Content Intent.',
+    );
+  } else if (state.channel === 'dingtalk' && state.tokenProvided) {
+    lines.push('OK       DingTalk credentials provided (dingtalkClientId + dingtalkClientSecret).');
+  } else if (state.channel === 'dingtalk') {
+    lines.push(
+      'MISSING  No DingTalk credentials configured in ~/.pikiclaw/setting.json',
+      '         Add dingtalkClientId (AppKey) and dingtalkClientSecret (AppSecret) from the DingTalk developer console.',
+    );
+  } else if (state.channel === 'wecom' && state.tokenProvided) {
+    lines.push('OK       WeChat Work credentials provided (wecomBotId + wecomBotSecret).');
+  } else if (state.channel === 'wecom') {
+    lines.push(
+      'MISSING  No WeChat Work credentials configured in ~/.pikiclaw/setting.json',
+      '         Create a 智能机器人 in 企业微信, then add wecomBotId and wecomBotSecret to setting.json.',
     );
   } else if (state.tokenProvided) {
     lines.push('OK       A channel token was provided.');

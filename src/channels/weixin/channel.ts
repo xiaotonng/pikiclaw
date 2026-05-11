@@ -11,6 +11,7 @@ import {
   sleep,
 } from '../base.js';
 import { WEIXIN_LIMITS } from '../../core/constants.js';
+import { ChannelHealth, type ChannelHealthLogLevel } from '../health.js';
 import {
   extractWeixinTextBody,
   markdownToWeixinPlainText,
@@ -53,6 +54,8 @@ export interface WeixinContext {
 
 export type WeixinMessageHandler = (msg: WeixinMessagePayload, ctx: WeixinContext) => Promise<any> | any;
 export type WeixinErrorHandler = (err: Error) => void;
+export type WeixinLogLevel = ChannelHealthLogLevel;
+export type WeixinLogHandler = (msg: string, level: WeixinLogLevel) => void;
 
 interface WeixinChatMeta {
   userId: string;
@@ -61,7 +64,6 @@ interface WeixinChatMeta {
 }
 
 const WEIXIN_MAX_MESSAGE_LENGTH = WEIXIN_LIMITS.maxMessageLength;
-const WEIXIN_MAX_RETRY_DELAY_MS = WEIXIN_LIMITS.maxRetryDelay;
 
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error ?? 'unknown error');
@@ -86,6 +88,7 @@ export class WeixinChannel extends Channel {
   private readonly allowedChatIds?: Set<string>;
   private readonly messageHandlers = new Set<WeixinMessageHandler>();
   private readonly errorHandlers = new Set<WeixinErrorHandler>();
+  private readonly logHandlers = new Set<WeixinLogHandler>();
   private readonly chatMeta = new Map<string, WeixinChatMeta>();
   private stopping = false;
   private updateBuf = '';
@@ -110,6 +113,11 @@ export class WeixinChannel extends Channel {
     return this;
   }
 
+  onLog(handler: WeixinLogHandler) {
+    this.logHandlers.add(handler);
+    return this;
+  }
+
   async connect(): Promise<BotInfo> {
     const shortId = this.accountId.length > 18 ? `${this.accountId.slice(0, 8)}...${this.accountId.slice(-6)}` : this.accountId;
     this.bot = {
@@ -123,7 +131,14 @@ export class WeixinChannel extends Channel {
   async listen(): Promise<void> {
     this.stopping = false;
     this.listenAbort = new AbortController();
-    let retryDelayMs = 1_000;
+    const health = new ChannelHealth({
+      label: 'Weixin',
+      opAction: 'polling',
+      initialDelayMs: 1_000,
+      maxDelayMs: WEIXIN_LIMITS.maxRetryDelay,
+      sustainedFailureHint: 'verify weixinBaseUrl / weixinBotToken / weixinAccountId in setting.json',
+      log: (msg, level) => this.emitLog(msg, level),
+    });
     try {
       while (!this.stopping) {
         try {
@@ -134,19 +149,20 @@ export class WeixinChannel extends Channel {
             timeoutMs: this.pollTimeout,
             signal: this.listenAbort.signal,
           });
-          retryDelayMs = 1_000;
           if (response.get_updates_buf !== undefined) this.updateBuf = response.get_updates_buf || '';
+          // Errcode check BEFORE recordSuccess(): an HTTP 200 carrying a
+          // business error code (e.g. "session timeout") must not silently
+          // reset the exponential backoff.
           if ((response.ret ?? 0) !== 0 || (response.errcode ?? 0) !== 0) {
             throw new Error(`Weixin getupdates failed: ${response.errmsg || response.errcode || response.ret}`);
           }
+          health.recordSuccess();
           for (const message of response.msgs || []) {
             await this.dispatchInboundMessage(message);
           }
         } catch (error) {
           if (this.stopping || isAbortError(error)) break;
-          this.emitError(new Error(`Weixin polling failed: ${describeError(error)}`));
-          await sleep(retryDelayMs);
-          retryDelayMs = Math.min(retryDelayMs * 2, WEIXIN_MAX_RETRY_DELAY_MS);
+          await sleep(health.recordFailure(error));
         }
       }
     } finally {
@@ -260,6 +276,14 @@ export class WeixinChannel extends Channel {
     for (const handler of this.errorHandlers) {
       try {
         handler(error);
+      } catch {}
+    }
+  }
+
+  private emitLog(msg: string, level: WeixinLogLevel) {
+    for (const handler of this.logHandlers) {
+      try {
+        handler(msg, level);
       } catch {}
     }
   }

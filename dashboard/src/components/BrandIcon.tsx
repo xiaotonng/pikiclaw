@@ -4,6 +4,10 @@ import feishuLogo from '../assets/brands/feishu.ico';
 import geminiLogo from '../assets/brands/gemini.svg';
 import telegramLogo from '../assets/brands/telegram.svg';
 import weixinLogo from '../assets/brands/weixin.svg';
+import slackLogo from '../assets/brands/slack.svg';
+import discordLogo from '../assets/brands/discord.svg';
+import dingtalkLogo from '../assets/brands/dingtalk.svg';
+import wecomLogo from '../assets/brands/wecom.svg';
 import playwrightLogo from '../assets/brands/playwright.ico';
 import vscodeLogo from '../assets/brands/vscode.svg';
 import cursorLogo from '../assets/brands/cursor.svg';
@@ -27,6 +31,10 @@ const brandIcons: Record<string, string> = {
   telegram: telegramLogo,
   feishu: feishuLogo,
   weixin: weixinLogo,
+  slack: slackLogo,
+  discord: discordLogo,
+  dingtalk: dingtalkLogo,
+  wecom: wecomLogo,
   playwright: playwrightLogo,
   vscode: vscodeLogo,
   cursor: cursorLogo,
@@ -46,8 +54,7 @@ const brandIcons: Record<string, string> = {
 };
 
 /**
- * Letter-only fallbacks for brands without a dedicated logo asset.
- * Currently only the generic "custom" / "+" placeholder falls through here.
+ * Letter-only fallback for the generic "custom" / "+" placeholder.
  */
 const letterFallbacks: Record<string, { letter: string; color: string; bg: string }> = {
   custom: { letter: '+', color: '#94a3b8', bg: 'rgba(148,163,184,0.12)' },

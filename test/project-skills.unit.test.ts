@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Bot } from '../src/bot/bot.ts';
-import { getProjectSkillPaths, initializeProjectSkills } from '../src/agent/index.ts';
+import { collapseSkillPrompt, getProjectSkillPaths, initializeProjectSkills } from '../src/agent/index.ts';
 import { resolveSkillPrompt } from '../src/bot/commands.ts';
 import { captureEnv, makeTmpDir, restoreEnv } from './support/env.ts';
 
@@ -92,5 +92,33 @@ describe('project skills', () => {
       expect(fs.realpathSync(path.join(workdir, '.claude', 'skills'))).toBe(fs.realpathSync(path.join(workdir, '.pikiclaw', 'skills')));
       expect(fs.realpathSync(path.join(workdir, '.agents', 'skills'))).toBe(fs.realpathSync(path.join(workdir, '.pikiclaw', 'skills')));
     }
+  });
+
+  it('collapses canonical skill expansions back to the slash command shorthand', () => {
+    const workdir = makeTmpDir('pikiclaw-collapse-skill-');
+    writeSkill(path.join(workdir, '.pikiclaw', 'skills'), 'install', '---\nlabel: Install\n---\n');
+    const bot = new Bot();
+    bot.switchWorkdir(workdir, { persist: false });
+    bot.chat(7).agent = 'claude';
+
+    // Round-trip: produce the expansion, then verify the inverse returns `/install`.
+    const noArgs = resolveSkillPrompt(bot, 7, 'sk_install', '');
+    expect(noArgs).not.toBeNull();
+    expect(collapseSkillPrompt(noArgs!.prompt)).toBe('/install');
+
+    const withArgs = resolveSkillPrompt(bot, 7, 'sk_install', 'ship it now');
+    expect(withArgs).not.toBeNull();
+    expect(collapseSkillPrompt(withArgs!.prompt)).toBe('/install ship it now');
+
+    // The claude driver collapses interior whitespace before surfacing user
+    // messages. Make sure we still recognize that single-space variant.
+    const flattened = noArgs!.prompt.replace(/\s+/g, ' ').trim();
+    expect(collapseSkillPrompt(flattened)).toBe('/install');
+
+    // Free-form text and partial matches should not collapse.
+    expect(collapseSkillPrompt('hello world')).toBeNull();
+    expect(collapseSkillPrompt('')).toBeNull();
+    expect(collapseSkillPrompt(null)).toBeNull();
+    expect(collapseSkillPrompt('[Project directory: /tmp]\n\nbuild the app')).toBeNull();
   });
 });

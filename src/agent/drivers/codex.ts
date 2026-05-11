@@ -57,11 +57,13 @@ export class CodexAppServer {
   private ready = false;
   private startPromise: Promise<boolean> | null = null;
   private configOverrides: string[] = [];
+  private extraEnv: Record<string, string> | undefined;
 
-  async ensureRunning(extraConfig?: string[]): Promise<boolean> {
+  async ensureRunning(extraConfig?: string[], extraEnv?: Record<string, string>): Promise<boolean> {
     if (this.ready && this.proc && !this.proc.killed) return true;
     if (this.startPromise) return this.startPromise;
     this.configOverrides = extraConfig ?? [];
+    this.extraEnv = extraEnv;
     this.startPromise = this._start();
     const ok = await this.startPromise;
     this.startPromise = null;
@@ -78,6 +80,7 @@ export class CodexAppServer {
         stdio: ['pipe', 'pipe', 'pipe'],
         shell: true,
         detached: process.platform !== 'win32',
+        env: this.extraEnv ? { ...process.env, ...this.extraEnv } : process.env,
       });
       this.proc = proc;
       this.buf = '';
@@ -579,6 +582,8 @@ function applyCodexTokenUsage(
     cacheCreationInputTokens: number | null;
     contextWindow: number | null;
     contextUsedTokens: number | null;
+    /** When set, codex-advertised model_context_window updates are ignored. */
+    byokContextWindow?: number | null;
     codexCumulative: CodexCumulativeUsage | null;
   },
   rawUsage: any, prev?: CodexCumulativeUsage,
@@ -609,13 +614,15 @@ function applyCodexTokenUsage(
   // those counters span the full thread, not the current turn. Use the per-turn
   // `last` usage only. `cached_input_tokens` is already a subset of
   // `input_tokens`, so adding it again inflates the context percentage.
-  const contextWindow = numberOrNull(
-    info.modelContextWindow,
-    info.model_context_window,
-    rawUsage.modelContextWindow,
-    rawUsage.model_context_window,
-  );
-  if (contextWindow != null && contextWindow > 0) s.contextWindow = contextWindow;
+  if (!s.byokContextWindow) {
+    const contextWindow = numberOrNull(
+      info.modelContextWindow,
+      info.model_context_window,
+      rawUsage.modelContextWindow,
+      rawUsage.model_context_window,
+    );
+    if (contextWindow != null && contextWindow > 0) s.contextWindow = contextWindow;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -655,6 +662,10 @@ interface CodexStreamState {
   cacheCreationInputTokens: number | null;
   contextWindow: number | null;
   contextUsedTokens: number | null;
+  /** When set, ignore codex-advertised model_context_window updates. */
+  byokContextWindow: number | null;
+  /** BYOK provider display name surfaced in preview meta + IM footers. */
+  byokProviderName: string | null;
   codexCumulative: CodexCumulativeUsage | null;
   turnId: string | null;
   turnStatus: string | null;
@@ -671,13 +682,21 @@ interface CodexStreamState {
 }
 
 function createCodexStreamState(opts: StreamOpts): CodexStreamState {
+  // BYOK: lock in the provider-cached context window so codex's own (often
+  // wrong, model-dependent) `model_context_window` reports get ignored later.
+  const byokWindow = opts.byokContextWindow && opts.byokContextWindow > 0
+    ? opts.byokContextWindow
+    : null;
+  const byokProvider = opts.byokProviderName || null;
   return {
     sessionId: opts.sessionId,
     text: '', thinking: '', activity: '', msgs: [], thinkParts: [],
     model: opts.model, thinkingEffort: opts.thinkingEffort,
     inputTokens: null, outputTokens: null,
     cachedInputTokens: null, cacheCreationInputTokens: null,
-    contextWindow: null, contextUsedTokens: null,
+    contextWindow: byokWindow, contextUsedTokens: null,
+    byokContextWindow: byokWindow,
+    byokProviderName: byokProvider,
     codexCumulative: null,
     turnId: null, turnStatus: null, turnError: null,
     messagePhases: new Map(),
@@ -949,7 +968,7 @@ export async function doCodexStream(opts: StreamOpts): Promise<StreamResult> {
       }
     }
 
-    if (!(await srv.ensureRunning(config))) {
+    if (!(await srv.ensureRunning(config, opts.extraEnv))) {
       return codexErrorResult('Failed to start codex app-server.', start, opts.sessionId, opts.model, opts.thinkingEffort);
     }
 

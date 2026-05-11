@@ -441,17 +441,21 @@ export async function prepareManagedBrowserForAutomation(
   options: ManagedBrowserAutomationOptions = {},
 ): Promise<ManagedBrowserAutomationPreparationResult> {
   const tracked = readManagedBrowserSetupState(profileDir);
-  const runningState = resolveManagedBrowserRunningState(profileDir);
-  if (runningState.running) {
-    const cdpEndpoint = await resolveManagedBrowserCdpEndpoint(tracked?.debugPort || MANAGED_BROWSER_DEBUG_PORT);
-    if (cdpEndpoint) {
-      return {
-        profileDir,
-        closedPids: [],
-        cdpEndpoint,
-        connectionMode: 'attach',
-      };
-    }
+  const cdpPort = tracked?.debugPort || MANAGED_BROWSER_DEBUG_PORT;
+
+  // CDP probe is the authoritative signal: if the managed Chrome answers on
+  // its debug port, attach to it regardless of what the setup-state file or
+  // the process table say. The ps-based running-state check is heuristic and
+  // can be wrong after a daemon restart, which would otherwise kill the
+  // user's live (and signed-in) browser.
+  const reachableEndpoint = await resolveManagedBrowserCdpEndpoint(cdpPort);
+  if (reachableEndpoint) {
+    return {
+      profileDir,
+      closedPids: [],
+      cdpEndpoint: reachableEndpoint,
+      connectionMode: 'attach',
+    };
   }
 
   const closedPids = await closeManagedBrowserProcesses(profileDir);
@@ -463,7 +467,7 @@ export async function prepareManagedBrowserForAutomation(
         profileDir,
         closedPids,
         cdpEndpoint,
-        connectionMode: 'attach',
+        connectionMode: 'launch',
       };
     }
   }

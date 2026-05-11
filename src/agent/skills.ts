@@ -170,6 +170,40 @@ export function getProjectSkillPaths(workdir: string, skillName: string): Projec
   };
 }
 
+// Matches the canonical prompt produced by `resolveSkillPrompt` (bot/commands)
+// and `resolveSkillFromPrompt` (dashboard/session-control). Both build the same
+// shape: `[Project directory: <wd>]\n\nRead the skill definition at \`<path>\`
+// and execute the instructions defined there.[ Additional context: <args>]`.
+//
+// Whitespace between the segments is tolerant (`\s+`) so the regex still
+// matches after the claude driver collapses interior `\s+` to single spaces
+// when surfacing user text in `getClaudeSessionMessages`.
+const SKILL_PROMPT_RE = /^\[Project directory: [^\]\n]+?\]\s+Read the skill definition at `([^`\n]+)` and execute the instructions defined there\.(?:\s+Additional context:\s+([\s\S]+?))?\s*$/;
+
+/**
+ * Inverse of `resolveSkillPrompt`. When a stored user message matches the
+ * canonical skill-execution expansion, return the original `/skillname [args]`
+ * shorthand for display. Returns null when the text isn't a recognized skill
+ * prompt — callers should fall back to the raw text.
+ *
+ * The expanded form is what the agent CLI actually consumed and what gets
+ * persisted to its session log; this collapse exists purely so the dashboard
+ * (and other display surfaces) can render the slash command the user typed.
+ */
+export function collapseSkillPrompt(text: string | null | undefined): string | null {
+  if (!text) return null;
+  const m = SKILL_PROMPT_RE.exec(text);
+  if (!m) return null;
+  // Skill files are always at `<root>/<skillName>/SKILL.md`. Split on both
+  // `/` and `\` so Windows-generated paths (path.join) resolve correctly.
+  const segments = m[1].split(/[/\\]/).filter(Boolean);
+  if (segments.length < 2 || segments[segments.length - 1] !== 'SKILL.md') return null;
+  const name = segments[segments.length - 2];
+  if (!name) return null;
+  const args = (m[2] || '').trim();
+  return args ? `/${name} ${args}` : `/${name}`;
+}
+
 const GLOBAL_SKILLS_ROOT = path.join(os.homedir(), '.pikiclaw', 'skills');
 
 function discoverSkillsFromDir(

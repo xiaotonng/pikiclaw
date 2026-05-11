@@ -21,6 +21,14 @@ export function hasConfiguredChannelToken(
         && config.weixinBotToken
         && config.weixinAccountId
       );
+    case 'slack':
+      return !!(config.slackBotToken && config.slackAppToken);
+    case 'discord':
+      return !!config.discordBotToken;
+    case 'dingtalk':
+      return !!(config.dingtalkClientId && config.dingtalkClientSecret);
+    case 'wecom':
+      return !!(config.wecomBotId && config.wecomBotSecret);
   }
 }
 
@@ -41,5 +49,9 @@ export function resolveConfiguredChannels(opts: {
   if (hasConfiguredChannelToken(opts.config, 'weixin', opts.tokenOverride)) detected.push('weixin');
   if (hasConfiguredChannelToken(opts.config, 'feishu', opts.tokenOverride)) detected.push('feishu');
   if (hasConfiguredChannelToken(opts.config, 'telegram', opts.tokenOverride)) detected.push('telegram');
+  if (hasConfiguredChannelToken(opts.config, 'slack', opts.tokenOverride)) detected.push('slack');
+  if (hasConfiguredChannelToken(opts.config, 'discord', opts.tokenOverride)) detected.push('discord');
+  if (hasConfiguredChannelToken(opts.config, 'dingtalk', opts.tokenOverride)) detected.push('dingtalk');
+  if (hasConfiguredChannelToken(opts.config, 'wecom', opts.tokenOverride)) detected.push('wecom');
   return detected;
 }

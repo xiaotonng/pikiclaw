@@ -41,4 +41,5 @@ export {
 
 export {
   getProviderModelList, invalidateProviderModels,
+  peekProviderModelList, peekProviderModelInfo, prefetchProviderModels,
 } from './provider-models.js';
