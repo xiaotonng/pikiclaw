@@ -32,13 +32,16 @@ import fs from 'node:fs';
 
 /**
  * Builtin catalog entries don't live in `extensions.mcp` — they're toggled by
- * a top-level config flag. Today the only builtin is `pikiclaw-browser`,
- * driven by `browserEnabled`. This helper centralizes the install/toggle/
- * remove routing so adding more builtins later is a one-line change.
+ * a top-level config flag. Each catalogId maps to one flag; add a branch when
+ * registering a new builtin.
  */
 function setBuiltinEnabled(catalogId: string, enabled: boolean): boolean {
   if (catalogId === 'pikiclaw-browser') {
     saveUserConfig({ ...loadUserConfig(), browserEnabled: enabled });
+    return true;
+  }
+  if (catalogId === 'peekaboo') {
+    saveUserConfig({ ...loadUserConfig(), peekabooEnabled: enabled });
     return true;
   }
   return false;

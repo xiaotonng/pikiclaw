@@ -91,6 +91,7 @@ describe('resolveGuiIntegrationConfig', () => {
       browserEnabled: false,
       browserProfileDir: getManagedBrowserProfileDir(),
       browserHeadless: false,
+      peekabooEnabled: false,
     });
   });
 
@@ -107,6 +108,7 @@ describe('resolveGuiIntegrationConfig', () => {
       browserEnabled: true,
       browserProfileDir: getManagedBrowserProfileDir(),
       browserHeadless: true,
+      peekabooEnabled: false,
     });
   });
 

@@ -56,7 +56,6 @@ src/
       tools/
         types.ts                     MCP tool result types and helper utilities
         workspace.ts                 im_list_files / im_send_file workspace tools
-        desktop.ts                   Desktop GUI automation via Appium Mac2
         ask-user.ts                  im_ask_user tool — block agent until user replies via IM / dashboard
 
   bot/                               Shared bot runtime — channel-agnostic business logic
@@ -94,7 +93,7 @@ src/
   dashboard/                         Web dashboard — config UI and runtime monitoring
     server.ts                        Hono-based dashboard HTTP server: static files and API routes
     runtime.ts                       Dashboard runtime singleton: bot ref, preferences, channel state cache
-    platform.ts                      macOS permission checks, Appium management, desktop helpers
+    platform.ts                      macOS permission checks, JXA helpers, desktop utilities
     session-control.ts               Public session task control surface for dashboard and API routes
     routes/
       config.ts                      Configuration, channels, permissions, browser API endpoints
@@ -209,7 +208,6 @@ Everything related to agent CLI interaction: spawning, streaming, session manage
 | `mcp/oauth.ts` | MCP OAuth 2.1 + Dynamic Client Registration |
 | `mcp/tools/types.ts` | MCP tool result types and logging helpers |
 | `mcp/tools/workspace.ts` | `im_list_files` and `im_send_file` |
-| `mcp/tools/desktop.ts` | Desktop GUI automation tools via Appium Mac2 |
 | `mcp/tools/ask-user.ts` | `im_ask_user` — block until user replies in IM / dashboard |
 
 **When to look here:** Adding a new agent driver, changing how sessions are stored, modifying MCP tool behavior, adjusting stream parsing, or working on CLI / MCP extension management.
@@ -265,7 +263,7 @@ The Hono-based HTTP server that serves the React SPA and API routes. It is the p
 |---|---|
 | `server.ts` | Hono app setup, static file serving, route mounting |
 | `runtime.ts` | Singleton: bot ref, runtime prefs, channel state cache |
-| `platform.ts` | macOS permission checks, Appium management, desktop helpers |
+| `platform.ts` | macOS permission checks, JXA helpers, desktop utilities |
 | `session-control.ts` | Task queuing and session control for dashboard-initiated runs |
 | `routes/config.ts` | Config, channels, permissions, browser API endpoints |
 | `routes/agents.ts` | Agent detection, model listing, installation API endpoints |
@@ -391,16 +389,11 @@ Registered by `agent/mcp/session-server.ts`:
 - `im_list_files`
 - `im_send_file`
 - `im_ask_user`
-- Optional macOS desktop tools from `agent/mcp/tools/desktop.ts`:
-  - `desktop_status`
-  - `desktop_open_app`
-  - `desktop_snapshot`
-  - `desktop_click`
-  - `desktop_type`
-  - `desktop_screenshot`
-  - `desktop_close_session`
 
-Browser automation can also be registered from `agent/mcp/bridge.ts` via `@playwright/mcp`, using a pikiclaw-managed persistent Chrome profile (`browser-profile.ts` + `browser-supervisor.ts`).
+Two built-in MCP servers can be registered from `agent/mcp/bridge.ts`:
+
+- **`pikiclaw-browser`** — `@playwright/mcp` against a pikiclaw-managed persistent Chrome profile (`browser-profile.ts` + `browser-supervisor.ts`). Toggled by `browserEnabled` in `setting.json`.
+- **`peekaboo`** — Peekaboo MCP (`@steipete/peekaboo`) for native macOS GUI automation via Accessibility API + ScreenCaptureKit. Toggled by `peekabooEnabled`; macOS only; requires Screen Recording + Accessibility permissions.
 
 ## Quick Reference
 
@@ -414,7 +407,7 @@ Browser automation can also be registered from `agent/mcp/bridge.ts` via `@playw
 | How a specific agent CLI is spawned | `agent/drivers/claude.ts`, `codex.ts`, or `gemini.ts` |
 | Session workspace structure | `agent/session.ts` |
 | Stream output parsing | `agent/stream.ts` + `agent/utils.ts` |
-| MCP tool behavior | `agent/mcp/tools/workspace.ts`, `desktop.ts`, `ask-user.ts` |
+| MCP tool behavior | `agent/mcp/tools/workspace.ts`, `ask-user.ts` |
 | MCP bridge lifecycle | `agent/mcp/bridge.ts` |
 | MCP extension CRUD | `agent/mcp/extensions.ts`, `agent/mcp/registry.ts` |
 | MCP OAuth | `agent/mcp/oauth.ts` |

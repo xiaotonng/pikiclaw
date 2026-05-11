@@ -62,7 +62,6 @@ src/
       oauth.ts                       MCP OAuth 2.1 + Dynamic Client Registration flow
       tools/
         workspace.ts                 im_list_files / im_send_file
-        desktop.ts                   Desktop GUI automation via Appium
         ask-user.ts                  im_ask_user — block until user replies in IM / dashboard
         types.ts                     MCP tool type definitions
 
@@ -101,7 +100,7 @@ src/
   dashboard/                         # Dashboard server + API
     server.ts                        Hono HTTP server
     runtime.ts                       Runtime singleton (bot ref, prefs, cache)
-    platform.ts                      macOS permission checks, Appium management, desktop helpers
+    platform.ts                      macOS permission checks, JXA helpers, desktop utilities
     session-control.ts               Public session task control surface
     routes/
       config.ts                      Config / channel / permission / browser API routes

@@ -17,7 +17,11 @@ npx pikiclaw@latest
 <a href="https://www.npmjs.com/package/pikiclaw"><img src="https://img.shields.io/npm/dm/pikiclaw?label=downloads&color=success" alt="npm downloads"></a>
 <a href="https://github.com/xiaotonng/pikiclaw/stargazers"><img src="https://img.shields.io/github/stars/xiaotonng/pikiclaw?style=flat&color=yellow" alt="GitHub stars"></a>
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
-<a href="https://nodejs.org"><img src="https://img.shields.io/badge/node-%E2%89%A518-green.svg" alt="Node 18+"></a>
+<a href="https://nodejs.org"><img src="https://img.shields.io/badge/node-%E2%89%A520-green.svg" alt="Node 20+"></a>
+</p>
+
+<p>
+<b>English</b> | <a href="README.zh-CN.md">简体中文</a>
 </p>
 
 <img src="docs/workspace.png" alt="Workspace" width="780">
@@ -33,27 +37,27 @@ npx pikiclaw@latest
 The product is the orchestrator. Everything else plugs in. **And the orchestrator is built using itself** — pikiclaw is what we use to build pikiclaw.
 
 ```
-    Terminal layer       Telegram   Feishu   WeChat   Web Dashboard   ( …mobile · voice · future )
-                              \__________________|__________________/
-                                                 v
-                                  ┌──────────────────────────────┐
-                                  │     pikiclaw orchestrator    │
-                                  └──────────────────────────────┘
-                                                 |
-                ┌────────────────────────────────┼────────────────────────────────┐
-                v                                v                                v
-         Agent layer                      Model layer                       Tool layer
-   Claude Code · Codex · Gemini    Claude · GPT · Gemini · DeepSeek    Skills · MCP · CLI
-   Hermes · …  (driver registry)   豆包 · MiMo · MiniMax · OpenRouter   (global × workspace)
-                                   · any third-party proxy · …
-                                                 |
-                                                 v
-                                          Your computer
+   Terminal layer    Telegram · Feishu · WeChat · Slack · Discord · DingTalk · WeCom · Web Dashboard
+                              \__________________________|__________________________/
+                                                         v
+                                          ┌──────────────────────────────┐
+                                          │     pikiclaw orchestrator    │
+                                          └──────────────────────────────┘
+                                                         |
+                ┌────────────────────────────────────────┼────────────────────────────────────────┐
+                v                                        v                                        v
+         Agent layer                              Model layer                               Tool layer
+   Claude Code · Codex · Gemini · Hermes    Claude · GPT · Gemini · DeepSeek           Skills · MCP · CLI
+   (driver registry · ACP · any agent)      豆包 · MiMo · MiniMax · OpenRouter         (global × workspace)
+                                            · any OpenAI-compatible proxy · …
+                                                         |
+                                                         v
+                                                   Your computer
 ```
 
-- **Terminal layer** — Telegram, Feishu, WeChat, and the Web Dashboard are co-equal entry points. New terminals plug in here.
-- **Agent layer** — Official Claude Code / Codex / Gemini CLIs as drivers. Hermes is next; the registry takes any agent.
-- **Model layer** — Claude / GPT / Gemini, the domestic Chinese series (DeepSeek, 豆包, MiMo, MiniMax), plus OpenRouter and any third-party proxy. Wrappers let an agent run on top of arbitrary models.
+- **Terminal layer** — Telegram, Feishu, WeChat, Slack, Discord, DingTalk, WeCom, and the Web Dashboard are co-equal entry points. New terminals plug in here.
+- **Agent layer** — Official Claude Code / Codex / Gemini / Hermes CLIs as drivers. Hermes speaks ACP (Agent Client Protocol); the registry takes any agent.
+- **Model layer** — Claude / GPT / Gemini, the domestic Chinese series (DeepSeek, 豆包, MiMo, MiniMax), plus OpenRouter and any OpenAI-compatible proxy. Providers + Profiles are a first-class layer with their own credential vault, models.dev catalog, and per-agent injection.
 - **Tool layer** — Skills, MCP servers, and CLI tools merged across global and workspace scopes, injected into every session.
 
 ---
@@ -82,7 +86,7 @@ Most "AI dev tools" assume one user, one agent, one task at a time. pikiclaw ass
 - **Mix-and-match agents** — Claude Code in pane 1, Codex in pane 2, Gemini in pane 3, all on different repos / workspaces.
 - **One toolkit** — global skills, global MCP servers, and per-workspace overrides apply uniformly. You configure once; every session inherits.
 - **Steer anywhere** — interrupt any running stream, queue a follow-up, hand control to the next agent in line.
-- **Group-mode** — drop the orchestrator into a Feishu / WeChat group; teammates share the same swarm.
+- **Group-mode** — drop the orchestrator into a Feishu / Slack / Discord / WeCom group; teammates share the same swarm.
 
 This is the shape that matters: one creator, with a swarm at their fingertips.
 
@@ -99,21 +103,23 @@ This is the shape that matters: one creator, with a swarm at their fingertips.
 <p align="center"><img src="docs/promo-dashboard-workspace.png" alt="Web Dashboard workspace" width="780"></p>
 
 <details>
-<summary><b>More: basic ops · IM access · agent config · extensions · permissions · system info</b></summary>
+<summary><b>More: basic ops · IM access · agents · models · extensions · permissions · system info</b></summary>
 
 > Send a message, watch the agent stream, receive files back.
 
 <img src="docs/promo-basic-ops.gif" alt="Basic operations" width="780">
 
-> **IM Access** — Telegram, Feishu, WeChat channel status and configuration
+> **IM Access** — Telegram, Feishu, WeChat, Slack, Discord, DingTalk, WeCom channel status and configuration
 
 <img src="docs/promo-dashboard-im.png" alt="IM Access" width="780">
 
-> **Agent Config** — default agent / model / reasoning effort, available agents overview
+> **Agents** — installed agent CLIs, default agent, per-agent model / reasoning effort
 
-<img src="docs/promo-dashboard-agents.png" alt="Agent Config" width="780">
+<img src="docs/promo-dashboard-agents.png" alt="Agents" width="780">
 
-> **Extensions** — global MCP servers, community skills, browser & desktop automation
+> **Models** — Providers + Profiles vault (Claude, GPT, Gemini, DeepSeek, 豆包, MiMo, MiniMax, OpenRouter, any OpenAI-compatible proxy), validated against models.dev catalog and injected per agent
+
+> **Extensions** — global MCP servers, community skills, managed browser + macOS desktop (Peekaboo) automation
 
 <img src="docs/promo-dashboard-extensions.png" alt="Extensions" width="780">
 
@@ -131,11 +137,12 @@ This is the shape that matters: one creator, with a swarm at their fingertips.
 
 ## Quick start
 
-**Prereqs:** Node.js 18+, plus at least one official Agent CLI logged in:
+**Prereqs:** Node.js 20+, plus at least one official Agent CLI logged in:
 
 - [`claude`](https://docs.anthropic.com/en/docs/claude-code) (Claude Code)
 - [`codex`](https://github.com/openai/codex) (Codex CLI)
 - [`gemini`](https://github.com/google-gemini/gemini-cli) (Gemini CLI)
+- `hermes` (Hermes — via ACP / Agent Client Protocol)
 
 **Launch:**
 
@@ -167,8 +174,8 @@ npx pikiclaw@latest --doctor   # environment check only
 - **Walk-away coding** — kick off a long refactor, close the laptop, drive it from your phone over Telegram. The agent keeps running locally; results stream back to chat.
 - **Multi-agent on one workspace** — let Claude Code draft an implementation, switch to Codex to review, then Gemini for a different perspective. Same files, same session history.
 - **Domestic-model routing** — run Claude Code over DeepSeek or 豆包 via a wrapper driver when latency, cost, or compliance demands a non-frontier model.
-- **Group-chat agent** — drop pikiclaw into a Feishu / WeChat work group; the team shares one orchestrator, one workspace, one set of skills.
-- **Headless operator** — give the agent browser + macOS desktop control via the built-in MCP bridge, then steer it from anywhere — book a meeting, scrape a dashboard, run an end-to-end test.
+- **Group-chat agent** — drop pikiclaw into a Feishu / Slack / Discord / WeCom work group; the team shares one orchestrator, one workspace, one set of skills.
+- **Computer-use, controlled by you** — toggle on the managed Chrome (Playwright) and macOS desktop (Peekaboo, via Accessibility + ScreenCaptureKit). The agent can `see` the screen, click, type, manage windows / menus / Dock — and you steer it from any phone. Book a meeting, scrape a dashboard, run an end-to-end test, or drive any native macOS app.
 - **Skill-driven workflows** — install community skills (`promote`, `snipe`, `review`, `security-review`, …) once and trigger them from any terminal with `/sk_<name>`.
 
 ---
@@ -177,29 +184,33 @@ npx pikiclaw@latest --doctor   # environment check only
 
 ### Terminal layer
 
-- **Telegram, Feishu, WeChat** — run one or all simultaneously. Each channel is physically isolated; adding a new one (WhatsApp, mobile app, …) doesn't touch the others.
+- **Seven IM channels** — Telegram, Feishu, WeChat (personal), Slack, Discord, DingTalk, WeCom. Run one, several, or all simultaneously. Each channel is physically isolated; adding a new one (WhatsApp, mobile app, …) doesn't touch the others.
 - **Web Dashboard** — drive sessions directly from the browser with the same conversation, tool-use, and streaming surfaces as IM. Multi-pane workspace (1 / 2 / 3 / 6 panes), light / dark theme, EN / 中文 i18n.
 - **Live streaming preview** — message updates in place as the agent thinks; long text auto-splits; images and files stream back in real time.
 
 ### Agent layer
 
-- **Official CLIs as drivers** — Claude Code, Codex CLI, Gemini CLI. No home-grown agent rewrite. You get the upstream behavior, on day-zero updates.
-- **Pluggable registry** — `agent-driver.ts` is the only contract. Hermes and future agents drop in.
+- **Official CLIs as drivers** — Claude Code, Codex CLI, Gemini CLI, and Hermes (via ACP). No home-grown agent rewrite — you get upstream behavior on day-zero updates.
+- **ACP-native** — Hermes integrates through the [Agent Client Protocol](https://agentclientprotocol.com), spawning `hermes acp` over JSON-RPC stdio. Any future ACP-compatible agent plugs in the same way.
+- **Pluggable registry** — `src/agent/driver.ts` is the only contract. New CLI- or ACP-based agents drop in alongside the four built-ins.
 - **Per-session agent switching** — same workspace, swap the brain.
 - **Steer** — interrupt a running task and let a queued message jump ahead in the queue.
 - **Codex human-in-the-loop** — when Codex pauses to ask, the question becomes an interactive IM prompt. Reply there; the task continues.
+- **Persistent goals** — `/goal` sets a long-running objective per session with token budget and pause/resume; the agent self-terminates when it audits the goal complete.
 
 ### Model layer
 
-- **Frontier + domestic + proxies** — Claude (4 family), GPT-5 / Codex, Gemini, DeepSeek, 豆包 (Doubao), MiMo, MiniMax, OpenRouter, and any third-party model proxy.
-- **Per-session model + reasoning effort** — picked from the dashboard or `/models`.
-- **Wrapper drivers** — run Claude Code or Codex on top of arbitrary models when the upstream client allows.
+- **Frontier + domestic + proxies** — Claude (4 family), GPT-5 / Codex, Gemini, DeepSeek, 豆包 (Doubao), MiMo, MiniMax, OpenRouter, and any OpenAI-compatible model proxy.
+- **Providers + Profiles vault** — first-class data model with its own credential store under `~/.pikiclaw/setting.json`. Browse a read-only models.dev catalog, validate keys with a real provider probe, then bind a profile to an agent so spawn-time env injection is automatic.
+- **Per-session model + reasoning effort** — picked from the dashboard, `/models`, or `/mode`.
+- **Per-agent injection** — `resolveAgentInjection(agentId)` applies the active profile's env vars at spawn time, so Claude Code can run on top of DeepSeek or Doubao without touching the upstream client config.
 
 ### Tool layer
 
 - **Skills** — project skills in `.pikiclaw/skills/*/SKILL.md`, compatible with `.claude/commands/*.md`. One-click install from GitHub repos (`owner/repo`) or browse recommended packs (Anthropic Official, Vercel Agent Skills, …). Trigger with `/skills` and `/sk_<name>`.
-- **MCP servers** — browse the [MCP Registry](https://registry.modelcontextprotocol.io), add custom stdio / HTTP servers, health-check with a real handshake, enable per scope. Built-ins include GitHub, Filesystem, PostgreSQL, Slack, Brave Search, Memory, Fetch, SQLite, Git, Sentry.
-- **CLI tools** — invoked through the agent's normal tool surface, augmented by pikiclaw's session-scoped MCP bridge.
+- **MCP servers** — browse the [MCP Registry](https://registry.modelcontextprotocol.io), add custom stdio / HTTP servers, health-check with a real handshake, OAuth 2.1 with Dynamic Client Registration, enable per scope. Recommended catalog includes GitHub, Atlassian, Notion, Linear, Sentry, Cloudflare, Slack, Feishu/Lark, Stripe, Hugging Face, Gamma, Brave Search, Perplexity, Filesystem, SQLite, PostgreSQL — plus two built-in computer-use servers (`pikiclaw-browser` for Chrome via Playwright, `peekaboo` for macOS GUI via Peekaboo).
+- **CLI tools** — auto-detected with live version + auth state, OAuth-web login sessions for browser-based CLIs, all invoked through the agent's normal tool surface.
+- **Session-scoped MCP bridge** — `im_list_files`, `im_send_file`, `im_ask_user`, the managed-browser tools, and the macOS desktop tools (when enabled) are injected into every session automatically.
 - **Two-scope merge** — `global < workspace < built-in`, applied automatically to every session.
 
 <p align="center"><img src="docs/promo-dashboard-extensions-add.png" alt="Add MCP server" width="780"></p>
@@ -208,11 +219,10 @@ npx pikiclaw@latest --doctor   # environment check only
 
 - **Session workspace** — every session owns a directory; file attachments land there automatically.
 - **Resume, switch, classify** — multi-turn conversations, session classification (answer / proposal / implementation / blocked / …).
-- **Session-scoped MCP bridge** — built-in `im_list_files` / `im_send_file` for streaming files back to chat.
-- **GUI automation** (optional):
-  - **Browser** — managed Chrome profile via `@playwright/mcp`; log in once, reuse credentials across tasks.
-  - **Desktop (macOS)** — Appium Mac2 with `desktop_open_app`, `desktop_snapshot`, `desktop_click`, `desktop_type`, `desktop_screenshot`.
-- **Long-task hardening** — sleep prevention, watchdog, auto-restart, daemon mode.
+- **Session-scoped MCP tools** — `im_list_files`, `im_send_file`, `im_ask_user`, and goal-management tools auto-injected into every stream.
+- **Computer-use (browser)** — built-in `pikiclaw-browser` MCP wraps `@playwright/mcp` with a shared Chrome profile and a process-level supervisor; log in once, reuse credentials across tasks.
+- **Computer-use (macOS desktop)** — built-in `peekaboo` MCP runs [Peekaboo](https://peekaboo.sh/) over Accessibility + ScreenCaptureKit; exposes `see`, `click`, `type`, `scroll`, `window`, `menu`, `app`, `dock`. Opt-in from Extensions; needs Accessibility + Screen Recording permissions. macOS only.
+- **Long-task hardening** — sleep prevention, watchdog, auto-restart, daemon mode, channel supervisor.
 
 ---
 
@@ -220,14 +230,14 @@ npx pikiclaw@latest --doctor   # environment check only
 
 | | pikiclaw | IDE assistants<br>(Cursor / Windsurf / Aider) | Cloud agents<br>(Devin / web Claude) | Single-agent IM bots |
 |---|---|---|---|---|
-| **Terminal** | IM + Web + future plug-ins | IDE only | Web app | One IM, one bot |
+| **Terminal** | 7 IM channels + Web + future plug-ins | IDE only | Web app | One IM, one bot |
 | **Where the agent runs** | Your machine | Your machine | Vendor sandbox | Often vendor |
-| **Agent choice** | Claude Code · Codex · Gemini · Hermes · … | Bundled | Single | Single |
-| **Model choice** | Frontier + domestic Chinese | Vendor-controlled | Vendor-controlled | Single |
+| **Agent choice** | Claude Code · Codex · Gemini · Hermes (ACP) · … | Bundled | Single | Single |
+| **Model choice** | Frontier + domestic Chinese + any OpenAI-compatible | Vendor-controlled | Vendor-controlled | Single |
 | **Parallel agents** | **N agents × N windows × N workspaces** | One per IDE | Sequential | One |
 | **Files / tools** | Your files, your MCP, your CLIs | Your files | Sandbox | None / limited |
 | **Plug new terminal** | Add a `Channel` class | n/a | n/a | Fork |
-| **Plug new agent** | Add an `AgentDriver` | n/a | n/a | Fork |
+| **Plug new agent** | Add an `AgentDriver` (CLI or ACP) | n/a | n/a | Fork |
 | **Self-bootstrapping** | **Yes — built with itself** | No | No | No |
 
 The shape that matters: **you stay in your environment, you keep your choice of brain, you run a swarm in parallel, and the orchestrator is the same one we use to build the orchestrator.**
@@ -240,10 +250,12 @@ The shape that matters: **you stay in your environment, you keep your choice of 
 |---|---|
 | `/start` | Entry info, current agent, working directory |
 | `/sessions` | View, switch, or create sessions |
-| `/agents` | Switch agent |
+| `/agents` | Switch agent (Claude · Codex · Gemini · Hermes) |
 | `/models` | View and switch model / reasoning effort |
 | `/mode` | Toggle plan mode (reasoning effort) |
 | `/switch` | Browse and switch working directory |
+| `/workspaces` | Pick a saved workspace from the Dashboard's quick-pick list |
+| `/goal` | Set or inspect a long-running, self-terminating session goal |
 | `/stop` | Stop current session |
 | `/status` | Runtime status, tokens, usage, session info |
 | `/host` | Host CPU / memory / disk / battery |
@@ -258,40 +270,30 @@ Plain text is forwarded to the current agent.
 
 ## Configuration
 
-- Persistent config: `~/.pikiclaw/setting.json`
-- The Dashboard is the primary configuration surface
-- Global MCP extensions: `~/.pikiclaw/setting.json` → `extensions.mcp`
-- Workspace MCP extensions: standard `.mcp.json`
+- Persistent config: `~/.pikiclaw/setting.json` — channels, agents, Providers/Profiles, workspaces, MCP extensions
+- The Dashboard is the primary configuration surface; the terminal wizard (`--setup`) and `--doctor` exist for headless setups
+- Global MCP extensions live under `extensions.mcp` in the setting file
+- Workspace MCP extensions: standard `.mcp.json` in the project root
+- Project skills: `.pikiclaw/skills/*/SKILL.md` (also picks up `.claude/commands/*.md`)
 
-<details>
-<summary><b>GUI automation setup (browser + macOS desktop)</b></summary>
+**Computer-use** is gated by two toggles under Extensions:
 
-**Browser** is fully managed by the dashboard — a dedicated Chrome profile is created and reused. Log in to the sites you need once, every future agent session reuses those credentials.
-
-**macOS desktop** needs Appium Mac2:
-
-```bash
-npm install -g appium
-appium driver install mac2
-appium
-```
-
-Then grant macOS Accessibility permission to your terminal app.
-
-Env vars: `PIKICLAW_DESKTOP_GUI`, `PIKICLAW_DESKTOP_APPIUM_URL`.
-
-</details>
+- `browserEnabled` — managed Chrome (Playwright). The first time an agent needs Chrome, pikiclaw creates a dedicated profile under `~/.pikiclaw` and reuses it across sessions. Log in to the sites you need once; every future session reuses those credentials.
+- `peekabooEnabled` — macOS desktop (Peekaboo). When on (macOS only), pikiclaw spawns `@steipete/peekaboo`'s `peekaboo-mcp` binary and injects its tools. Grant the parent terminal **Accessibility** and **Screen Recording** in System Settings → Privacy & Security before flipping the toggle.
 
 ---
 
 ## Roadmap
 
-- **Hermes driver** — first-class plug-in for the Hermes agent
-- **ACP (Agent Client Protocol)** — unified driver for any ACP-compatible agent, replacing per-agent CLI parsing — see [ACP Migration Plan](docs/acp-migration.md)
+Already shipped: Hermes driver · ACP (Agent Client Protocol) · Provider/Profile model vault · seven IM channels · computer-use (Playwright browser + Peekaboo macOS desktop).
+
+- **More ACP agents** — every new ACP-compatible agent should drop in without a hand-written driver
 - **More terminals** — WhatsApp, dedicated mobile app, voice
 - **Deeper model layer** — agent-on-arbitrary-model wrappers for more domestic series
 - **Better tool ecosystem** — recommended MCP packs, skill templates, marketplace
-- **GUI co-ordination** — tighter browser + desktop tool interplay
+- **Cross-platform computer-use** — Windows / Linux desktop drivers alongside the macOS Peekaboo bridge
+
+See [ACP Migration Plan](docs/acp-migration.md) for the protocol-side details.
 
 ---
 
@@ -307,9 +309,8 @@ npm test
 
 ```bash
 npm run dev                       # local dev (--no-daemon, logs to ~/.pikiclaw/dev/dev.log)
-npm run build                     # production build
-npm test                          # unit tests
-npm run test:e2e                  # end-to-end tests
+npm run build                     # production build (dashboard + tsc)
+npm test                          # vitest run
 npx pikiclaw@latest --doctor      # environment check
 ```
 
@@ -327,10 +328,12 @@ The project is built around layers that are *meant* to be extended. New terminal
 
 | Where | What you'd add |
 |---|---|
-| `src/agent/driver.ts`, `src/agent/drivers/*.ts` | A new agent driver |
+| `src/agent/driver.ts`, `src/agent/drivers/*.ts`, `src/agent/acp-client.ts` | A new agent driver (CLI- or ACP-based) |
 | `src/channels/base.ts`, `src/channels/*/` | A new terminal / IM channel |
+| `src/model/`, `src/model/injector.ts` | A new model provider or per-agent injection rule |
 | `src/dashboard/routes/*.ts` | A new dashboard API surface |
 | `src/agent/mcp/tools/*.ts`, `src/agent/mcp/bridge.ts` | New session-scoped MCP tools |
+| `src/catalog/*.ts` | A recommended MCP server / CLI tool / skill repo |
 
 ---
 

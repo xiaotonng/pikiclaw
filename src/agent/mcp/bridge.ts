@@ -104,6 +104,7 @@ export interface GuiIntegrationConfig {
   browserEnabled: boolean;
   browserProfileDir: string;
   browserHeadless: boolean;
+  peekabooEnabled: boolean;
 }
 
 function sanitizeExecArgv(execArgv: string[]): string[] {
@@ -174,10 +175,16 @@ export function resolveGuiIntegrationConfig(
     env.PIKICLAW_BROWSER_ENABLED ?? env.PIKICLAW_BROWSER_USE_PROFILE,
     false,
   );
+  const peekabooEnabled = boolFromConfigEnv(
+    config.peekabooEnabled,
+    env.PIKICLAW_PEEKABOO_ENABLED,
+    false,
+  );
   return {
     browserEnabled,
     browserProfileDir: getManagedBrowserProfileDir(),
     browserHeadless: boolFromConfigEnv(config.browserHeadless, env.PIKICLAW_BROWSER_HEADLESS, false),
+    peekabooEnabled,
   };
 }
 
@@ -196,25 +203,45 @@ export function buildSupplementalMcpServers(
   gui: GuiIntegrationConfig = resolveGuiIntegrationConfig(),
   endpoints: BrowserSupervisorEndpoints = {},
 ): RegisteredMcpServer[] {
-  if (!gui.browserEnabled) return [];
-  const profileDir = gui.browserProfileDir || getManagedBrowserProfileDir();
-  const cdpEndpoint = (endpoints.cdpEndpoint || '').trim() || null;
-  const browserServer = resolveManagedBrowserMcpCommand(profileDir, {
-    headless: gui.browserHeadless,
-    cdpEndpoint,
-  });
-  return [{
-    name: 'pikiclaw-browser',
-    command: browserServer.command,
-    args: browserServer.args,
-  }];
+  const servers: RegisteredMcpServer[] = [];
+  if (gui.browserEnabled) {
+    const profileDir = gui.browserProfileDir || getManagedBrowserProfileDir();
+    const cdpEndpoint = (endpoints.cdpEndpoint || '').trim() || null;
+    const browserServer = resolveManagedBrowserMcpCommand(profileDir, {
+      headless: gui.browserHeadless,
+      cdpEndpoint,
+    });
+    servers.push({
+      name: 'pikiclaw-browser',
+      command: browserServer.command,
+      args: browserServer.args,
+    });
+  }
+  if (gui.peekabooEnabled && process.platform === 'darwin') {
+    // Peekaboo — native macOS GUI automation via Accessibility + ScreenCaptureKit.
+    // Run the dedicated MCP bin from the multi-bin @steipete/peekaboo package.
+    servers.push({
+      name: 'peekaboo',
+      command: 'npx',
+      args: ['-y', '-p', '@steipete/peekaboo', 'peekaboo-mcp'],
+    });
+  }
+  return servers;
 }
 
 export function buildGuiSetupHints(gui: GuiIntegrationConfig = resolveGuiIntegrationConfig()): string[] {
-  if (!gui.browserEnabled) return [];
-  return [
-    `managed browser profile mode enabled; runtime sessions reuse ${gui.browserProfileDir || getManagedBrowserProfileDir()}; configured MCP browser mode=${gui.browserHeadless ? 'headless' : 'headed'}. This mode keeps automation isolated from your everyday browser. If the managed browser is already open, pikiclaw will try to attach to it first. When using browser_tabs, use action="new" to open a tab, not "create".`,
-  ];
+  const hints: string[] = [];
+  if (gui.browserEnabled) {
+    hints.push(
+      `managed browser profile mode enabled; runtime sessions reuse ${gui.browserProfileDir || getManagedBrowserProfileDir()}; configured MCP browser mode=${gui.browserHeadless ? 'headless' : 'headed'}. This mode keeps automation isolated from your everyday browser. If the managed browser is already open, pikiclaw will try to attach to it first. When using browser_tabs, use action="new" to open a tab, not "create".`,
+    );
+  }
+  if (gui.peekabooEnabled && process.platform === 'darwin') {
+    hints.push(
+      'Peekaboo enabled — native macOS GUI tools (see / click / type / scroll / window / menu / app / dock) via Accessibility + ScreenCaptureKit. Prefer element-ID interactions (call `see` first) over raw coordinates.',
+    );
+  }
+  return hints;
 }
 
 function buildClaudeMcpConfig(servers: RegisteredMcpServer[]) {
@@ -358,9 +385,9 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
   // supervisor singleton in `browser-supervisor.ts` caches the result so
   // concurrent streams reuse the same long-lived Chrome instance; if the
   // managed Chrome is unreachable we fall back to upstream-managed launch.
+  for (const hint of buildGuiSetupHints(gui)) opts.onLog?.(hint);
   let browserCdpEndpoint: string | null = null;
   if (gui.browserEnabled) {
-    for (const hint of buildGuiSetupHints(gui)) opts.onLog?.(hint);
     try {
       const snapshot = await ensureManagedBrowser({ headless: gui.browserHeadless });
       browserCdpEndpoint = snapshot.cdpEndpoint;

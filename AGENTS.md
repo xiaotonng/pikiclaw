@@ -49,7 +49,7 @@ src/
       registry.ts             Recommended MCP server types
       extensions.ts           MCP extension CRUD + session merge
       oauth.ts                MCP OAuth 2.1 + Dynamic Client Registration
-      tools/{workspace,desktop,ask-user,types}.ts
+      tools/{workspace,ask-user,types}.ts
 
   bot/                        Channel-agnostic bot runtime
     bot.ts                    Bot base class: chat state, session lifecycle, runStream()
@@ -72,7 +72,7 @@ src/
   dashboard/                  Hono HTTP server + React SPA
     server.ts                 App setup, static files, route mounting
     runtime.ts                Runtime singleton (bot ref, prefs, cache)
-    platform.ts               macOS permission / Appium helpers
+    platform.ts               macOS permission / JXA helpers
     session-control.ts        Dashboard-initiated task control
     routes/{config,agents,sessions,extensions,cli}.ts
 
@@ -122,7 +122,8 @@ channels/*/bot.ts
 - **Channels:** Telegram, Feishu, WeChat
 - **Agents:** Claude Code, Codex CLI, Gemini CLI
 - **Project skills:** `.pikiclaw/skills/*/SKILL.md` plus `.claude/commands/*.md` compatibility; install via `agent/skill-installer.ts`
-- **Session-scoped MCP tools:** `im_list_files`, `im_send_file`, `im_ask_user`, plus optional macOS desktop tools
+- **Session-scoped MCP tools:** `im_list_files`, `im_send_file`, `im_ask_user`
+- **macOS desktop automation:** built-in Peekaboo MCP (`peekaboo`) — Accessibility API + ScreenCaptureKit, toggled via Extensions tab
 - **Browser automation:** managed Chromium profile via `@playwright/mcp`, supervised by `browser-supervisor.ts`
 - **Extension management:** dashboard catalog (recommended + installed) for MCP servers, CLIs, and skill repos; OAuth flows for both MCP servers and CLI tools
 - **Dashboard:** Hono server + React SPA at `http://localhost:3939` for setup, monitoring, and extension management

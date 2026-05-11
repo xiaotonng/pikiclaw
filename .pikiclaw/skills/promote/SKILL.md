@@ -156,7 +156,7 @@ Drop any URL already in `replied_issues.txt`. For the remaining candidates, run 
 *MCP & GUI Automation:*
 - `im_list_files` / `im_send_file` MCP tools for file exchange with the agent
 - Managed Chrome profile via Playwright MCP (login persists across sessions)
-- macOS desktop automation via Appium Mac2
+- macOS desktop automation via Peekaboo MCP (Accessibility API + ScreenCaptureKit)
 
 *Skills & Extensibility:*
 - `.pikiclaw/skills/` reusable workflows triggered from IM
@@ -198,7 +198,7 @@ Delegate drafting to a sub-agent so the main thread stays focused on selection.
 > *MCP & GUI Automation:*
 > - Per-stream MCP bridge: `im_list_files`, `im_send_file`
 > - Managed Chrome profile via Playwright MCP — log in once, reuse
-> - macOS desktop automation via Appium Mac2 (`desktop_open_app` / `desktop_click` / `desktop_type` / `desktop_screenshot`)
+> - macOS desktop automation via Peekaboo MCP — Accessibility API + ScreenCaptureKit (`see` / `click` / `type` / `window` / `menu` / `app` / `dock`)
 >
 > *Skills & Extensibility:*
 > - `.pikiclaw/skills/` project-level workflows triggered via `/skills` and `/sk_<name>`

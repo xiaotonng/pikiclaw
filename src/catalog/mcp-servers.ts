@@ -45,6 +45,19 @@ export const MCP_SERVERS: RecommendedMcpServer[] = [
     homepage: 'https://github.com/microsoft/playwright-mcp',
     isBuiltin: true,
   },
+  {
+    id: 'peekaboo',
+    name: 'Peekaboo',
+    description: 'Native macOS GUI control via Accessibility API + ScreenCaptureKit (click, type, scroll, windows, menus, Dock). Requires Screen Recording + Accessibility permissions. macOS only.',
+    descriptionZh: '通过 macOS Accessibility 与 ScreenCaptureKit 实现原生 GUI 控制（点击、输入、滚动、窗口、菜单、Dock）。需要"屏幕录制"与"辅助功能"两项系统权限，仅支持 macOS。',
+    category: 'utility',
+    recommendedScope: 'global',
+    transport: { type: 'stdio', command: 'npx', args: ['-y', '-p', '@steipete/peekaboo', 'peekaboo-mcp'] },
+    auth: { type: 'none' },
+    iconSlug: 'apple',
+    homepage: 'https://peekaboo.sh/',
+    isBuiltin: true,
+  },
 
   // ── Local filesystems / databases (workspace scope) ────────────────────────
   {

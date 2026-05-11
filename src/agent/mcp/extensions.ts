@@ -331,11 +331,12 @@ export function getCatalogItems(opts: {
 
   const items: McpCatalogItem[] = [];
   // Builtin items derive their installed/state from a top-level config flag
-  // rather than `extensions.mcp`. Today the only builtin is `pikiclaw-browser`
-  // (driven by `browserEnabled`); add more cases here if other builtins land.
+  // rather than `extensions.mcp`. Each catalogId maps to one flag — extend the
+  // switch when adding a new builtin.
   const userConfig = loadUserConfig();
   const builtinInstalled = (catalogId: string): boolean => {
     if (catalogId === 'pikiclaw-browser') return userConfig.browserEnabled === true;
+    if (catalogId === 'peekaboo') return userConfig.peekabooEnabled === true;
     return false;
   };
 

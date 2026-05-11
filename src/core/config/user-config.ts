@@ -104,6 +104,8 @@ export interface UserConfig {
   wecomEndpoint?: string;
   browserEnabled?: boolean;
   browserHeadless?: boolean;
+  /** Peekaboo MCP for native macOS GUI control — toggled from the Extensions tab. */
+  peekabooEnabled?: boolean;
   /** Extension configuration — global MCP servers, OAuth tokens, and skills. */
   extensions?: {
     mcp?: Record<string, McpServerConfig>;
