@@ -7,6 +7,11 @@
 set -euo pipefail
 cd "$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 
+# ── 0. Security check ────────────────────────────────────────────────────────
+# Refuse to release if forbidden paths or credential-like patterns are staged.
+# Bypass once with: SECURITY_CHECK_BYPASS=1 ./scripts/release.sh
+./scripts/security-check.sh
+
 # ── 1. Bump patch version ────────────────────────────────────────────────────
 
 # Prefer the highest known release tag over package.json so stale local version

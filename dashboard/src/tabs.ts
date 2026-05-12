@@ -1,4 +1,4 @@
-export type DashboardTab = 'im' | 'agents' | 'permissions' | 'extensions' | 'sessions' | 'system';
+export type DashboardTab = 'im' | 'agents' | 'extensions' | 'sessions' | 'system';
 
 const DASHBOARD_TAB_ITEMS: ReadonlyArray<{
   key: DashboardTab;
@@ -8,7 +8,6 @@ const DASHBOARD_TAB_ITEMS: ReadonlyArray<{
   { key: 'sessions', labelKey: 'tab.sessions', descriptionKey: 'tabDesc.sessions' },
   { key: 'im', labelKey: 'tab.im', descriptionKey: 'tabDesc.im' },
   { key: 'agents', labelKey: 'tab.agent', descriptionKey: 'tabDesc.agent' },
-  { key: 'permissions', labelKey: 'tab.permissions', descriptionKey: 'tabDesc.permissions' },
   { key: 'extensions', labelKey: 'tab.extensions', descriptionKey: 'tabDesc.extensions' },
   { key: 'system', labelKey: 'tab.system', descriptionKey: 'tabDesc.system' },
 ];

@@ -177,5 +177,5 @@ npx vitest run test/code-agent.unit.test.ts
 - Persistent config is `~/.pikiclaw/setting.json`
 - The dashboard is part of the normal runtime, not just a setup helper
 - This machine always has a production/self-bootstrap communication path via `npx pikiclaw@latest`; do not kill, replace, or "clean up" that process when the task only concerns dev mode
-- `npm run dev` is the local-only development path: it runs with `--no-daemon`, stays on the checked-out source tree, and rewrites `~/.pikiclaw/dev/dev.log` from scratch on each launch
-- If a test or validation step needs a running `pikiclaw` process, use `npm run dev`
+- `npm run dev` is the local-only development path: it runs with `--no-daemon`, stays on the checked-out source tree, and rewrites `~/.pikiclaw/dev/dev.log` from scratch on each launch. When invoked without a TTY (any tool-call / piped invocation), it auto-detaches into the background and returns immediately — printing the PID and log path. Force foreground with `PIKICLAW_DEV_FOREGROUND=1`, or background with `PIKICLAW_DEV_BACKGROUND=1`.
+- If a test or validation step needs a running `pikiclaw` process, use `npm run dev`. You don't need `run_in_background:true` for the Bash tool — `dev.sh` detaches itself when stdout isn't a TTY.

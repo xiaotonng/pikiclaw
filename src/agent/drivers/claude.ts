@@ -19,6 +19,7 @@ import {
   Q, run, agentError, agentLog, agentWarn,
   appendSystemPrompt, buildStreamPreviewMeta, computeContext, pushRecentActivity,
   summarizeClaudeToolUse, summarizeClaudeToolResult, joinErrorMessages, parseTodoWriteAsPlan,
+  emitSessionIdUpdate,
   IMAGE_EXTS, mimeForExt,
   listPikiclawSessions, findPikiclawSession, isPendingSessionId,
   mergeManagedAndNativeSessions,
@@ -88,13 +89,6 @@ function claudeCmd(o: StreamOpts): string[] {
   }
   if (o.thinkingEffort) args.push('--effort', o.thinkingEffort);
   if (o.claudeAppendSystemPrompt) args.push('--append-system-prompt', o.claudeAppendSystemPrompt);
-  // We allow Claude's native `AskUserQuestion` tool to fire. In `-p` mode the
-  // CLI self-resolves it with `is_error=true content="Answer questions?"` after
-  // a short timeout (no input back-channel exists for in-turn answers), and
-  // Claude then degrades gracefully by re-asking the question as plain text in
-  // the same turn. The user replies normally in the next turn — i.e. the
-  // chat-style multi-turn flow is the answer channel. We do NOT inject a
-  // bespoke MCP `im_ask_user` tool any more; see `src/agent/mcp/bridge.ts`.
   if (o.mcpConfigPath) args.push('--mcp-config', o.mcpConfigPath);
   if (o.claudeExtraArgs?.length) args.push(...o.claudeExtraArgs);
   return args;
@@ -249,7 +243,7 @@ function claudeParse(ev: any, s: any) {
     return;
   }
   if (t === 'system') {
-    s.sessionId = ev.session_id ?? s.sessionId;
+    emitSessionIdUpdate(s, ev.session_id);
     s.model = ev.model ?? s.model;
     s.thinkingEffort = ev.thinking_level ?? s.thinkingEffort;
     if (!s.byokContextWindow) {
@@ -303,7 +297,7 @@ function claudeParse(ev: any, s: any) {
         recomputeClaudeContextUsed(s);
       }
     }
-    s.sessionId = ev.session_id ?? s.sessionId;
+    emitSessionIdUpdate(s, ev.session_id);
     s.model = ev.model ?? s.model;
     if (!s.byokContextWindow) {
       const advertised = claudeContextWindowFromModel(s.model);
@@ -385,7 +379,8 @@ function claudeParse(ev: any, s: any) {
   }
 
   if (t === 'result') {
-    s.sessionId = ev.session_id ?? s.sessionId; s.model = ev.model ?? s.model;
+    emitSessionIdUpdate(s, ev.session_id);
+    s.model = ev.model ?? s.model;
     if (ev.is_error && ev.errors?.length) s.errors = ev.errors;
     if (ev.result && !s.text.trim()) s.text = ev.result;
     s.stopReason = ev.stop_reason ?? s.stopReason;
@@ -455,6 +450,9 @@ function createClaudeStreamState(opts: StreamOpts) {
     claudeToolsById: new Map<string, { name: string; summary: string }>(),
     seenClaudeToolIds: new Set<string>(),
     subAgents: new Map<string, StreamSubAgent>(),
+    // Wired to opts.onSessionId so claudeParse can broadcast id changes the
+    // instant cc surfaces them (see emitSessionIdUpdate in agent/utils.ts).
+    _emitSessionId: opts.onSessionId ?? null,
   };
 }
 
@@ -1112,9 +1110,10 @@ function isSystemInjectedUserEvent(text: string): boolean {
   // Leading XML wrapper from a known infra tag — these are never user-authored.
   const leading = trimmed.match(/^<([a-z][a-z0-9_-]*)\b/i);
   if (leading && SYSTEM_INJECTED_USER_TAGS.has(leading[1].toLowerCase())) return true;
-  // Context compression summaries are typically very long
-  if (trimmed.length > 800) return true;
-  // Known continuation markers
+  // Context compression summaries carry a recognizable opening marker. Detect
+  // by that marker, not length — long, legitimate user prompts (multi-paragraph
+  // briefs, pasted documents) routinely exceed any size threshold and must
+  // render as real user turns.
   const lower = trimmed.toLowerCase();
   const markers = ['continued from a previous', 'summary below covers', 'earlier portion of the conversation', 'here is a summary of', 'conversation summary'];
   return markers.some(m => lower.includes(m));

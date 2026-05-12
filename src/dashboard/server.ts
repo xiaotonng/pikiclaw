@@ -16,6 +16,7 @@ import sessionRoutes from './routes/sessions.js';
 import extensionRoutes from './routes/extensions.js';
 import cliRoutes from './routes/cli.js';
 import modelsRoutes from './routes/models.js';
+import localModelsRoutes from './routes/local-models.js';
 import { runtime, type DashboardEvent } from './runtime.js';
 import { registerProcessRuntime } from '../core/process-control.js';
 import { VERSION } from '../core/version.js';
@@ -135,6 +136,7 @@ export async function startDashboard(opts: DashboardOptions = {}): Promise<Dashb
   app.route('/', extensionRoutes);
   app.route('/', cliRoutes);
   app.route('/', modelsRoutes);
+  app.route('/', localModelsRoutes);
 
   // -- Static files: serve dashboard build output --
   // Resolve path relative to this file's location (src/ or dist/)

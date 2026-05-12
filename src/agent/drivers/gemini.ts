@@ -20,7 +20,7 @@ import {
   type UsageOpts, type UsageResult, type UsageWindowInfo,
   run, agentLog, buildStreamPreviewMeta,
   appendSystemPrompt, pushRecentActivity, firstNonEmptyLine, shortValue, normalizeErrorMessage,
-  sanitizeSessionUserPreviewText,
+  sanitizeSessionUserPreviewText, emitSessionIdUpdate,
   listPikiclawSessions, findPikiclawSession, isPendingSessionId,
   mergeManagedAndNativeSessions, applyTurnWindow,
   roundPercent, emptyUsage, Q,
@@ -195,7 +195,7 @@ function geminiParse(ev: any, s: any) {
 
   // init event: {"type":"init","session_id":"...","model":"..."}
   if (t === 'init') {
-    s.sessionId = ev.session_id ?? s.sessionId;
+    emitSessionIdUpdate(s, ev.session_id);
     s.model = ev.model ?? s.model;
     s.contextWindow = geminiContextWindowFromModel(s.model) ?? s.contextWindow;
     // Gemini's stream-json drops `thought` parts and every `agent_*`/`tool_update`
@@ -241,7 +241,7 @@ function geminiParse(ev: any, s: any) {
 
   // result event: {"type":"result","status":"success","stats":{...}}
   if (t === 'result') {
-    s.sessionId = ev.session_id ?? s.sessionId;
+    emitSessionIdUpdate(s, ev.session_id);
     if (ev.status === 'error' || ev.status === 'failure') {
       const message = normalizeErrorMessage(ev.error)
         || normalizeErrorMessage(ev.errors)

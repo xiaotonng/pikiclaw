@@ -1,5 +1,5 @@
 import { Suspense, lazy, useState, useEffect, useCallback, useMemo } from 'react';
-import { Routes, Route, useLocation } from 'react-router-dom';
+import { Routes, Route, useLocation, Navigate } from 'react-router-dom';
 import { useStore } from './store';
 import { createT } from './i18n';
 import { Sidebar, type RestartPhase } from './components/Sidebar';
@@ -11,7 +11,6 @@ import { cn } from './utils';
 const SessionsTab = lazy(async () => ({ default: (await import('./pages/sessions')).SessionWorkspace }));
 const AgentTab = lazy(() => import('./pages/agents/AgentTab'));
 const IMAccessTab = lazy(async () => ({ default: (await import('./pages/im/IMAccessTab')).IMAccessTab }));
-const PermissionsTab = lazy(async () => ({ default: (await import('./pages/permissions/PermissionsTab')).PermissionsTab }));
 const ExtensionsTab = lazy(async () => ({ default: (await import('./pages/extensions/ExtensionsTab')).ExtensionsTab }));
 const SystemTab = lazy(async () => ({ default: (await import('./pages/system/SystemTab')).SystemTab }));
 const TelegramModal = lazy(async () => ({ default: (await import('./components/Modals')).TelegramModal }));
@@ -41,8 +40,8 @@ function locationToTab(pathname: string): DashboardTab {
     '/': 'sessions',
     '/im': 'im',
     '/agents': 'agents',
-    '/permissions': 'permissions',
     '/extensions': 'extensions',
+    '/permissions': 'system',
     '/system': 'system',
   };
   return map[pathname] || 'sessions';
@@ -206,11 +205,7 @@ export function App() {
                     <AgentTab />
                   </PageWrapper>
                 } />
-                <Route path="/permissions" element={
-                  <PageWrapper title={tabMeta.title} description={tabMeta.description}>
-                    <PermissionsTab />
-                  </PageWrapper>
-                } />
+                <Route path="/permissions" element={<Navigate to="/system" replace />} />
                 <Route path="/extensions" element={
                   <PageWrapper title={tabMeta.title} description={tabMeta.description}>
                     <ExtensionsTab onOpenBrowserSetup={() => setModal({ type: 'browser-setup' })} />

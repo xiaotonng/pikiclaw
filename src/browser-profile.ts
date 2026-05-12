@@ -415,6 +415,42 @@ async function waitForManagedBrowserCdpEndpoint(port: number, timeoutMs = 6_000)
   return resolveManagedBrowserCdpEndpoint(port);
 }
 
+/**
+ * Hard-reset the managed browser: SIGKILL every root pid (skipping the SIGTERM
+ * grace window) and wipe Chrome's session-restore files so the relaunch comes
+ * up with a fresh `about:blank` instead of replaying the tabs that triggered
+ * the failure. Used as the reactive recovery path when an agent stream sees an
+ * MCP browser error (Connection closed / Frame has been detached) indicating
+ * Chrome's CDP layer is wedged; a normal `closeManagedBrowserProcesses`
+ * round-trip won't help because it would restore the same poisoned tabs.
+ *
+ * Trade-off: any unrelated user-opened tabs are dropped. Acceptable here
+ * because this is invoked only after observing a real failure — the user has
+ * already lost time, and recovery beats perpetuating the wedge.
+ */
+export async function forceCloseManagedBrowser(profileDir = getManagedBrowserProfileDir()): Promise<number[]> {
+  const tracked = readManagedBrowserSetupState(profileDir);
+  const candidates = new Set<number>(findManagedBrowserRootPids(profileDir));
+  if (tracked?.pid) candidates.add(tracked.pid);
+
+  const killedPids: number[] = [];
+  for (const pid of candidates) {
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch {}
+    if (await waitForPidExit(pid, 2_000)) killedPids.push(pid);
+  }
+  clearManagedBrowserSetupState(profileDir);
+
+  const defaultDir = path.join(profileDir, 'Default');
+  const sessionsDir = path.join(defaultDir, 'Sessions');
+  try { fs.rmSync(sessionsDir, { recursive: true, force: true }); } catch {}
+  for (const name of ['Current Session', 'Current Tabs', 'Last Session', 'Last Tabs']) {
+    try { fs.rmSync(path.join(defaultDir, name), { force: true }); } catch {}
+  }
+  return killedPids;
+}
+
 async function closeManagedBrowserProcesses(profileDir: string): Promise<number[]> {
   const tracked = readManagedBrowserSetupState(profileDir);
   const candidates = new Set<number>(findManagedBrowserRootPids(profileDir));

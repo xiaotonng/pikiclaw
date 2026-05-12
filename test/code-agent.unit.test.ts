@@ -1212,6 +1212,97 @@ exit 1`;
     });
   });
 
+  it('resolves session JSONL when workdir contains underscores or dots (matching Claude Code\'s project-dir encoding)', async () => {
+    await withTempHome(async (homeDir) => {
+      // Claude Code collapses every non-alphanumeric character (including `_`
+      // and `.`) to `-` when writing `~/.claude/projects/<dir>/`. If our
+      // encoder only handled path separators, the lookup would miss the file
+      // and silently fall back to a truncated tail instead of returning the
+      // full history. Regression: harness_ppt was reporting totalTurns: 1.
+      const workdir = '/Users/test/proj_with.dots';
+      const projectDir = path.join(homeDir, '.claude', 'projects', '-Users-test-proj-with-dots');
+      const sessionId = 'sess-underscored-workdir';
+      fs.mkdirSync(projectDir, { recursive: true });
+
+      const events = [
+        { type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'first turn' }] } },
+        { type: 'assistant', message: { content: [{ type: 'text', text: 'reply 1' }] } },
+        { type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'second turn' }] } },
+        { type: 'assistant', message: { content: [{ type: 'text', text: 'reply 2' }] } },
+        { type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'third turn' }] } },
+        { type: 'assistant', message: { content: [{ type: 'text', text: 'reply 3' }] } },
+      ];
+      fs.writeFileSync(path.join(projectDir, `${sessionId}.jsonl`), events.map(e => JSON.stringify(e)).join('\n'));
+
+      const result = await getSessionMessages({ agent: 'claude', sessionId, workdir, rich: true } as any);
+      expect(result.ok).toBe(true);
+      expect(result.totalTurns).toBe(3);
+      const userMsgs = (result.messages || []).filter(m => m.role === 'user').map(m => m.text);
+      expect(userMsgs).toEqual(['first turn', 'second turn', 'third turn']);
+    });
+  });
+
+  it('preserves long legitimate user prompts (no length-based system-injected heuristic)', async () => {
+    await withTempHome(async (homeDir) => {
+      // Compression-summary detection used to fire on any user text > 800
+      // chars, which silently dropped multi-paragraph user prompts (briefs,
+      // pasted documents) — they would appear nowhere in the rendered
+      // history. Detection is now marker-based; length alone must not
+      // disqualify a user turn.
+      const workdir = '/Users/test/longprompt';
+      const projectDir = path.join(homeDir, '.claude', 'projects', '-Users-test-longprompt');
+      const sessionId = 'sess-long-user';
+      fs.mkdirSync(projectDir, { recursive: true });
+
+      const longPrompt = '我需要对团队做一些长期规划用于向上汇报。'.repeat(60); // ≈1.5k chars, no compression marker
+      expect(longPrompt.length).toBeGreaterThan(800);
+      const events = [
+        { type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'short opener' }] } },
+        { type: 'assistant', message: { content: [{ type: 'text', text: 'ack' }] } },
+        { type: 'user', message: { role: 'user', content: [{ type: 'text', text: longPrompt }] } },
+        { type: 'assistant', message: { content: [{ type: 'text', text: 'long reply' }] } },
+        { type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'follow-up' }] } },
+        { type: 'assistant', message: { content: [{ type: 'text', text: 'done' }] } },
+      ];
+      fs.writeFileSync(path.join(projectDir, `${sessionId}.jsonl`), events.map(e => JSON.stringify(e)).join('\n'));
+
+      const result = await getSessionMessages({ agent: 'claude', sessionId, workdir, rich: true } as any);
+      expect(result.ok).toBe(true);
+      expect(result.totalTurns).toBe(3);
+      const userTexts = (result.messages || []).filter(m => m.role === 'user').map(m => m.text);
+      expect(userTexts[0]).toBe('short opener');
+      expect(userTexts[1].startsWith('我需要对团队做一些长期规划')).toBe(true);
+      expect(userTexts[1].length).toBeGreaterThan(800);
+      expect(userTexts[2]).toBe('follow-up');
+    });
+  });
+
+  it('still hides genuine compression summaries injected as user events (marker-based)', async () => {
+    await withTempHome(async (homeDir) => {
+      const workdir = '/Users/test/compress';
+      const projectDir = path.join(homeDir, '.claude', 'projects', '-Users-test-compress');
+      const sessionId = 'sess-compression';
+      fs.mkdirSync(projectDir, { recursive: true });
+
+      const compressionSummary = 'Here is a summary of the conversation so far: the user asked about X, Y, Z and we covered A, B, C in detail.';
+      const events = [
+        { type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'pre-compaction opener' }] } },
+        { type: 'assistant', message: { content: [{ type: 'text', text: 'pre-compaction reply' }] } },
+        // Compression injection — should NOT render as a user turn.
+        { type: 'user', message: { role: 'user', content: [{ type: 'text', text: compressionSummary }] } },
+        { type: 'assistant', message: { content: [{ type: 'text', text: 'continuing after compaction' }] } },
+        { type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'post-compaction prompt' }] } },
+        { type: 'assistant', message: { content: [{ type: 'text', text: 'post-compaction reply' }] } },
+      ];
+      fs.writeFileSync(path.join(projectDir, `${sessionId}.jsonl`), events.map(e => JSON.stringify(e)).join('\n'));
+
+      const result = await getSessionMessages({ agent: 'claude', sessionId, workdir, rich: true } as any);
+      expect(result.ok).toBe(true);
+      const userTexts = (result.messages || []).filter(m => m.role === 'user').map(m => m.text);
+      expect(userTexts).toEqual(['pre-compaction opener', 'post-compaction prompt']);
+    });
+  });
+
   it('hydrates historical sub-agent blocks from sidecar JSONL/meta files and hides the result text from parent activity', async () => {
     await withTempHome(async (homeDir) => {
       const workdir = '/Users/test/workspace';

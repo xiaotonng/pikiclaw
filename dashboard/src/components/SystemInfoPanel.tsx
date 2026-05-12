@@ -171,3 +171,53 @@ export function SystemInfoGrid({
     </div>
   );
 }
+
+function detailText(detail: SystemMetricItem['detail']): string {
+  if (!detail) return '';
+  return Array.isArray(detail) ? detail.join(' · ') : detail;
+}
+
+export function SystemInfoList({
+  items,
+  loading,
+  className,
+}: {
+  items: SystemMetricItem[];
+  loading?: boolean;
+  className?: string;
+}) {
+  if (loading) {
+    return (
+      <div className={cn('space-y-1', className)}>
+        {Array.from({ length: 4 }, (_, index) => (
+          <div key={index} className="grid grid-cols-[80px_auto_1fr] items-baseline gap-x-4 py-1">
+            <Skeleton className="h-3 w-12" />
+            <Skeleton className="h-3 w-24" />
+            <Skeleton className="h-3 w-28" />
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <div className={cn('flex flex-wrap items-baseline gap-x-5 gap-y-1.5', className)}>
+      {items.map(item => {
+        const detail = detailText(item.detail);
+        return (
+          <div
+            key={item.key}
+            className="inline-flex items-baseline gap-1.5 whitespace-nowrap"
+            title={detail || undefined}
+          >
+            <span className="text-[10px] font-medium uppercase tracking-[0.12em] text-fg-5">{item.label}</span>
+            <span className="font-mono text-[12px] tabular-nums text-fg-2">{item.value}</span>
+            {detail && (
+              <span className="text-[11px] text-fg-5">· {detail}</span>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}

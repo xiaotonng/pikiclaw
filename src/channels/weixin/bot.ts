@@ -15,6 +15,23 @@ import {
   type SessionRuntime,
   type StreamResult,
 } from '../../bot/bot.js';
+import {
+  currentHumanLoopQuestion,
+  type HumanLoopPromptState,
+} from '../../bot/human-loop.js';
+import {
+  buildAgentsCommandView,
+  buildModeCommandView,
+  buildModelsCommandView,
+  buildSessionsCommandView,
+  buildSkillsCommandView,
+  decodeCommandAction,
+  encodeCommandAction,
+  executeCommandAction,
+  type CommandActionButton,
+  type CommandActionResult,
+  type CommandSelectionView,
+} from '../../bot/command-ui.js';
 import { BOT_SHUTDOWN_FORCE_EXIT_MS, buildSessionTaskId } from '../../bot/orchestration.js';
 import { shutdownAllDrivers } from '../../agent/driver.js';
 import { expandTilde } from '../../core/platform.js';
@@ -148,6 +165,28 @@ export class WeixinBot extends Bot {
     const [rawCommand, ...rest] = text.trim().slice(1).split(/\s+/);
     const command = rawCommand?.toLowerCase() || '';
     const args = rest.join(' ').trim();
+
+    // `/cancel` aborts any pending command-UI / im_ask_user prompt for this
+    // chat. Special-cased before the auto-cancel below so a bare `/cancel`
+    // doesn't get treated as the start of a new interactive command.
+    if (command === 'cancel' || command === 'quit') {
+      const pending = this.pendingHumanLoopPrompt(ctx.chatId);
+      if (pending) {
+        this.humanLoopCancel(pending.promptId, 'Cancelled by user.');
+        await ctx.reply('已取消。');
+      } else {
+        await ctx.reply('没有正在等待的交互。');
+      }
+      return true;
+    }
+
+    // Auto-clear any stale picker before starting a new interactive command
+    // so the user isn't trapped behind a forgotten `/agent` / `/models` etc.
+    const pendingPrompt = this.pendingHumanLoopPrompt(ctx.chatId);
+    if (pendingPrompt) {
+      this.humanLoopCancel(pendingPrompt.promptId, 'Cancelled — new command issued.');
+    }
+
     switch (command) {
       case 'help':
         await ctx.reply([
@@ -155,13 +194,14 @@ export class WeixinBot extends Bot {
           '/new - New session',
           '/status - Session status',
           '/host - Host system info',
-          '/agent [codex|claude|gemini] - Switch agent',
-          '/models [name|#] - Switch model',
+          '/agent [codex|claude|gemini] - Switch agent (interactive when no arg)',
+          '/models [name|#] - Switch model (interactive when no arg)',
           '/mode [plan|code] - Toggle plan mode (claude only)',
           '/switch [path] - Change workdir',
           '/workspaces [#] - Pick saved workspace',
           '/sessions [new|#] - List/switch sessions',
-          '/skills - List project skills',
+          '/skills - List & run project skills',
+          '/cancel - Cancel an active interactive prompt',
           '/stop - Stop current task',
           '/restart - Restart pikiclaw',
         ].join('\n'));
@@ -270,38 +310,28 @@ export class WeixinBot extends Bot {
   }
 
   private async cmdAgent(ctx: WeixinContext, args: string) {
-    if (!args) {
-      const d = getAgentsListData(this, ctx.chatId);
-      const current = d.agents.find(a => a.isCurrent);
-      const lines: string[] = [];
-      lines.push(`当前：${current ? current.label : d.currentAgent}`, '');
-      for (const a of d.agents) {
-        const tick = a.installed ? '✓' : '✗';
-        const head = a.versionShort
-          ? `${tick} ${a.label} · v${a.versionShort}`
-          : `${tick} ${a.label}`;
-        lines.push(a.isCurrent ? `${head}  ← 当前` : head);
-        if (a.boundProvider && a.boundModel) {
-          lines.push(`   └ ${a.boundProvider} / ${a.boundModel}`);
-        }
+    if (args) {
+      // Power-user shortcut: `/agent claude` switches directly without the
+      // interactive picker — same behaviour as before, preserved for muscle
+      // memory and scripted flows.
+      try {
+        const agent = normalizeAgent(args);
+        this.switchAgentForChat(ctx.chatId, agent);
+        await ctx.reply(`Agent switched to ${agent}.`);
+      } catch {
+        await ctx.reply('Unknown agent. Use: /agent codex|claude|gemini');
       }
-      const ids = d.agents.filter(a => a.installed).map(a => a.agent).join('|');
-      lines.push('', `切换：/agent ${ids || 'codex|claude|gemini|hermes'}`);
-      await ctx.reply(lines.join('\n'));
       return;
     }
-    try {
-      const agent = normalizeAgent(args);
-      this.switchAgentForChat(ctx.chatId, agent);
-      await ctx.reply(`Agent switched to ${agent}.`);
-    } catch {
-      await ctx.reply('Unknown agent. Use: /agent codex|claude|gemini');
-    }
+    await this.runCommandUiLoop(ctx, () => buildAgentsCommandView(this, ctx.chatId));
   }
 
   private async cmdModels(ctx: WeixinContext, args: string) {
-    const d = await getModelsListData(this, ctx.chatId);
     if (args) {
+      // Power-user shortcut: `/models <number|name>` switches directly. Skips
+      // the multi-step picker (model + effort + Apply) used by the interactive
+      // path; effort stays unchanged.
+      const d = await getModelsListData(this, ctx.chatId);
       const idx = parseInt(args, 10);
       let modelId: string | null = null;
       if (!isNaN(idx) && idx >= 1 && idx <= d.models.length) {
@@ -318,21 +348,7 @@ export class WeixinBot extends Bot {
       await ctx.reply(`Unknown model: ${args}`);
       return;
     }
-    const lines = [`Current: ${d.currentModel}`, ''];
-    d.models.forEach((m, i) => {
-      const alias = m.alias ? ` (${m.alias})` : '';
-      const mark = m.isCurrent ? ' ←' : '';
-      lines.push(`${i + 1}. ${m.id}${alias}${mark}`);
-    });
-    if (d.effort) {
-      lines.push('', `Effort: ${d.effort.current}`);
-      for (const lv of d.effort.levels) {
-        const mark = lv.isCurrent ? ' ←' : '';
-        lines.push(`  ${lv.id} - ${lv.label}${mark}`);
-      }
-    }
-    lines.push('', 'Usage: /models <name|number>');
-    await ctx.reply(lines.join('\n'));
+    await this.runCommandUiLoop(ctx, () => buildModelsCommandView(this, ctx.chatId));
   }
 
   private async cmdMode(ctx: WeixinContext, args: string) {
@@ -340,16 +356,17 @@ export class WeixinBot extends Bot {
       await ctx.reply('Mode toggle is only available for Claude agent.');
       return;
     }
-    const isPlan = this.agentConfigs.claude.permissionMode === 'plan';
     if (args === 'plan') {
       this.switchPermissionModeForChat(ctx.chatId, 'plan');
       await ctx.reply('Mode: Plan (read-only)');
-    } else if (args === 'code') {
+      return;
+    }
+    if (args === 'code') {
       this.switchPermissionModeForChat(ctx.chatId, 'bypassPermissions');
       await ctx.reply('Mode: Code (full access)');
-    } else {
-      await ctx.reply(`Current: ${isPlan ? 'Plan (read-only)' : 'Code (full access)'}\n\nUsage: /mode plan|code`);
+      return;
     }
+    await this.runCommandUiLoop(ctx, () => buildModeCommandView(this, ctx.chatId));
   }
 
   private async cmdSwitch(ctx: WeixinContext, args: string) {
@@ -384,6 +401,7 @@ export class WeixinBot extends Bot {
 
     const trimmed = args.trim();
     if (trimmed) {
+      // Power-user shortcut: `/workspaces <#>` switches directly.
       const idx = parseInt(trimmed, 10);
       if (Number.isNaN(idx) || idx < 1 || idx > data.workspaces.length) {
         await ctx.reply(`Workspace #${trimmed} not found. Use /workspaces to list.`);
@@ -399,14 +417,79 @@ export class WeixinBot extends Bot {
       return;
     }
 
-    const lines = ['Saved workspaces:', `Current: ${data.currentWorkdir}`, ''];
+    // Interactive picker — there is no `command-ui` builder for workspaces
+    // (Telegram/Feishu render this via channel-local helpers), so we open a
+    // tailored human-loop prompt here. Disabled rows for missing paths are
+    // marked so users see them but can't pick.
+    const taskId = `wxcmd-ws-${Date.now().toString(36)}`;
+    const promptLines: string[] = [
+      '【Workspaces】',
+      `Current: ${data.currentWorkdir}`,
+      '',
+    ];
+    const pickable: Array<{ index: number; ws: typeof data.workspaces[number] }> = [];
     data.workspaces.forEach((ws, i) => {
       const marker = ws.isCurrent ? '✓' : ws.exists ? ' ' : '⚠';
-      lines.push(`${marker} ${i + 1}. ${ws.name}`);
-      lines.push(`     ${ws.path}`);
+      promptLines.push(`${marker} ${i + 1}. ${ws.name}`);
+      promptLines.push(`     ${ws.path}${!ws.exists ? '  [missing]' : ''}`);
+      if (ws.exists && !ws.isCurrent) pickable.push({ index: i, ws });
     });
-    lines.push('', 'Usage: /workspaces <number> to switch.');
-    await ctx.reply(lines.join('\n'));
+    if (!pickable.length) {
+      promptLines.push('', 'No switchable workspaces (all current or missing).');
+      await ctx.reply(promptLines.join('\n'));
+      return;
+    }
+    promptLines.push('', '━━━━━━');
+    pickable.forEach((p, i) => promptLines.push(`${i + 1}. ${p.ws.name} — ${p.ws.path}`));
+    promptLines.push('', '回复编号选择,或回复 /cancel 取消');
+    const promptText = promptLines.join('\n');
+
+    const options = pickable.map(p => ({
+      label: `${p.ws.name} — ${p.ws.path}`,
+      description: null,
+      value: `ws:${p.index}`,
+    }));
+
+    await new Promise<void>((resolve) => {
+      const active = this.beginHumanLoopPrompt({
+        taskId,
+        chatId: ctx.chatId,
+        title: 'Workspaces',
+        hint: 'Reply with the option number to switch.',
+        questions: [{
+          id: 'pick',
+          header: 'Workspaces',
+          prompt: promptText,
+          options,
+          allowFreeform: false,
+        }],
+        resolveWith: (answers) => {
+          const picked = answers['pick']?.[0] || '';
+          if (!picked.startsWith('ws:')) return null;
+          const idx = parseInt(picked.slice(3), 10);
+          if (!Number.isFinite(idx) || idx < 0 || idx >= data.workspaces.length) return null;
+          return { workspaceIndex: idx };
+        },
+      });
+
+      void this.channel.send(ctx.chatId, promptText)
+        .catch(err => this.log(`weixin /workspaces send failed: ${describeError(err)}`));
+
+      active.result
+        .then(async (resolved) => {
+          const idx = (resolved as any)?.workspaceIndex;
+          if (typeof idx !== 'number') { resolve(); return; }
+          const ws = data.workspaces[idx];
+          if (!ws?.exists) {
+            await ctx.reply('Workspace path is missing on disk.');
+            resolve(); return;
+          }
+          const oldPath = this.switchWorkdir(ws.path);
+          await ctx.reply(`Workdir switched:\n${oldPath}\n→ ${ws.path}`);
+          resolve();
+        })
+        .catch(() => resolve());
+    });
   }
 
   private async cmdSessions(ctx: WeixinContext, args: string) {
@@ -418,6 +501,8 @@ export class WeixinBot extends Bot {
     }
     const idx = parseInt(arg, 10);
     if (!isNaN(idx) && idx >= 1) {
+      // Power-user shortcut: `/sessions <#>` jumps directly using the same
+      // first-100 lookup the old text flow used.
       const d = await getSessionsPageData(this, ctx.chatId, 0, 100);
       const target = d.sessions[idx - 1];
       if (target) {
@@ -434,33 +519,13 @@ export class WeixinBot extends Bot {
       await ctx.reply(`Session #${idx} not found.`);
       return;
     }
-    const d = await getSessionsPageData(this, ctx.chatId, 0, 10);
-    if (!d.sessions.length) {
-      await ctx.reply('No sessions found.');
-      return;
-    }
-    const lines = [`Sessions (${d.total}):`, ''];
-    d.sessions.forEach((s, i) => {
-      const mark = s.isCurrent ? ' ←' : '';
-      const running = s.isRunning ? ' [running]' : '';
-      lines.push(`${i + 1}. ${s.title} · ${s.time}${mark}${running}`);
-    });
-    lines.push('', 'Usage: /sessions new | /sessions <#>');
-    await ctx.reply(lines.join('\n'));
+    // Interactive list with pagination — `executeCommandAction` returns the
+    // next page as a fresh view, so the loop re-renders without leaving.
+    await this.runCommandUiLoop(ctx, () => buildSessionsCommandView(this, ctx.chatId, 0));
   }
 
   private async cmdSkills(ctx: WeixinContext) {
-    const d = getSkillsListData(this, ctx.chatId);
-    if (!d.skills.length) {
-      await ctx.reply('No project skills found.');
-      return;
-    }
-    const lines = [`Skills (${d.agent}):`, ''];
-    for (const s of d.skills) {
-      const desc = s.description ? ` - ${s.description}` : '';
-      lines.push(`/${s.command} (${s.label})${desc}`);
-    }
-    await ctx.reply(lines.join('\n'));
+    await this.runCommandUiLoop(ctx, () => buildSkillsCommandView(this, ctx.chatId));
   }
 
   private async cmdStop(ctx: WeixinContext) {
@@ -512,11 +577,289 @@ export class WeixinBot extends Bot {
     await this.channel.send(chatId, text);
   }
 
+  /**
+   * Format a human-in-the-loop prompt as plain text for WeChat (no card / button
+   * support on personal accounts). Options are numbered so the user can either
+   * reply with the number or freeform text — both are routed back through the
+   * same handler in `handleMessage`.
+   */
+  private formatHumanLoopPromptText(prompt: HumanLoopPromptState): string {
+    const question = currentHumanLoopQuestion(prompt);
+    const lines: string[] = [];
+    lines.push(`【${prompt.title || 'Pikiclaw needs your input'}】`);
+    if (prompt.hint) lines.push(prompt.hint);
+    if (prompt.questions.length > 1) {
+      lines.push(`(${prompt.currentIndex + 1}/${prompt.questions.length})`);
+    }
+    if (question) {
+      lines.push('');
+      lines.push(question.prompt);
+      if (question.options && question.options.length) {
+        lines.push('');
+        question.options.forEach((opt, idx) => {
+          lines.push(`${idx + 1}. ${opt.label}${opt.description ? ` — ${opt.description}` : ''}`);
+        });
+        lines.push('');
+        lines.push('Reply with a number to pick an option, or type your own answer.');
+      } else {
+        lines.push('');
+        lines.push('Reply with your answer.');
+      }
+    }
+    return lines.join('\n');
+  }
+
+  protected override async renderInteractionPrompt(prompt: HumanLoopPromptState, chatId: string | number): Promise<void> {
+    const text = this.formatHumanLoopPromptText(prompt);
+    try {
+      await this.channel.send(String(chatId), text);
+    } catch (error) {
+      this.log(`weixin renderInteractionPrompt failed: ${describeError(error)}`);
+    }
+  }
+
+  /**
+   * If the incoming text looks like an option number (e.g. "1", "2.", "③"),
+   * resolve it against the current question's options. Otherwise return null
+   * and let the freeform path take over.
+   */
+  private parseHumanLoopOptionPick(text: string, prompt: HumanLoopPromptState): string | null {
+    const question = currentHumanLoopQuestion(prompt);
+    if (!question?.options?.length) return null;
+    const trimmed = text.replace(/[.。、)]\s*$/, '').trim();
+    const match = trimmed.match(/^(\d+)$/);
+    if (!match) return null;
+    const idx = parseInt(match[1], 10);
+    if (!Number.isFinite(idx) || idx < 1 || idx > question.options.length) return null;
+    const opt = question.options[idx - 1];
+    return opt?.value || opt?.label || null;
+  }
+
+  // ---- Command-UI adapter (numbered-text fallback for non-card IMs) -------
+  //
+  // Telegram / Feishu render `CommandSelectionView` as tap-able button cards.
+  // WeChat (personal accounts) can't render cards, so we flatten each view's
+  // button rows into a numbered text prompt and let the user reply with a
+  // digit. Re-uses the SAME `executeCommandAction` data layer — no parallel
+  // logic — so `/agents` / `/models` / `/sessions` / `/skills` / `/mode`
+  // behave identically across channels, just rendered differently.
+
+  private decorateCommandButtonLabel(button: CommandActionButton): string {
+    let label = button.label.trim();
+    if (button.state === 'current' || button.primary) label += ' ✓';
+    if (button.state === 'running') label += ' [running]';
+    if (button.state === 'unavailable') label += ' [n/a]';
+    return label;
+  }
+
+  /**
+   * Render a `CommandSelectionView` as plain WeChat text: title + meta lines +
+   * detailed item list (when present) + numbered button list. Always ends with
+   * "回复编号选择" so the user knows what to do next.
+   */
+  private formatCommandViewText(view: CommandSelectionView, buttons: CommandActionButton[]): string {
+    const lines: string[] = [];
+    lines.push(`【${view.title}】`);
+    if (view.detail) lines.push(view.detail);
+    for (const meta of view.metaLines) lines.push(meta);
+    if (view.items?.length) {
+      lines.push('');
+      for (const item of view.items) {
+        const marker = item.state === 'current' ? '✓' : item.state === 'running' ? '⟳' : ' ';
+        lines.push(`${marker} ${item.label}`);
+        if (item.detail) lines.push(`   ${item.detail}`);
+      }
+    }
+    if (buttons.length) {
+      lines.push('');
+      lines.push('━━━━━━');
+      buttons.forEach((b, i) => lines.push(`${i + 1}. ${this.decorateCommandButtonLabel(b)}`));
+      lines.push('', '回复编号选择,或回复 /cancel 取消');
+    } else if (view.emptyText) {
+      lines.push('', view.emptyText);
+    } else if (view.helperText) {
+      lines.push('', view.helperText);
+    }
+    return lines.join('\n');
+  }
+
+  private formatCommandNotice(notice: { title: string; value?: string | null; detail?: string | null }): string {
+    const parts: string[] = [`【${notice.title}】`];
+    if (notice.value) parts.push(notice.value);
+    if (notice.detail) parts.push(notice.detail);
+    return parts.join('\n');
+  }
+
+  /**
+   * Open one prompt for a `CommandSelectionView` and resolve once the user
+   * picks an option (or cancels). The picked CommandAction is executed via the
+   * shared `executeCommandAction` so the side effects (state mutations,
+   * notices) match every other channel exactly.
+   */
+  private async promptCommandView(ctx: WeixinContext, view: CommandSelectionView): Promise<CommandActionResult | null> {
+    const buttons = view.rows.flat();
+    if (!buttons.length) {
+      await ctx.reply(this.formatCommandViewText(view, []));
+      return null;
+    }
+
+    const taskId = `wxcmd-${Date.now().toString(36)}`;
+    const promptText = this.formatCommandViewText(view, buttons);
+    const options = buttons.map(button => ({
+      label: this.decorateCommandButtonLabel(button),
+      description: null,
+      value: encodeCommandAction(button.action),
+    }));
+
+    return new Promise<CommandActionResult | null>((resolve) => {
+      const active = this.beginHumanLoopPrompt({
+        taskId,
+        chatId: ctx.chatId,
+        title: view.title,
+        hint: view.helperText || null,
+        questions: [{
+          id: 'pick',
+          header: view.title,
+          prompt: promptText,
+          options,
+          allowFreeform: false,
+        }],
+        resolveWith: (answers) => {
+          const picked = answers['pick']?.[0];
+          if (!picked) return null;
+          const action = decodeCommandAction(picked);
+          return action ? { action } : null;
+        },
+      });
+
+      void this.channel.send(ctx.chatId, promptText)
+        .catch(err => this.log(`weixin command UI send failed: ${describeError(err)}`));
+
+      active.result
+        .then(async (resolved) => {
+          const action = (resolved as any)?.action ?? null;
+          if (!action) { resolve(null); return; }
+          try {
+            const result = await executeCommandAction(this, ctx.chatId, action);
+            resolve(result);
+          } catch (err) {
+            this.log(`weixin executeCommandAction failed: ${describeError(err)}`);
+            resolve(null);
+          }
+        })
+        .catch(() => resolve(null));
+    });
+  }
+
+  /**
+   * Multi-step command flow driver. Some views (notably `/models`'s "select
+   * model → set effort → Apply") return another `CommandSelectionView` from
+   * `executeCommandAction` rather than a terminal notice; this loop keeps
+   * re-prompting until we hit a notice / skill / noop / cancellation. Capped
+   * at 12 iterations to guard against pathological loops.
+   */
+  private async runCommandUiLoop(ctx: WeixinContext, viewBuilder: () => Promise<CommandSelectionView> | CommandSelectionView): Promise<void> {
+    let view: CommandSelectionView | null = await Promise.resolve(viewBuilder());
+    let safety = 12;
+    while (view && safety-- > 0) {
+      const result = await this.promptCommandView(ctx, view);
+      if (!result) return;
+      switch (result.kind) {
+        case 'view':
+          view = result.view;
+          continue;
+        case 'notice':
+          await ctx.reply(this.formatCommandNotice(result.notice));
+          return;
+        case 'skill':
+          // Dispatch the resolved skill prompt back through the regular task
+          // pipeline (same machinery as a typed message), so the agent picks
+          // it up with the right session + workspace.
+          await ctx.reply(`Running /${result.skillName}…`);
+          await this.dispatchUserPrompt(ctx, result.prompt, []);
+          return;
+        case 'noop':
+          await ctx.reply(result.message || '(no change)');
+          return;
+      }
+    }
+    if (safety <= 0) await ctx.reply('Command UI loop terminated (too many steps).');
+  }
+
+  /**
+   * Submit a user-authored prompt through the same path `handleMessage` uses
+   * for natural-language messages. Lets the command-UI loop forward a resolved
+   * `/skill` expansion as if the user had typed it.
+   */
+  private async dispatchUserPrompt(ctx: WeixinContext, text: string, files: string[]): Promise<void> {
+    const session = this.resolveSession(ctx.chatId, text, files);
+    const prompt = buildPrompt(text, files);
+    const taskId = buildSessionTaskId(session, this.nextTaskId++);
+    this.beginTask({
+      taskId,
+      chatId: ctx.chatId,
+      agent: session.agent,
+      sessionKey: session.key,
+      prompt,
+      startedAt: Date.now(),
+      sourceMessageId: ctx.messageId,
+    });
+    void this.queueSessionTask(session, async () => {
+      const abortController = new AbortController();
+      const task = this.markTaskRunning(taskId, () => abortController.abort());
+      if (task?.cancelled) { this.finishTask(taskId); return; }
+      try {
+        const result = await this.runStream(
+          prompt,
+          session,
+          files,
+          () => {},
+          undefined,
+          this.createMcpSendFile(ctx.chatId),
+          abortController.signal,
+          this.createInteractionHandler(ctx.chatId, taskId, session.key),
+        );
+        await this.sendResult(ctx.chatId, result);
+      } catch (error) {
+        await ctx.reply(`Error: ${describeError(error)}`);
+      } finally {
+        this.finishTask(taskId);
+        this.syncSelectedChats(session);
+      }
+    }, taskId).catch(error => {
+      this.finishTask(taskId);
+      this.log(`weixin queue execution failed: ${describeError(error)}`);
+    });
+  }
+
   private async handleMessage(msg: WeixinMessagePayload, ctx: WeixinContext) {
     const text = msg.text.trim();
     if (text.startsWith('/') && await this.handleCommand(text, ctx)) return;
     if (!text && !msg.files.length) {
       await ctx.reply('This Weixin channel currently supports text input only.');
+      return;
+    }
+
+    // Active human-in-the-loop prompt takes priority — text-only replies are
+    // routed back to the pending question (option-number pick OR freeform).
+    const pendingPrompt = this.pendingHumanLoopPrompt(ctx.chatId);
+    if (pendingPrompt && text && !msg.files.length) {
+      const optionValue = this.parseHumanLoopOptionPick(text, pendingPrompt);
+      const result = optionValue
+        ? this.humanLoopSelectOption(pendingPrompt.promptId, optionValue)
+        : this.humanLoopSubmitText(ctx.chatId, text);
+      if (!result) {
+        await ctx.reply('Could not record that answer. Please retry or wait for the agent.');
+        return;
+      }
+      if (result.completed) {
+        await ctx.reply('Answer submitted.');
+      } else if (result.advanced) {
+        const next = this.humanLoopPrompt(pendingPrompt.promptId);
+        if (next) await this.channel.send(ctx.chatId, this.formatHumanLoopPromptText(next));
+      } else {
+        await ctx.reply('Answer recorded.');
+      }
       return;
     }
 

@@ -26,6 +26,7 @@ import { BrandIcon } from '../../components/BrandIcon';
 import { Badge, Button, Input, Label, Modal, ModalHeader, ModelSelect, Select, Spinner } from '../../components/ui';
 import { SectionCard } from '../shared';
 import ModelsSection, { useModelLayer, type ModelLayerSnapshot } from '../models/ModelsTab';
+import LocalModelsSection from '../local-models/LocalModelsSection';
 
 const NATIVE_PROVIDER_VALUE = '__native__';
 const AGENT_ORDER: Agent[] = ['claude', 'codex', 'gemini', 'hermes'];
@@ -202,6 +203,8 @@ type CopyPack = {
   installing: string;
   modelsTitle: string;
   modelsHint: string;
+  localTitle: string;
+  localHint: string;
   // Inline editor labels
   rowProvider: string;
   rowModel: string;
@@ -258,6 +261,8 @@ function getCopy(locale: Locale): CopyPack {
       installing: '安装中…',
       modelsTitle: '模型供应商',
       modelsHint: '接入 BYOK 供应商；接入后可在上方任一智能体卡片的「供应商」下拉中选用。',
+      localTitle: '本地模型',
+      localHint: '在本机检测 Ollama / LM Studio 并按内存推荐合适的开源模型；接入后会作为一个供应商出现在智能体卡片中。',
       rowProvider: '供应商',
       rowModel: '模型',
       rowEffort: '推理强度',
@@ -310,6 +315,8 @@ function getCopy(locale: Locale): CopyPack {
     installing: 'Installing…',
     modelsTitle: 'Model Providers',
     modelsHint: 'Connect BYOK providers; pick one in any agent card above.',
+    localTitle: 'Local Models',
+    localHint: 'Detect Ollama / LM Studio on this machine and surface coding models that fit your RAM. Connected backends show up as a provider on the agent cards.',
     rowProvider: 'Provider',
     rowModel: 'Model',
     rowEffort: 'Effort',
@@ -1172,6 +1179,16 @@ export function AgentTab() {
           </div>
         </div>
         <ModelsSection snapshot={modelLayer} />
+      </section>
+
+      <section className="space-y-3 pt-4">
+        <div className="flex items-baseline justify-between border-t border-edge pt-4">
+          <div>
+            <div className="text-base font-semibold tracking-tight text-fg">{copy.localTitle}</div>
+            <div className="mt-0.5 text-[13px] leading-relaxed text-fg-4">{copy.localHint}</div>
+          </div>
+        </div>
+        <LocalModelsSection onConnected={handleConfigSaved} />
       </section>
 
       {/* Defaults modal — agent only */}

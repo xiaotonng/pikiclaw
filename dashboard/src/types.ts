@@ -223,6 +223,82 @@ export interface HostInfo {
   battery?: { percent: string; state: string };
 }
 
+// ---------------------------------------------------------------------------
+// Local model backends (Ollama / LM Studio)
+// ---------------------------------------------------------------------------
+
+export interface LocalBackendStatus {
+  id: 'ollama' | 'lmstudio';
+  label: string;
+  detected: boolean;
+  version?: string;
+  baseURL: string;
+  openAIBaseURL: string;
+  models: Array<{ id: string; sizeBytes?: number }>;
+  /** Provider id (in the BYOK layer) already pointing at this backend, if any. */
+  existingProviderId: string | null;
+  installHint: { homepage: string; brewFormula?: string };
+}
+
+export interface LocalModelCatalogEntry {
+  id: string;
+  name: string;
+  publisher: string;
+  paramsB: number;
+  sizeGb: number;
+  minRamGb: number;
+  description: string;
+  descriptionZh: string;
+  ollamaTag?: string;
+  lmstudioId?: string;
+  homepage?: string;
+  installed: { backend: 'ollama' | 'lmstudio'; id: string } | null;
+}
+
+export interface LocalModelsProbeResponse {
+  ok: boolean;
+  backends?: LocalBackendStatus[];
+  catalog?: LocalModelCatalogEntry[];
+  error?: string;
+}
+
+/**
+ * Single selectable option in a human-in-the-loop interaction question.
+ * Mirrors AgentInteractionOption from the server.
+ */
+export interface InteractionOption {
+  label: string;
+  description?: string | null;
+  value: string;
+}
+
+/** A single question presented in a human-in-the-loop interaction prompt. */
+export interface InteractionQuestion {
+  id: string;
+  header: string;
+  prompt: string;
+  options?: InteractionOption[] | null;
+  allowFreeform?: boolean;
+  secret?: boolean;
+  allowEmpty?: boolean;
+}
+
+/**
+ * Serialisable snapshot of an active human-in-the-loop prompt. Mirrors the
+ * server's InteractionSnapshot — surfaces in session stream snapshots so the
+ * dashboard can render the matching popup.
+ */
+export interface InteractionSnapshot {
+  promptId: string;
+  kind: 'user-input' | 'permission' | 'confirmation';
+  title: string;
+  hint?: string | null;
+  questions: InteractionQuestion[];
+  /** 0-based index of the question currently awaiting an answer. Used by the
+   *  client to render the active question on initial load / reconnect. */
+  currentIndex?: number;
+}
+
 export interface SessionInfo {
   sessionId: string;
   title?: string;

@@ -5,9 +5,11 @@ import type {
   BrowserStatusResponse,
   CliCatalogItem,
   CliStatus,
+  InteractionSnapshot,
   OpenTarget,
   GitChangesResult,
   HostInfo,
+  LocalModelsProbeResponse,
   LsDirResult,
   McpCatalogItem,
   McpHealthResult,
@@ -306,6 +308,64 @@ export const api = {
       { timeoutMs: 15_000 },
     ),
 
+  // Local model backends (Ollama / LM Studio)
+  probeLocalModels: (opts?: ApiRequestOptions) =>
+    json<LocalModelsProbeResponse>('/api/local-models/probe', { timeoutMs: 8_000, ...opts }),
+  connectLocalBackend: (backend: 'ollama' | 'lmstudio') =>
+    post<{ ok: boolean; providerId?: string; alreadyConnected?: boolean; error?: string }>(
+      '/api/local-models/connect',
+      { backend },
+    ),
+  /**
+   * Pull a model via Ollama's streaming `/api/pull`. Returns an async iterator
+   * over decoded NDJSON events so the caller can render a live progress bar.
+   * The returned `cancel()` aborts the upstream pull as well.
+   */
+  pullLocalModel: (
+    backend: 'ollama',
+    model: string,
+  ): { events: AsyncIterable<OllamaPullEvent>; cancel: () => void } => {
+    const controller = new AbortController();
+    const promise = fetch('/api/local-models/pull', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ backend, model }),
+      signal: controller.signal,
+    });
+    async function* iterate(): AsyncIterable<OllamaPullEvent> {
+      const res = await promise;
+      if (!res.ok || !res.body) {
+        let detail = `HTTP ${res.status}`;
+        try {
+          const j = await res.json();
+          if (j?.error) detail = j.error;
+        } catch { /* keep status */ }
+        throw new Error(detail);
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let nl = buffer.indexOf('\n');
+        while (nl !== -1) {
+          const line = buffer.slice(0, nl).trim();
+          buffer = buffer.slice(nl + 1);
+          nl = buffer.indexOf('\n');
+          if (!line) continue;
+          try { yield JSON.parse(line) as OllamaPullEvent; } catch { /* skip malformed */ }
+        }
+      }
+      const tail = buffer.trim();
+      if (tail) {
+        try { yield JSON.parse(tail) as OllamaPullEvent; } catch { /* skip */ }
+      }
+    }
+    return { events: iterate(), cancel: () => controller.abort() };
+  },
+
   // Session hub
   getWorkspaces: () => json<{ ok: boolean; workspaces: WorkspaceEntry[] }>('/api/workspaces'),
   getWorkspaceSessions: (workdir: string, opts?: ApiRequestOptions) =>
@@ -435,6 +495,18 @@ export const api = {
       { taskId },
       opts,
     ),
+  /**
+   * Stop the running stream AND cancel every queued task for a session.
+   * Backed by `bot.stopAllSessionTasks`; takes (agent, sessionId) so it works
+   * even in the small window after `sendSessionMessage` where the client
+   * hasn't received the streamTaskId yet.
+   */
+  stopSession: (agent: string, sessionId: string, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; interrupted?: boolean; cancelledQueued?: number; error?: string }>(
+      '/api/session-hub/session/stop',
+      { agent, sessionId },
+      opts,
+    ),
   steerSession: (taskId: string, opts?: ApiRequestOptions) =>
     post<{ ok: boolean; steered?: boolean; error?: string }>(
       '/api/session-hub/session/steer',
@@ -448,7 +520,55 @@ export const api = {
       `/api/session-hub/session/stream-state?agent=${encodeURIComponent(agent)}&sessionId=${encodeURIComponent(sessionId)}`,
       { timeoutMs: 5_000, ...opts },
     ),
+
+  // Human-in-the-loop interaction (im_ask_user / Codex requestUserInput)
+  /** Pick a predefined option as the answer to the current question. */
+  interactionSelectOption: (
+    promptId: string,
+    value: string,
+    requestFreeform?: boolean,
+    opts?: ApiRequestOptions,
+  ) =>
+    post<{ ok: boolean; completed?: boolean; advanced?: boolean; error?: string }>(
+      `/api/interaction/${encodeURIComponent(promptId)}/select`,
+      { value, requestFreeform: !!requestFreeform },
+      opts,
+    ),
+  /** Submit freeform text as the answer to the current question. */
+  interactionSubmitText: (promptId: string, text: string, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; completed?: boolean; advanced?: boolean; error?: string }>(
+      `/api/interaction/${encodeURIComponent(promptId)}/text`,
+      { text },
+      opts,
+    ),
+  /** Skip the current question (mark as answered with no value). */
+  interactionSkip: (promptId: string, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; completed?: boolean; advanced?: boolean; error?: string }>(
+      `/api/interaction/${encodeURIComponent(promptId)}/skip`,
+      {},
+      opts,
+    ),
+  /** Cancel the prompt entirely — the agent receives an error. */
+  interactionCancel: (promptId: string, opts?: ApiRequestOptions) =>
+    post<{ ok: boolean; cancelled?: boolean; error?: string }>(
+      `/api/interaction/${encodeURIComponent(promptId)}/cancel`,
+      {},
+      opts,
+    ),
 };
+
+/**
+ * Single event from Ollama's `/api/pull` NDJSON stream. The set of `status`
+ * strings is taken from Ollama's source and not exhaustive; treat `error`
+ * presence as terminal failure and `status === 'success'` as terminal success.
+ */
+export interface OllamaPullEvent {
+  status?: string;
+  digest?: string;
+  total?: number;
+  completed?: number;
+  error?: string;
+}
 
 /** Snapshot of the latest streaming state for a session (returned by polling endpoint). */
 export interface StreamSnapshot {
@@ -464,5 +584,7 @@ export interface StreamSnapshot {
   plan?: StreamPlan | null;
   sessionId?: string | null;
   error?: string;
+  /** Active human-in-the-loop interaction prompts (im_ask_user / Codex user-input). */
+  interactions?: InteractionSnapshot[];
   updatedAt: number;
 }

@@ -15,7 +15,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   getManagedBrowserProfileDir,
@@ -24,6 +24,7 @@ import {
 import { ensureManagedBrowser } from '../../browser-supervisor.js';
 import { loadUserConfig } from '../../core/config/user-config.js';
 import { MCP_TIMEOUTS, MCP_ARTIFACT_MAX_BYTES } from '../../core/constants.js';
+import type { AgentInteraction, AgentInteractionQuestion } from '../types.js';
 import { mergeExtensionsForSession, getGlobalExtensionsAsServers } from './extensions.js';
 
 // ---------------------------------------------------------------------------
@@ -44,6 +45,11 @@ export type McpSendFileCallback = (
   filePath: string,
   opts: McpSendFileOpts,
 ) => Promise<McpSendFileResult>;
+
+/** Routes an `im_ask_user` MCP call into the host's human-loop pipeline. */
+export type AskUserCallback = (
+  request: AgentInteraction,
+) => Promise<Record<string, any> | null>;
 
 export interface McpBridgeHandle {
   /** Path to the generated MCP config JSON — pass to agent CLI via --mcp-config. */
@@ -72,6 +78,8 @@ export interface McpBridgeOpts {
   stagedFiles: string[];
   /** Callback invoked when the agent calls the send_file MCP tool. Optional for dashboard sessions. */
   sendFile?: McpSendFileCallback;
+  /** Callback for `im_ask_user`. When omitted, the tool isn't registered. */
+  onInteraction?: AskUserCallback;
   /** Agent type — determines how MCP server is registered. */
   agent?: string;
   /** Optional log sink for MCP tool activity. */
@@ -269,6 +277,108 @@ function buildGeminiMcpConfig(servers: RegisteredMcpServer[]) {
 }
 
 // ---------------------------------------------------------------------------
+// Stale playwright-mcp reaper
+// ---------------------------------------------------------------------------
+
+/**
+ * Find and SIGTERM playwright-mcp processes that attach to the same managed
+ * Chrome CDP endpoint but are NOT descendants of the current pikiclaw process.
+ *
+ * Background: playwright-mcp is spawned by the agent CLI (e.g. claude) as a
+ * child via the mcp-config we write. When the agent CLI is killed ungracefully
+ * — or worse, gets reparented to launchd/init and survives across pikiclaw
+ * restarts — its playwright-mcp child stays alive too. Multiple playwright-mcp
+ * instances attached to the same `--cdp-endpoint` cause backend state
+ * confusion (microsoft/playwright-mcp#1299, #893) and manifest as
+ * `Connection closed` errors or 2+ minute hangs the next time a tool is
+ * called. The community's recommended hygiene is one playwright-mcp per
+ * agent instance; this sweeper enforces that by reaping orphans from prior
+ * runs at the start of every new bridge.
+ *
+ * Safety: a candidate is only reaped if its `ppid` chain — walked entirely in
+ * memory from a single `ps` snapshot — does NOT include the current pikiclaw
+ * process. In-flight playwright-mcp children of THIS pikiclaw (sibling
+ * streams) are always spared.
+ */
+/**
+ * Pure matcher for the reaper. Returns true when `command` looks like a
+ * playwright-mcp process attached to the same CDP endpoint as ours.
+ *
+ * Accepts both invocation forms we have seen in the wild:
+ *   - `node <path>/@playwright/mcp/cli.js …`   (direct, pikiclaw's preferred)
+ *   - `node <path>/node_modules/.bin/playwright-mcp …`   (npm bin symlink,
+ *     used by `npx @playwright/mcp` and any agent CLI that resolves via PATH)
+ *
+ * The CDP endpoint must also appear literally in the argv — without that
+ * guard a stray `npm exec @playwright/mcp` with its own browser would be
+ * killed, and unrelated `node -e <src>` processes whose inline source happens
+ * to mention `@playwright/mcp` would also be misidentified.
+ */
+export function _matchPlaywrightMcpProcessCommand(
+  command: string,
+  normalizedCdpEndpoint: string,
+): boolean {
+  if (!command || !normalizedCdpEndpoint) return false;
+  const tokens = command.split(/\s+/);
+  if (tokens.length < 2) return false;
+  if (!/(?:^|[\\/])node(?:\.exe)?$/.test(tokens[0])) return false;
+  const isCliJs = /@playwright[\\/]mcp[\\/]cli\.js$/.test(tokens[1]);
+  const isBinSymlink = /[\\/]\.bin[\\/]playwright-mcp(?:\.cmd)?$/.test(tokens[1]);
+  if (!isCliJs && !isBinSymlink) return false;
+  if (!command.includes(normalizedCdpEndpoint)) return false;
+  return true;
+}
+
+function reapStalePlaywrightMcpProcesses(
+  cdpEndpoint: string,
+): { reaped: number[]; spared: number[] } {
+  const reaped: number[] = [];
+  const spared: number[] = [];
+  if (process.platform === 'win32' || !cdpEndpoint) return { reaped, spared };
+
+  const result = spawnSync('ps', ['-axo', 'pid=,ppid=,command='], { encoding: 'utf8' });
+  if (result.status !== 0) return { reaped, spared };
+
+  const ppidByPid = new Map<number, number>();
+  const candidates: number[] = [];
+  const normalized = cdpEndpoint.replace(/\/+$/, '');
+  const lines = String(result.stdout || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+
+  for (const line of lines) {
+    const m = line.match(/^(\d+)\s+(\d+)\s+(.*)$/);
+    if (!m) continue;
+    const pid = Number(m[1]);
+    const ppid = Number(m[2]);
+    if (!Number.isFinite(pid) || !Number.isFinite(ppid)) continue;
+    ppidByPid.set(pid, ppid);
+    if (pid === process.pid) continue;
+    const command = m[3] || '';
+    if (!_matchPlaywrightMcpProcessCommand(command, normalized)) continue;
+    candidates.push(pid);
+  }
+
+  const isOurDescendant = (pid: number): boolean => {
+    let cur: number | undefined = pid;
+    for (let depth = 0; depth < 30 && cur != null && cur > 1; depth++) {
+      if (cur === process.pid) return true;
+      cur = ppidByPid.get(cur);
+    }
+    return false;
+  };
+
+  for (const pid of candidates) {
+    if (isOurDescendant(pid)) { spared.push(pid); continue; }
+    try {
+      process.kill(pid, 'SIGTERM');
+      reaped.push(pid);
+    } catch {
+      // Already dead — no-op.
+    }
+  }
+  return { reaped, spared };
+}
+
+// ---------------------------------------------------------------------------
 // Bridge implementation
 // ---------------------------------------------------------------------------
 
@@ -377,7 +487,7 @@ export function resolveSendFilePath(
 }
 
 export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHandle | null> {
-  const { sessionDir, workspacePath, stagedFiles, sendFile } = opts;
+  const { sessionDir, workspacePath, stagedFiles, sendFile, onInteraction } = opts;
   let hadActivity = false;
   const gui = resolveGuiIntegrationConfig();
   // Resolve the managed-browser CDP endpoint eagerly so the Playwright MCP
@@ -401,6 +511,12 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
     } catch (err: any) {
       opts.onLog?.(`managed browser ensure failed: ${err?.message || err}; falling back to upstream-managed launch.`);
     }
+    if (browserCdpEndpoint) {
+      const { reaped, spared } = reapStalePlaywrightMcpProcesses(browserCdpEndpoint);
+      if (reaped.length) {
+        opts.onLog?.(`reaped ${reaped.length} stale playwright-mcp process(es) attached to ${browserCdpEndpoint}: pid=${reaped.join(',')}${spared.length ? ` (spared in-tree: ${spared.join(',')})` : ''}`);
+      }
+    }
   }
 
   // Build allowed roots: workspace + workdir + /tmp
@@ -410,20 +526,27 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
 
   // ── HTTP callback server ──
   // Started only when an IM-side callback is wired up, to serve:
-  //   - `im_send_file` → /send-file
+  //   - `im_send_file`  → /send-file
+  //   - `im_ask_user`   → /ask-user
   //   - structured tool-activity logging from the in-process MCP server → /log
   let callbackServer: http.Server | null = null;
   let port = 0;
-  const needsCallbackServer = !!sendFile;
+  const needsCallbackServer = !!sendFile || !!onInteraction;
 
   if (needsCallbackServer) {
     callbackServer = http.createServer((req, res) => {
       const endpoint = req.url || '';
-      const known = endpoint === '/send-file' || endpoint === '/log';
+      const known = endpoint === '/send-file' || endpoint === '/log' || endpoint === '/ask-user';
       if (req.method !== 'POST' || !known) {
         res.writeHead(404);
         res.end();
         return;
+      }
+
+      // /ask-user blocks until the user replies; disable timeouts for it.
+      if (endpoint === '/ask-user') {
+        req.setTimeout(0);
+        res.setTimeout(0);
       }
 
       let body = '';
@@ -446,6 +569,67 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
             }
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ ok: true }));
+            return;
+          }
+
+          if (endpoint === '/ask-user') {
+            if (!onInteraction) {
+              res.writeHead(503, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ok: false, error: 'ask-user is not available for this session' }));
+              return;
+            }
+            const data = JSON.parse(body || '{}');
+            const question = typeof data.question === 'string' ? data.question.trim() : '';
+            if (!question) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ok: false, error: 'question is required' }));
+              return;
+            }
+            const header = typeof data.header === 'string' ? data.header.trim() : '';
+            const hint = typeof data.hint === 'string' ? data.hint.trim() : '';
+            const allowFreeform = data.allowFreeform == null ? true : !!data.allowFreeform;
+            const rawOptions = Array.isArray(data.options) ? data.options : [];
+            const interactionOptions = rawOptions
+              .map((o: any) => {
+                const label = typeof o?.label === 'string' ? o.label.trim() : '';
+                const description = typeof o?.description === 'string' ? o.description.trim() : '';
+                return label ? { label, description: description || null, value: label } : null;
+              })
+              .filter((o: any): o is { label: string; description: string | null; value: string } => !!o);
+
+            const questionId = 'ask-user';
+            const interactionQuestion: AgentInteractionQuestion = {
+              id: questionId,
+              header: header || 'Question',
+              prompt: question,
+              options: interactionOptions.length ? interactionOptions : null,
+              allowFreeform: interactionOptions.length ? allowFreeform : true,
+            };
+
+            const requestId = `ask-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+            const interaction: AgentInteraction = {
+              kind: 'user-input',
+              id: requestId,
+              title: header || 'Pikiclaw needs your input',
+              hint: hint || null,
+              questions: [interactionQuestion],
+              resolveWith: (answers) => {
+                const values = answers[questionId] || [];
+                const text = values.map(v => String(v ?? '').trim()).filter(Boolean).join(' ');
+                return { answer: text };
+              },
+            };
+
+            hadActivity = true;
+            try {
+              const response = await onInteraction(interaction);
+              const answer = typeof (response as any)?.answer === 'string' ? (response as any).answer : '';
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ok: true, answer }));
+            } catch (askErr: any) {
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ok: false, error: askErr?.message || 'ask-user cancelled' }));
+            }
             return;
           }
 
@@ -518,6 +702,9 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
 
     // Per-request body timers above guard against partial uploads.
     callbackServer.headersTimeout = MCP_TIMEOUTS.serverHeaders;
+    // /ask-user can block indefinitely; drop the server-wide request timeout
+    // when that endpoint is wired up.
+    if (onInteraction) callbackServer.requestTimeout = 0;
 
     await new Promise<void>((resolve, reject) => {
       callbackServer!.on('error', reject);
@@ -530,11 +717,15 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
   const supplementalServers = buildSupplementalMcpServers(gui, { cdpEndpoint: browserCdpEndpoint });
   const servers: RegisteredMcpServer[] = [...supplementalServers];
 
-  // Register the pikiclaw IM tools server only when an IM-side callback is
-  // wired up (sendFile). The callback server (and its random port) only exists
-  // for that flow today.
-  if (port && sendFile) {
+  // Register the pikiclaw stdio MCP server when any in-process tool needs the
+  // callback channel. `MCP_TOOLS_AVAILABLE` tells the server which tool
+  // families to advertise.
+  if (port && (sendFile || onInteraction)) {
     const { command, args } = resolveMcpServerCommand();
+    const enabledTools: string[] = [];
+    if (sendFile) enabledTools.push('workspace');
+    // Codex has native user-input via JSON-RPC; don't expose `im_ask_user`.
+    if (onInteraction && opts.agent !== 'codex') enabledTools.push('ask-user');
     const envVars = {
       MCP_WORKSPACE_PATH: workspacePath,
       MCP_WORKDIR: opts.workdir || '',
@@ -542,6 +733,7 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
       MCP_STAGED_FILES: JSON.stringify(stagedFiles),
       MCP_CALLBACK_URL: `http://127.0.0.1:${port}`,
       MCP_LOG_URL: `http://127.0.0.1:${port}/log`,
+      MCP_TOOLS_AVAILABLE: enabledTools.join(','),
     };
     servers.unshift({ name: 'pikiclaw', command, args, env: envVars });
   }

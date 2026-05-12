@@ -21,7 +21,7 @@ type CascadeStep = 'closed' | 'agent' | 'model' | 'effort';
 const draftStore = new Map<string, { text: string; files: File[] }>();
 function draftKey(agent: string, sessionId: string) { return `${agent}:${sessionId}`; }
 
-export const InputComposer = memo(function InputComposer({ session, workdir, onStreamQueued, onSendStart, onSendTaskAssigned, onSessionChange, t, streamPhase, streamTaskId, queuedTaskIds, queuedTasks, pendingPrompt, onRecall, onSteer, editDraft, onEditDraftConsumed }: {
+export const InputComposer = memo(function InputComposer({ session, workdir, onStreamQueued, onSendStart, onSendTaskAssigned, onSessionChange, t, streamPhase, streamTaskId, queuedTaskIds, queuedTasks, pendingPrompt, onRecall, onSteer, onStopAll, editDraft, onEditDraftConsumed }: {
   session: SessionInfo;
   workdir: string;
   onStreamQueued: () => void;
@@ -36,6 +36,8 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
   pendingPrompt?: string | null;
   onRecall?: (taskId: string) => void;
   onSteer?: (taskId: string) => void;
+  /** Stop the running stream AND cancel every queued task for this session. */
+  onStopAll?: () => void | Promise<void>;
   editDraft?: string | null;
   onEditDraftConsumed?: () => void;
 }) {
@@ -360,11 +362,19 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
     if (taskId === localTaskId) setLocalTaskId(null);
   }, [recallingIds, effectiveQueuedId, localTaskId, onRecall]);
 
-  const handleStop = useCallback(() => {
-    if (!streamTaskId || recallingIds.has(streamTaskId)) return;
-    setRecallingIds(prev => { const next = new Set(prev); next.add(streamTaskId); return next; });
-    onRecall?.(streamTaskId);
-  }, [recallingIds, streamTaskId, onRecall]);
+  const [stoppingAll, setStoppingAll] = useState(false);
+  // "Stop" means halt the conversation, not "recall this one taskId". We call
+  // the session-scoped stop endpoint so:
+  //   1. queued follow-ups don't keep firing after the user hits stop, and
+  //   2. the button still works in the brief window after a fresh send where
+  //      `streamTaskId` is still null (no WS snapshot yet). The endpoint takes
+  //      (agent, sessionId), which the panel always has.
+  const handleStop = useCallback(async () => {
+    if (stoppingAll || !onStopAll) return;
+    setStoppingAll(true);
+    try { await onStopAll(); }
+    finally { setStoppingAll(false); }
+  }, [stoppingAll, onStopAll]);
 
   const handleSteerQueued = useCallback((taskId: string) => {
     if (steeringIds.has(taskId)) return;
@@ -485,11 +495,11 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
                 <span className="flex-1 min-w-0 text-[12px] font-medium text-fg-3 truncate">{t('hub.running')}</span>
                 <button
                   onClick={handleStop}
-                  disabled={!streamTaskId || (streamTaskId ? recallingIds.has(streamTaskId) : false)}
+                  disabled={stoppingAll}
                   title={t('hub.stopHint')}
                   className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-fg-4 hover:text-err hover:bg-err/10 transition-colors disabled:opacity-30 disabled:pointer-events-none shrink-0"
                 >
-                  {streamTaskId && recallingIds.has(streamTaskId)
+                  {stoppingAll
                     ? <Spinner className="h-2.5 w-2.5" />
                     : <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2" /></svg>}
                   {t('hub.stop')}

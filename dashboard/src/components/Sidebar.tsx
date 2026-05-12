@@ -14,7 +14,6 @@ const TAB_ROUTES: Record<string, string> = {
   sessions: '/',
   im: '/im',
   agents: '/agents',
-  permissions: '/permissions',
   extensions: '/extensions',
   system: '/system',
 };

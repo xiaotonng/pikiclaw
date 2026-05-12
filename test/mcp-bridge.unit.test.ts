@@ -6,6 +6,7 @@ import {
   resolveManagedBrowserMcpCommand,
 } from '../src/browser-profile.ts';
 import {
+  _matchPlaywrightMcpProcessCommand,
   buildGuiSetupHints,
   buildSupplementalMcpServers,
   resolveGuiIntegrationConfig,
@@ -196,5 +197,39 @@ describe('buildGuiSetupHints', () => {
     expect(hints).toEqual([
       `managed browser profile mode enabled; runtime sessions reuse ${profileDir}; configured MCP browser mode=headless. This mode keeps automation isolated from your everyday browser. If the managed browser is already open, pikiclaw will try to attach to it first. When using browser_tabs, use action="new" to open a tab, not "create".`,
     ]);
+  });
+});
+
+describe('_matchPlaywrightMcpProcessCommand', () => {
+  const ENDPOINT = 'http://127.0.0.1:39222';
+
+  it('matches the direct cli.js invocation that pikiclaw itself spawns', () => {
+    const command = '/opt/homebrew/bin/node /repo/node_modules/@playwright/mcp/cli.js --cdp-endpoint http://127.0.0.1:39222 --output-dir /tmp/out';
+    expect(_matchPlaywrightMcpProcessCommand(command, ENDPOINT)).toBe(true);
+  });
+
+  it('matches the npm bin-symlink invocation used by npx / agent CLIs', () => {
+    const command = 'node /repo/node_modules/.bin/playwright-mcp --cdp-endpoint http://127.0.0.1:39222';
+    expect(_matchPlaywrightMcpProcessCommand(command, ENDPOINT)).toBe(true);
+  });
+
+  it('skips processes attached to a different CDP endpoint', () => {
+    const command = 'node /repo/node_modules/@playwright/mcp/cli.js --cdp-endpoint http://127.0.0.1:9999';
+    expect(_matchPlaywrightMcpProcessCommand(command, ENDPOINT)).toBe(false);
+  });
+
+  it('skips unrelated node -e scripts whose inline source mentions playwright-mcp', () => {
+    const command = 'node -e console.log("@playwright/mcp/cli.js http://127.0.0.1:39222")';
+    expect(_matchPlaywrightMcpProcessCommand(command, ENDPOINT)).toBe(false);
+  });
+
+  it('skips bin-symlink processes that do not target our endpoint', () => {
+    const command = 'node /repo/node_modules/.bin/playwright-mcp';
+    expect(_matchPlaywrightMcpProcessCommand(command, ENDPOINT)).toBe(false);
+  });
+
+  it('returns false when given empty inputs', () => {
+    expect(_matchPlaywrightMcpProcessCommand('', ENDPOINT)).toBe(false);
+    expect(_matchPlaywrightMcpProcessCommand('node x.js --cdp-endpoint http://127.0.0.1:39222', '')).toBe(false);
   });
 });

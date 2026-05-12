@@ -38,12 +38,17 @@ export function whichSync(cmd: string): string | null {
 }
 
 /**
- * Encode an absolute workdir path as a single directory-name segment by
- * replacing path separators (`/`, `\`) and the Windows drive-letter colon
- * with `-`. Mirrors the scheme Claude Code uses under `~/.claude/projects/`.
+ * Encode an absolute workdir path as a single directory-name segment.
+ * Mirrors Claude Code's scheme under `~/.claude/projects/`: every non
+ * alphanumeric character collapses to `-`. Critically that includes
+ * underscores and dots (e.g. `/path/to/harness_ppt` → `-path-to-harness-ppt`),
+ * which matches the encoding Claude Code uses on disk. Replacing only path
+ * separators leaves a workdir whose name contains `_` (or `.`) pointing at
+ * a directory that does not exist, so session JSONL lookups silently fall
+ * back to an empty/truncated result.
  */
 export function encodePathAsDirName(p: string): string {
-  return p.replace(/[/\\:]/g, '-');
+  return p.replace(/[^a-zA-Z0-9]/g, '-');
 }
 
 /**

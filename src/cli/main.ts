@@ -26,6 +26,7 @@ import {
   requestProcessRestart,
 } from '../core/process-control.js';
 import { runSetupWizard } from './setup-wizard.js';
+import { FROM_LAUNCHD_ENV, maybePromptAutostart } from './autostart.js';
 import {
   applyUserConfig,
   loadUserConfig,
@@ -60,6 +61,16 @@ async function runDaemon(userArgs: string[]): Promise<never> {
   const forwardedArgs = userArgs.filter(a => !DAEMON_STRIP_ARGS.has(a));
   const restartCmd = process.env.PIKICLAW_RESTART_CMD;
   const restartStateFile = createRestartStateFilePath(process.pid);
+
+  // Auto-start enrollment: only when the user explicitly typed `--daemon`
+  // (the watchdog itself is on by default, so we use the explicit flag as
+  // the signal of "I'm settling in for long-term use"). Fire-and-forget so
+  // the bot still comes up immediately; the dialog appears a few seconds
+  // later. No-op when already enrolled, declined, non-interactive, or
+  // already running under launchd — see src/cli/autostart.ts.
+  if (userArgs.includes('--daemon')) {
+    maybePromptAutostart(daemonLog);
+  }
 
   let restartDelay = DAEMON_RESTART_DELAY_MS;
   let attempt = 0;
@@ -301,6 +312,10 @@ Docs: https://github.com/xiaotonng/pikiclaw
  */
 function persistWorkdir(args: Record<string, any>, userConfig: Partial<UserConfig>): Partial<UserConfig> {
   if (process.env.PIKICLAW_DAEMON_CHILD) return userConfig;
+  // launchd launches the process from `/`; without `-w`, that would clobber
+  // the user's saved workdir to "/". Skip persistence so the config stays
+  // whatever the user previously chose interactively.
+  if (process.env[FROM_LAUNCHD_ENV]) return userConfig;
   const nextWorkdir = path.resolve(args.workdir || process.cwd());
   if (userConfig.workdir === nextWorkdir) return userConfig;
   updateUserConfig({ workdir: nextWorkdir });
@@ -419,7 +434,10 @@ async function runSetupPhase(
   if (useDashboard) {
     dashboard = await startDashboard({
       port: args.dashboardPort || 3939,
-      open: true,
+      // Suppress the browser pop on auto-start: launchd has no user-facing
+      // terminal and the user did not just type a command, so a tab spawn
+      // would be unsolicited.
+      open: !process.env[FROM_LAUNCHD_ENV],
     });
 
     if (needsSetup) {

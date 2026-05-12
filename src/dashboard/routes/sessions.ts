@@ -11,6 +11,7 @@ import { listAgents, listSkills, type Agent, type SessionInfo } from '../../agen
 import { getSessionStatusForBot } from '../../bot/session-status.js';
 import {
   cancelSessionTask,
+  stopSessionTasks,
   getSessionStreamState,
   queueDashboardSessionTask,
   forkDashboardSessionTask,
@@ -594,6 +595,23 @@ app.post('/api/session-hub/session/recall', async (c) => {
       return c.json({ ok: false, error: 'taskId is required' }, 400);
     }
     const result = cancelSessionTask(taskId);
+    return c.json(result, result.ok ? 200 : 503);
+  } catch (e: any) {
+    return c.json({ ok: false, error: e.message }, 500);
+  }
+});
+
+// Stop the running stream AND cancel every queued task for a session.
+// Takes (agent, sessionId) rather than taskId so it works during the moment
+// after a fresh send where the client hasn't yet learned the streamTaskId.
+app.post('/api/session-hub/session/stop', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { agent, sessionId } = body || {};
+    if (!agent || !sessionId) {
+      return c.json({ ok: false, error: 'agent and sessionId are required' }, 400);
+    }
+    const result = stopSessionTasks(agent, sessionId);
     return c.json(result, result.ok ? 200 : 503);
   } catch (e: any) {
     return c.json({ ok: false, error: e.message }, 500);

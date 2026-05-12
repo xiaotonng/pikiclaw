@@ -184,11 +184,7 @@ const TEMPLATES: ProviderTemplate[] = [
 interface Copy {
   sectionTitle: string;
   sectionHint: string;
-  templatesLabel: string;
-  configuredLabel: string;
-
-  emptyTitle: string;
-  emptyHint: string;
+  addLabel: string;
 
   validate: string;
   validating: string;
@@ -196,7 +192,6 @@ interface Copy {
   remove: string;
   removeConfirm: string;
   unbound: string;
-  templateConnected: string;
   modelsAvailable: (count: number) => string;
 
   modalAddTitle: string;
@@ -239,10 +234,7 @@ function getCopy(locale: Locale): Copy {
     return {
       sectionTitle: '模型供应商',
       sectionHint: '连接你自己的模型供应商，凭据加密存入系统 Keychain，可绑定到任意一个智能体。',
-      templatesLabel: '快捷接入',
-      configuredLabel: '已配置',
-      emptyTitle: '尚未连接任何供应商',
-      emptyHint: '点击上方任一模板开始接入。',
+      addLabel: '接入新供应商',
       validate: '校验',
       validating: '校验中',
       edit: '编辑',
@@ -279,17 +271,13 @@ function getCopy(locale: Locale): Copy {
       validationUnvalidated: '未校验',
       providerOnlyHint: '保存后回到智能体卡片，点击「BYOK」选择具体的模型与推理强度。',
       credentialLabel: '凭据',
-      templateConnected: '已接入',
       modelsAvailable: count => `可用 ${count} 个模型`,
     };
   }
   return {
     sectionTitle: 'Model Providers',
     sectionHint: 'Connect your own model providers. Keys are encrypted in the OS keychain and can be bound to any agent.',
-    templatesLabel: 'Quick Connect',
-    configuredLabel: 'Connected',
-    emptyTitle: 'No providers connected yet',
-    emptyHint: 'Pick any template above to get started.',
+    addLabel: 'Add provider',
     validate: 'Validate',
     validating: 'Validating',
     edit: 'Edit',
@@ -326,7 +314,6 @@ function getCopy(locale: Locale): Copy {
     validationUnvalidated: 'Not validated',
     providerOnlyHint: 'After saving, head back to an agent card and click "BYOK" to choose the model and effort.',
     credentialLabel: 'Credential',
-    templateConnected: 'Connected',
     modelsAvailable: count => `${count} models available`,
   };
 }
@@ -397,35 +384,19 @@ function ValidationBadge({ v, copy }: { v: ValidationStatus | null; copy: Copy }
 // Quick template card
 // ---------------------------------------------------------------------------
 
-function TemplateCard({ template, locale, connected, onPick }: {
+function TemplateCard({ template, locale, onPick }: {
   template: ProviderTemplate;
   locale: Locale;
-  connected: boolean;
   onPick: (t: ProviderTemplate) => void;
 }) {
   const name = locale === 'zh-CN' ? template.name.zh : template.name.en;
   const blurb = locale === 'zh-CN' ? template.blurb.zh : template.blurb.en;
-  const connectedLabel = locale === 'zh-CN' ? '已接入' : 'Connected';
   return (
     <button
       type="button"
       onClick={() => onPick(template)}
       className="group relative flex flex-col items-start gap-2 rounded-md border border-edge bg-panel-alt px-3.5 py-3 text-left transition hover:border-edge-strong hover:bg-panel"
     >
-      {connected && (
-        <span
-          className="absolute right-2 top-2 inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium"
-          style={{
-            borderColor: 'var(--th-badge-ok-border)',
-            backgroundColor: 'var(--th-badge-ok-bg)',
-            color: 'var(--th-badge-ok-text)',
-            borderWidth: 1,
-          }}
-        >
-          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12" /></svg>
-          {connectedLabel}
-        </span>
-      )}
       <BrandIcon brand={template.id} size={28} />
       <div className="min-w-0">
         <div className="text-[13px] font-semibold tracking-tight text-fg group-hover:text-fg">{name}</div>
@@ -872,50 +843,53 @@ export default function ModelsSection({ snapshot }: { snapshot?: ModelLayerSnaps
     setModal({ kind: 'add', template: tpl });
   }, [providerByTemplateId]);
 
+  // A brand is "taken" when at least one configured Provider matches it; we
+  // skip those templates so connected brands don't appear twice (once as a
+  // configured card, once as a redundant template tile). "custom" is always
+  // surfaced as an add-tile since multiple custom endpoints are common.
+  const unconnectedTemplates = useMemo(
+    () => TEMPLATES.filter(tpl => tpl.id === 'custom' || !providerByTemplateId.has(tpl.id)),
+    [providerByTemplateId],
+  );
+
   return (
     <div className="space-y-3">
-      {/* Quick templates */}
-      <div className="space-y-1.5">
-        <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-fg-5">{copy.templatesLabel}</div>
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
-          {TEMPLATES.map(tpl => (
-            <TemplateCard
-              key={tpl.id}
-              template={tpl}
+      {/* Configured providers — full-width cards, top of the section so users
+          see their own state first. */}
+      {providers.length > 0 && (
+        <div className="space-y-2">
+          {providers.map(provider => (
+            <ProviderCard
+              key={provider.id}
+              provider={provider}
+              copy={copy}
               locale={locale}
-              connected={tpl.id !== 'custom' && providerByTemplateId.has(tpl.id)}
-              onPick={pickTemplate}
+              boundAgents={boundAgentsByProviderId.get(provider.id) || []}
+              onEdit={() => setModal({ kind: 'edit', provider })}
+              onRemove={() => remove(provider)}
             />
           ))}
         </div>
-      </div>
+      )}
 
-      {/* Configured list — Providers only, no longer Profiles. */}
-      <div className="space-y-2 pt-1">
-        <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-fg-5">{copy.configuredLabel}</div>
-        {providers.length === 0 && (
-          <SectionCard className="border-dashed">
-            <div className="py-8 text-center">
-              <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-md border border-edge bg-panel-alt">
-                <BrandIcon brand="custom" size={20} />
-              </div>
-              <div className="mt-3 text-[14px] font-semibold tracking-tight text-fg">{copy.emptyTitle}</div>
-              <div className="mt-1 text-[12px] leading-relaxed text-fg-4">{copy.emptyHint}</div>
-            </div>
-          </SectionCard>
-        )}
-        {providers.map(provider => (
-          <ProviderCard
-            key={provider.id}
-            provider={provider}
-            copy={copy}
-            locale={locale}
-            boundAgents={boundAgentsByProviderId.get(provider.id) || []}
-            onEdit={() => setModal({ kind: 'edit', provider })}
-            onRemove={() => remove(provider)}
-          />
-        ))}
-      </div>
+      {/* Add-provider grid — only brands the user hasn't connected yet, plus
+          the always-available Custom tile. When everything is connected this
+          group collapses down to just the Custom tile. */}
+      {unconnectedTemplates.length > 0 && (
+        <div className="space-y-1.5 pt-1">
+          <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-fg-5">{copy.addLabel}</div>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
+            {unconnectedTemplates.map(tpl => (
+              <TemplateCard
+                key={tpl.id}
+                template={tpl}
+                locale={locale}
+                onPick={pickTemplate}
+              />
+            ))}
+          </div>
+        </div>
+      )}
 
       {modal && (
         <ConfigModal

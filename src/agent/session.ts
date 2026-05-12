@@ -517,7 +517,18 @@ export function syncManagedSessionIdentity(session: SessionWorkspaceInfo, workdi
   const resolvedWorkdir = path.resolve(workdir);
   const previousId = session.sessionId;
   if (isPendingSessionId(previousId)) {
+    // Pending → native: move the workspace dir into the native slot and
+    // remove the pending index entry (handled by promoteSessionId).
     promoteSessionId(resolvedWorkdir, session.record.agent, previousId, resolvedId);
+  } else {
+    // Native → native rotation (Claude `--resume` can rewrite the session id
+    // mid-stream). Drop the old index entry so the dashboard does not show a
+    // stale duplicate; both jsonl files stay on disk and the workspace stays
+    // under its original native id (the next saveSessionRecord will lay down
+    // a fresh dir under the new id).
+    const index = loadSessionIndex(resolvedWorkdir);
+    const filtered = index.sessions.filter(e => !(e.agent === session.record.agent && e.sessionId === previousId));
+    if (filtered.length !== index.sessions.length) writeSessionIndex(resolvedWorkdir, filtered);
   }
 
   session.sessionId = resolvedId;

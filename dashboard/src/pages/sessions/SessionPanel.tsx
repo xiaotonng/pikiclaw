@@ -7,10 +7,11 @@ import { useDashboardEvent, useDashboardReconnect, type DashboardEvent } from '.
 import { cn, getAgentMeta, shortenModel, sessionDisplayState } from '../../utils';
 import { Spinner, Modal, ModalHeader, Button } from '../../components/ui';
 import { hasPlan } from '../../components/PlanProgressCard';
-import type { SessionInfo, StreamPlan, StreamPreviewMeta, StreamSubAgent } from '../../types';
+import type { InteractionSnapshot, SessionInfo, StreamPlan, StreamPreviewMeta, StreamSubAgent } from '../../types';
 import { TurnView, UserBubble, TurnDivider } from './TurnView';
 import { LivePreview, ThinkingDots } from './LivePreview';
 import { InputComposer } from './InputComposer';
+import { InteractionPromptModal } from './InteractionPromptModal';
 import {
   normalizeTurnHistory,
   mergeOlderHistory,
@@ -86,6 +87,10 @@ export const SessionPanel = memo(function SessionPanel({
   const [streamTaskId, setStreamTaskId] = useState<string | null>(null);
   const [queuedTaskIds, setQueuedTaskIds] = useState<string[]>([]);
   const [queuedTasks, setQueuedTasks] = useState<Array<{ taskId: string; prompt: string }>>([]);
+  // Active human-in-the-loop prompts attached to this session — driven by the
+  // `interactions` field of the stream snapshot. The latest entry is rendered
+  // as a modal popup; the server clears entries as users answer them.
+  const [interactions, setInteractions] = useState<InteractionSnapshot[]>([]);
   const [pendingPrompt, setPendingPrompt] = useState<string | null>(initialPendingPrompt || null);
   const [pendingImageUrls, setPendingImageUrls] = useState<string[]>(initialPendingImageUrls || []);
   const [pendingQueued, setPendingQueued] = useState(false);
@@ -305,6 +310,7 @@ export const SessionPanel = memo(function SessionPanel({
       setStreamPhase(null);
       setQueuedTaskIds([]);
       setQueuedTasks([]);
+      setInteractions([]);
       prevPhaseRef.current = null;
       return;
     }
@@ -312,6 +318,7 @@ export const SessionPanel = memo(function SessionPanel({
     setStreamTaskId(state.taskId || null);
     setQueuedTaskIds(state.queuedTaskIds && state.queuedTaskIds.length ? state.queuedTaskIds : []);
     setQueuedTasks(state.queuedTasks && state.queuedTasks.length ? state.queuedTasks : []);
+    setInteractions(Array.isArray(state.interactions) && state.interactions.length ? state.interactions : []);
     if (state.phase === 'streaming') {
       // Steer handoff: a previous task just ended ('done' triggered loadLatestTurns
       // and armed clearLiveStreamOnLoadRef). The new task's initial snapshot carries
@@ -393,6 +400,15 @@ export const SessionPanel = memo(function SessionPanel({
     try { await api.steerSession(taskId); } catch {}
   }, []);
 
+  // Stop EVERYTHING for this session (running + queued). Bound to the main
+  // stop button so the user's expectation that "stop = halt this conversation"
+  // holds even when they've already queued follow-ups behind the active turn.
+  const handleStopAll = useCallback(async () => {
+    try {
+      await api.stopSession(session.agent || '', session.sessionId);
+    } catch { /* server-side already logged */ }
+  }, [session.agent, session.sessionId]);
+
   const sk = snapshotKey(session.agent || '', session.sessionId);
   useEffect(() => {
     // During session promotion (pending→native), the sessionId prop changes but the
@@ -424,6 +440,7 @@ export const SessionPanel = memo(function SessionPanel({
     setStreamPhase(null);
     setQueuedTaskIds([]);
     setQueuedTasks([]);
+    setInteractions([]);
     stickToBottomRef.current = true;
     scrollToBottomRef.current = true;
     if (!isNewSession) {
@@ -684,6 +701,7 @@ export const SessionPanel = memo(function SessionPanel({
         pendingPrompt={pendingPrompt}
         onRecall={handleRecallTask}
         onSteer={handleSteerTask}
+        onStopAll={handleStopAll}
         editDraft={editDraft}
         onEditDraftConsumed={() => setEditDraft(null)}
       />
@@ -723,6 +741,16 @@ export const SessionPanel = memo(function SessionPanel({
             </Button>
           </div>
         </Modal>
+      )}
+
+      {/* ── Human-in-the-loop ask-user modal ──
+          Renders the most recently opened active prompt; if multiple are queued,
+          we resolve them in LIFO order so a fresh sub-question pops on top. */}
+      {active && interactions.length > 0 && (
+        <InteractionPromptModal
+          key={interactions[interactions.length - 1].promptId}
+          snapshot={interactions[interactions.length - 1]}
+        />
       )}
     </div>
   );

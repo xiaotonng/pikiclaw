@@ -186,6 +186,20 @@ export function cancelSessionTask(taskId: string) {
   return { ok: true as const, recalled: result.cancelled || result.interrupted };
 }
 
+/**
+ * Stop the running task AND cancel every queued task in a session — the
+ * "stop everything for this session" surface used by the dashboard's main
+ * stop button. Works on (agent, sessionId) rather than a single taskId so it
+ * still functions during the brief window after send/before the queued WS
+ * snapshot reaches the client.
+ */
+export function stopSessionTasks(agent: string, sessionId: string) {
+  const bot = runtime.getBotRef();
+  if (!bot) return { ok: false as const, error: 'Bot is not running' };
+  const result = bot.stopAllSessionTasks(`${agent}:${sessionId}`);
+  return { ok: true as const, ...result };
+}
+
 export async function steerSessionTask(taskId: string) {
   const bot = runtime.getBotRef();
   if (!bot) return { ok: false as const, error: 'Bot is not running' };

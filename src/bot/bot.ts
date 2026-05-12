@@ -121,7 +121,20 @@ function buildMcpDeliveryPrompt(): string {
   return [
     '[Artifact Return]',
     'This is an IM/chat conversation, so pay attention to the IM tools.',
-    'When you need clarification, a decision, or approval from the user before continuing, just ask the question in your reply and end the turn. The user is in a live chat with you and will answer in their next message — that next message resumes this thread automatically. Do not invent or look for a blocking "ask user" tool; multi-turn conversation is the answer channel.',
+  ].join('\n');
+}
+
+function buildClaudeAskUserPrompt(): string {
+  // Claude is heavily trained on its built-in `AskUserQuestion` tool, so just
+  // registering `mcp__pikiclaw__im_ask_user` alongside it isn't enough — the
+  // model still picks the native one, the CLI rejects it in -p mode with
+  // `is_error: true content: "Answer questions?"`, and the turn dies without
+  // ever firing the human-loop. This directive redirects calls *if* the model
+  // chooses to ask. It deliberately does not nudge the default ask-less
+  // behaviour — only the routing.
+  return [
+    '[Asking the user]',
+    'The built-in `AskUserQuestion` tool is disabled here and will fail. If you would otherwise call it, call `mcp__pikiclaw__im_ask_user` instead — same intent (a question plus optional choices), it blocks until the user replies via the IM/dashboard channel. Default behaviour is unchanged: infer obvious decisions yourself and only ask when you genuinely cannot proceed.',
   ].join('\n');
 }
 
@@ -180,6 +193,9 @@ export interface InteractionSnapshot {
   title: string;
   hint?: string | null;
   questions: AgentInteraction['questions'];
+  /** 0-based index of the question currently awaiting an answer. Lets clients
+   *  resume mid-prompt after a refresh without re-fetching prompt state. */
+  currentIndex?: number;
 }
 
 export type StreamEvent =
@@ -389,30 +405,60 @@ export class Bot {
   /** Reverse map (new → old[]) so pushSnapshotToSSE can broadcast on promoted-from aliases. */
   private promotedFromAliases = new Map<string, string[]>();
 
-  /** Get the current streaming snapshot for a session (used by polling endpoint).
-   *  If the session was promoted (pending → native), follows the redirect transparently. */
-  getStreamSnapshot(sessionKey: string): StreamSnapshot | null {
-    const snap = this.streamSnapshots.get(sessionKey);
-    if (snap) return this.enrichSnapshot(snap);
-    // Follow promotion redirect: pending_XXX → native ID
-    const promotedKey = this.promotedSessionKeys.get(sessionKey);
-    if (promotedKey) {
-      const promotedSnap = this.streamSnapshots.get(promotedKey);
-      if (promotedSnap) return this.enrichSnapshot(promotedSnap);
+  /**
+   * Walk the promotion chain so callers passing a stale (pending or
+   * pre-rotation) key always resolve to the current canonical key for the same
+   * logical session. Multi-hop chains (pending → id_a → id_b after Claude
+   * `--resume` rotates twice) are followed end-to-end. Used by every
+   * sessionStates / streamSnapshots lookup so the rest of the codebase never
+   * has to special-case promotion.
+   */
+  private resolveSessionKey(sessionKey: string): string {
+    let key = sessionKey;
+    const seen = new Set<string>();
+    while (!seen.has(key)) {
+      const next = this.promotedSessionKeys.get(key);
+      if (!next || next === key) break;
+      seen.add(key);
+      key = next;
     }
-    return null;
+    return key;
   }
 
-  /** Attach per-queued-task prompts by looking up live RunningTask records. */
+  /** Get the current streaming snapshot for a session (used by polling endpoint).
+   *  Follows the promotion chain so a pending or pre-rotation key still resolves. */
+  getStreamSnapshot(sessionKey: string): StreamSnapshot | null {
+    const snap = this.streamSnapshots.get(this.resolveSessionKey(sessionKey));
+    return snap ? this.enrichSnapshot(snap) : null;
+  }
+
+  /**
+   * Attach per-queued-task prompts and refresh interaction `currentIndex` from
+   * live prompt state — both are derived data the cached snapshot can't carry
+   * on its own (queued prompts come from RunningTask records; currentIndex
+   * advances asynchronously after select/skip/text without re-emitting the
+   * interaction event).
+   */
   private enrichSnapshot(snap: StreamSnapshot): StreamSnapshot {
-    if (!snap.queuedTaskIds?.length) return snap;
-    const queuedTasks = snap.queuedTaskIds.map(taskId => {
-      const raw = this.activeTasks.get(taskId)?.prompt || '';
-      // Show `/skillname` instead of the long expansion we synthesized for the
-      // agent — matches what the user actually typed in the queued row.
-      return { taskId, prompt: collapseSkillPrompt(raw) ?? raw };
-    });
-    return { ...snap, queuedTasks };
+    let next = snap;
+    if (next.queuedTaskIds?.length) {
+      const queuedTasks = next.queuedTaskIds.map(taskId => {
+        const raw = this.activeTasks.get(taskId)?.prompt || '';
+        // Show `/skillname` instead of the long expansion we synthesized for the
+        // agent — matches what the user actually typed in the queued row.
+        return { taskId, prompt: collapseSkillPrompt(raw) ?? raw };
+      });
+      next = { ...next, queuedTasks };
+    }
+    if (next.interactions?.length) {
+      const refreshed = next.interactions.map(snapshotEntry => {
+        const live = this.humanLoopPrompts.get(snapshotEntry.promptId);
+        if (!live) return snapshotEntry;
+        return { ...snapshotEntry, currentIndex: live.currentIndex };
+      });
+      next = { ...next, interactions: refreshed };
+    }
+    return next;
   }
 
   /* ── Dashboard SSE push (injected by dashboard layer to avoid circular import) ── */
@@ -670,7 +716,7 @@ export class Bot {
 
   protected getSessionRuntimeByKey(sessionKey: string | null | undefined, opts: { allowAnyWorkdir?: boolean } = {}): SessionRuntime | null {
     if (!sessionKey) return null;
-    const runtime = this.sessionStates.get(sessionKey) || null;
+    const runtime = this.sessionStates.get(this.resolveSessionKey(sessionKey)) || null;
     if (!runtime) return null;
     if (!opts.allowAnyWorkdir && runtime.workdir !== this.workdir) return null;
     return runtime;
@@ -714,12 +760,18 @@ export class Bot {
     workdir?: string;
   }): SessionRuntime {
     const workdir = path.resolve(session.workdir || this.workdir);
-    const key = this.sessionKey(session.agent, session.sessionId);
-    const existing = this.sessionStates.get(key);
+    const requestedKey = this.sessionKey(session.agent, session.sessionId);
+    // Follow the promotion chain. Without this, an insertion that races a
+    // pending→native promotion would `new` a phantom runtime under the stale
+    // pending key and the queued message would land in a session the dashboard
+    // can never reach again.
+    const resolvedKey = this.resolveSessionKey(requestedKey);
+    const existing = this.sessionStates.get(resolvedKey);
     if (existing) {
       existing.workdir = workdir;
-      existing.agent = session.agent;
-      existing.sessionId = session.sessionId;
+      // Do NOT overwrite agent/sessionId/key here — the existing record IS the
+      // canonical identity post-promotion. Letting upserts re-stamp the old
+      // pending id back over the native id would unwind the promotion.
       if (session.workspacePath !== undefined) existing.workspacePath = session.workspacePath ?? null;
       if (session.threadId !== undefined) existing.threadId = session.threadId ?? null;
       if (session.codexCumulative !== undefined) existing.codexCumulative = session.codexCumulative;
@@ -729,7 +781,7 @@ export class Bot {
     }
 
     const runtime: SessionRuntime = {
-      key,
+      key: requestedKey,
       workdir,
       agent: session.agent,
       sessionId: session.sessionId,
@@ -740,7 +792,7 @@ export class Bot {
       thinkingEffort: session.thinkingEffort ?? null,
       runningTaskIds: new Set<string>(),
     };
-    this.sessionStates.set(key, runtime);
+    this.sessionStates.set(requestedKey, runtime);
     return runtime;
   }
 
@@ -873,11 +925,23 @@ export class Bot {
 
     this.moveSessionStreamSnapshot(previousKey, nextKey);
 
-    // Track promotion so poll endpoints can resolve pending → native
+    // Track promotion so poll endpoints + insertions can resolve pending →
+    // native. When the chain hops more than once (Claude `--resume` rotating
+    // session ids back-to-back), pull ancestor aliases forward AND re-point
+    // them at the latest key so a single lookup is O(1) and every WS listener
+    // that subscribed to any earlier key still receives updates.
     this.promotedSessionKeys.set(previousKey, nextKey);
-    const aliases = this.promotedFromAliases.get(nextKey) || [];
-    aliases.push(previousKey);
-    this.promotedFromAliases.set(nextKey, aliases);
+    const aliases = new Set<string>(this.promotedFromAliases.get(nextKey) || []);
+    aliases.add(previousKey);
+    const ancestorAliases = this.promotedFromAliases.get(previousKey);
+    if (ancestorAliases) {
+      for (const alias of ancestorAliases) {
+        aliases.add(alias);
+        this.promotedSessionKeys.set(alias, nextKey);
+      }
+      this.promotedFromAliases.delete(previousKey);
+    }
+    this.promotedFromAliases.set(nextKey, [...aliases]);
 
     // Update the promoted snapshot's sessionId to reflect the native ID
     const promotedSnap = this.streamSnapshots.get(nextKey);
@@ -1063,11 +1127,15 @@ export class Bot {
         if (!task.cancelled) {
           task.cancelled = true;
           cancelledQueued++;
+          // Tell the dashboard right away so the queued chip disappears
+          // instead of waiting for the chain wrapper to reach this task.
+          this.emitStream(task.sessionKey, { type: 'cancelled', taskId });
         }
         continue;
       }
       if (!interrupted && task.status === 'running') {
         interrupted = true;
+        task.cancelled = true;
         try { task.abort?.(); } catch {}
       }
     }
@@ -1351,6 +1419,7 @@ export class Bot {
         title: request.title,
         hint: request.hint,
         questions: request.questions,
+        currentIndex: active.prompt.currentIndex,
       };
       this.emitStream(sessionKey, { type: 'interaction', taskId, interaction: interactionSnapshot });
 
@@ -1723,6 +1792,17 @@ export class Bot {
     this.markQueueDeferralsForSteer(taskId);
     const interrupted = this.interruptRunningTask(task.sessionKey, { freezePreview: true });
     return { task, interrupted, steered: interrupted || !!task };
+  }
+
+  /**
+   * Stop everything for a session: abort the running task AND cancel every
+   * queued one. The dashboard's "Stop" button maps here so a user who hits
+   * stop after queueing follow-ups doesn't watch the queue keep firing.
+   * Individual queued rows still have their own × buttons (→ cancelTask) for
+   * the "cancel just this one" case.
+   */
+  stopAllSessionTasks(sessionKey: string | null | undefined): { interrupted: boolean; cancelledQueued: number } {
+    return this.stopTasksForSession(sessionKey);
   }
 
   /**
@@ -2139,7 +2219,10 @@ export class Bot {
       }
     }
     const mcpSystemPrompt = appendExtraPrompt(
-      mcpSendFile ? buildMcpDeliveryPrompt() : '',
+      appendExtraPrompt(
+        mcpSendFile ? buildMcpDeliveryPrompt() : '',
+        onInteraction && cs.agent === 'claude' ? buildClaudeAskUserPrompt() : '',
+      ),
       buildBrowserAutomationPrompt(browserEnabled),
     );
     const effectiveSystemPrompt = isFirstTurnOfSession
@@ -2216,6 +2299,11 @@ export class Bot {
       if (this.keepAliveProc || this.keepAlivePulseTimer) return;
       const bin = whichSync('caffeinate');
       if (bin) {
+        // `-dis` = prevent display sleep + idle sleep + system sleep. The `-d`
+        // (display) flag is intentional: the agent uses macOS `screencapture`
+        // for desktop screenshots, which returns a black frame once the
+        // display sleeps. Users who would rather let the screen turn off
+        // should drop brightness or close the lid against an external display.
         this.keepAliveProc = spawn('caffeinate', ['-dis'], { stdio: 'ignore', detached: true });
         this.keepAliveProc.unref();
         this.log(`keep-alive: caffeinate (PID ${this.keepAliveProc.pid})`);

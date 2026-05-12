@@ -399,6 +399,29 @@ export function isPendingSessionId(sessionId: string | null | undefined): boolea
 }
 
 /**
+ * Update a stream-state's session id and notify the caller in one step.
+ *
+ * Drivers used to assign `s.sessionId = ev.session_id ?? s.sessionId` at every
+ * place the CLI surfaced an id, then leave promotion until `finalizeStreamResult`
+ * at end-of-stream. That meant an early abort (before the result line) or a
+ * mid-stream rotation (Claude `--resume` rewriting the session id) was invisible
+ * to the bot runtime — leaving the runtime stuck on a pending id, or letting a
+ * later insertion land on a phantom session. Routing through this helper makes
+ * every observed id change propagate immediately to `opts.onSessionId`, which
+ * in bot.ts wires straight into `promoteSessionRuntime`.
+ */
+export function emitSessionIdUpdate(
+  s: { sessionId: any; _emitSessionId?: ((id: string) => void) | null },
+  rawId: unknown,
+): void {
+  if (typeof rawId !== 'string') return;
+  const trimmed = rawId.trim();
+  if (!trimmed || trimmed === s.sessionId) return;
+  s.sessionId = trimmed;
+  try { s._emitSessionId?.(trimmed); } catch { /* listeners must not break the stream loop */ }
+}
+
+/**
  * Canonical session-list display title used by *every* surface (IM channels
  * + dashboard). The order is intentional:
  *

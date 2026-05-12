@@ -21,6 +21,7 @@ import { createRetainedLogSink, writeScopedLog, type LogLevel } from '../../core
 import type { McpToolModule, ToolContext } from './tools/types.js';
 import { workspaceTools } from './tools/workspace.js';
 import { goalTools } from './tools/goal.js';
+import { askUserTools } from './tools/ask-user.js';
 
 // ---------------------------------------------------------------------------
 // Logging — writes to stderr + file so it doesn't interfere with stdio MCP transport
@@ -70,12 +71,18 @@ log(`started workspace=${ctx.workspace} stagedFiles=${ctx.stagedFiles.length} ca
 // Tool registry — collect all tool modules
 // ---------------------------------------------------------------------------
 
-// Codex CLI has native `/goal` (`create_goal`/`update_goal`/`get_goal`) and a
-// built-in continuation engine; pikiclaw delegates to it entirely for codex
-// sessions. Skip our wrapper tools to avoid double-engines and tool-name shadow.
+// `MCP_TOOLS_AVAILABLE` lists tool families the bridge has wired up. Codex
+// has a native `/goal` implementation and native user-input, so it skips
+// `goalTools` and never receives `ask-user` via the bridge.
+const AVAILABLE = new Set(
+  (process.env.MCP_TOOLS_AVAILABLE || '').split(',').map(s => s.trim()).filter(Boolean),
+);
+const IS_CODEX = process.env.MCP_AGENT === 'codex';
+
 const TOOL_MODULES: McpToolModule[] = [
-  workspaceTools,
-  ...(process.env.MCP_AGENT === 'codex' ? [] : [goalTools]),
+  ...(AVAILABLE.has('workspace') ? [workspaceTools] : []),
+  ...(IS_CODEX ? [] : [goalTools]),
+  ...(AVAILABLE.has('ask-user') ? [askUserTools] : []),
 ];
 
 const ALL_TOOLS = TOOL_MODULES.flatMap(m => m.tools);

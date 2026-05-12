@@ -53,7 +53,7 @@ export {
   parseJsonTail, modelFamily, normalizeClaudeModelId, emptyUsage,
   readTailLines, stripInjectedPrompts, sanitizeSessionUserPreviewText,
   SESSION_PREVIEW_IMAGE_PLACEHOLDER_RE,
-  isPendingSessionId,
+  isPendingSessionId, emitSessionIdUpdate,
   sessionListDisplayTitle,
 } from './utils.js';
 

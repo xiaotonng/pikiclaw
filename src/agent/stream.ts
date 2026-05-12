@@ -7,6 +7,7 @@ import { createInterface } from 'node:readline';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { restartManagedBrowser } from '../browser-supervisor.js';
 import { terminateProcessTree } from '../core/process-control.js';
 import { AGENT_DETECT_TIMEOUTS, AGENT_STREAM_HARD_KILL_GRACE_MS } from '../core/constants.js';
 import { getDriver, allDrivers } from './driver.js';
@@ -40,6 +41,23 @@ function trimSessionText(value: unknown, max = 24_000): string | null {
   if (!text) return null;
   if (text.length <= max) return text;
   return `${text.slice(0, Math.max(0, max - 3)).trimEnd()}...`;
+}
+
+/**
+ * Spot known browser-MCP failure signatures inside an agent stdout line so the
+ * supervisor can force-restart Chrome before the next turn. Both patterns are
+ * narrow on purpose: `Frame has been detached` is playwright-specific; the
+ * `Connection closed` MCP error only triggers when the same line names the
+ * `pikiclaw-browser` server, so failures on other MCP servers do not nuke the
+ * managed browser. The supervisor itself debounces, so this can fire freely.
+ */
+export function _detectBrowserMcpFailure(rawLine: string): string | null {
+  if (!rawLine) return null;
+  if (rawLine.includes('Frame has been detached')) return 'playwright Frame detached';
+  if (rawLine.includes('pikiclaw-browser') && rawLine.includes('Connection closed')) {
+    return 'pikiclaw-browser MCP stdio closed';
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -209,6 +227,9 @@ export async function run(
     geminiToolsById: new Map<string, { name: string; summary: string }>(),
     // Claude-only: sub-agent invocations from the Task tool. Other drivers leave it empty.
     subAgents: new Map<string, StreamSubAgent>(),
+    // Wired to opts.onSessionId so parsers can broadcast id changes the instant
+    // the CLI surfaces them (see emitSessionIdUpdate in agent/utils.ts).
+    _emitSessionId: opts.onSessionId ?? null,
   };
 
   const shellCmd = cmd.map(Q).join(' ');
@@ -268,6 +289,11 @@ export async function run(
     const line = raw.trim();
     if (!line || line[0] !== '{') return;
     lineCount++;
+    const browserFailure = _detectBrowserMcpFailure(line);
+    if (browserFailure) {
+      agentWarn(`[mcp-browser] failure observed (${browserFailure}); requesting browser restart`);
+      void restartManagedBrowser(browserFailure);
+    }
     try {
       const ev = JSON.parse(line);
       const evType = ev.type || '?';
@@ -421,20 +447,13 @@ export async function doStream(opts: StreamOpts): Promise<StreamResult> {
   try {
     const { startMcpBridge } = await import('./mcp/bridge.js');
     const sessionDir = path.dirname(session.workspacePath);
-    // Pikiclaw no longer injects an MCP `im_ask_user` tool. Each driver routes
-    // its native ask-user signal directly through `opts.onInteraction`:
-    //   - Codex:  JSON-RPC `item/tool/requestUserInput` → `toAgentInteraction`
-    //   - Claude: native `AskUserQuestion` tool (CLI degrades to plain text in
-    //             non-interactive mode, which then flows back as a normal next
-    //             user message)
-    //   - Gemini/Hermes: their CLIs disable native ask-user in non-interactive
-    //             mode by design; the model picks a default and proceeds.
     bridge = await startMcpBridge({
       sessionDir,
       workspacePath: session.workspacePath,
       workdir: opts.workdir,
       stagedFiles,
       sendFile: opts.mcpSendFile,
+      onInteraction: opts.onInteraction,
       agent: opts.agent,
       onLog: (message: string) => agentLog(`[mcp] ${message}`),
     });

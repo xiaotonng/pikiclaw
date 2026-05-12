@@ -17,6 +17,7 @@
  */
 
 import {
+  forceCloseManagedBrowser,
   getManagedBrowserProfileDir,
   prepareManagedBrowserForAutomation,
 } from './browser-profile.js';
@@ -55,20 +56,44 @@ function snapshotFromCache(state: CachedState): ManagedBrowserSnapshot {
   return { cdpEndpoint: state.cdpEndpoint, connectionMode: state.connectionMode };
 }
 
-async function pingCdpEndpoint(endpoint: string): Promise<boolean> {
-  if (!endpoint) return false;
+async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Response | null> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), CDP_PROBE_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(`${endpoint}/json/version`, { signal: controller.signal });
-    if (!response.ok) return false;
-    const payload = await response.json().catch(() => null) as { webSocketDebuggerUrl?: unknown } | null;
-    return typeof payload?.webSocketDebuggerUrl === 'string';
+    const response = await fetch(url, { signal: controller.signal });
+    return response;
   } catch {
-    return false;
+    return null;
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Two-stage health check.
+ *
+ * Stage 1 (`/json/version`) hits Chrome's static info handler — confirms the
+ * process is alive and the debug HTTP server is bound. Stage 2 (`/json`) reads
+ * from the target manager, exercising the CDP dispatch loop. Chrome can end up
+ * in a state where stage 1 still answers but stage 2 hangs, typically after
+ * many stale CDP sessions accumulate; treating stage-1-only responses as
+ * healthy lets that state poison every subsequent agent run.
+ *
+ * Both stages share the same `CDP_PROBE_TIMEOUT_MS`. This probe does NOT catch
+ * the case where stage 2 succeeds but the *first page target* is itself stuck
+ * (e.g. a heavy SPA frozen mid-init); that has to be handled reactively from
+ * the MCP-tool-error path.
+ */
+async function pingCdpEndpoint(endpoint: string): Promise<boolean> {
+  if (!endpoint) return false;
+  const versionResp = await fetchWithTimeout(`${endpoint}/json/version`, CDP_PROBE_TIMEOUT_MS);
+  if (!versionResp || !versionResp.ok) return false;
+  const versionPayload = await versionResp.json().catch(() => null) as { webSocketDebuggerUrl?: unknown } | null;
+  if (typeof versionPayload?.webSocketDebuggerUrl !== 'string') return false;
+  const targetsResp = await fetchWithTimeout(`${endpoint}/json`, CDP_PROBE_TIMEOUT_MS);
+  if (!targetsResp || !targetsResp.ok) return false;
+  const targets = await targetsResp.json().catch(() => null);
+  return Array.isArray(targets);
 }
 
 async function freshenCacheIfPossible(now: number): Promise<ManagedBrowserSnapshot | null> {
@@ -143,6 +168,46 @@ export async function ensureManagedBrowser(
   return inflight;
 }
 
+const RESTART_COOLDOWN_MS = 30_000;
+let lastRestartAt = 0;
+let restartInflight: Promise<void> | null = null;
+
+/**
+ * Reactive recovery for a confirmed CDP-layer failure: drops the supervisor
+ * cache, SIGKILLs Chrome, wipes session-restore. The next `ensureManagedBrowser`
+ * will detect no CDP endpoint and relaunch Chrome cold.
+ *
+ * The current stream is not rescued — its MCP child has already lost stdio,
+ * and Claude CLI's MCP client won't reconnect mid-tool-call. The benefit lands
+ * on the next agent turn, which will attach to a fresh browser instead of
+ * inheriting the wedged one.
+ *
+ * Cooldown-throttled and singleflight: a single agent run can spit many
+ * "Connection closed" lines as the MCP child stays dead; we only act once.
+ */
+export function restartManagedBrowser(reason: string): Promise<void> {
+  const now = Date.now();
+  if (restartInflight) return restartInflight;
+  if (now - lastRestartAt < RESTART_COOLDOWN_MS) {
+    log(`restart skipped (within ${RESTART_COOLDOWN_MS / 1000}s cooldown): ${reason}`, 'debug');
+    return Promise.resolve();
+  }
+  lastRestartAt = now;
+  log(`restarting managed browser: ${reason}`, 'warn');
+  restartInflight = (async () => {
+    try {
+      cached = null;
+      const killed = await forceCloseManagedBrowser();
+      log(`forced close complete; killed pids=[${killed.join(',')}]`);
+    } catch (err: any) {
+      log(`force-close failed: ${err?.message || err}`, 'error');
+    } finally {
+      restartInflight = null;
+    }
+  })();
+  return restartInflight;
+}
+
 /** Drop any cached endpoint, e.g. after a confirmed CDP failure mid-stream. */
 export function invalidateManagedBrowser(): void {
   if (cached) log(`invalidating cached endpoint ${cached.cdpEndpoint}`);
@@ -158,4 +223,6 @@ export function getCachedManagedBrowserEndpoint(): string | null {
 export function _resetManagedBrowserSupervisor(): void {
   cached = null;
   inflight = null;
+  lastRestartAt = 0;
+  restartInflight = null;
 }

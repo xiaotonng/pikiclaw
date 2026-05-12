@@ -134,7 +134,7 @@ channels/*/bot.ts
 - The dashboard is the main config surface; env vars still work, but docs and code assume config-first
 - MCP tools are injected per stream; `agent/mcp/extensions.ts` resolves disabled flags and OAuth bearer headers before spawning
 - The machine always has a production/self-bootstrap communication path via `npx pikiclaw@latest`; do not kill, replace, or "clean up" that chain when working on dev-only changes
-- `npm run dev` is a local-only development path: it runs with `--no-daemon`, stays on the checked-out source tree, and writes a fresh log file to `~/.pikiclaw/dev/dev.log` on each launch
+- `npm run dev` is a local-only development path: it runs with `--no-daemon`, stays on the checked-out source tree, and writes a fresh log file to `~/.pikiclaw/dev/dev.log` on each launch. With no TTY (Bash tool call / piped output) it auto-detaches and returns immediately, printing PID and log path — no need for `run_in_background:true`. Override with `PIKICLAW_DEV_FOREGROUND=1` / `PIKICLAW_DEV_BACKGROUND=1`.
 
 ## Testing Rules
 
