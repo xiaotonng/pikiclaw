@@ -248,7 +248,15 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
     const targetEffort = targetAgent === 'gemini'
       ? null
       : ((selectedEffort || targetStatus?.selectedEffort || '').trim() || null);
-    const targetSessionId = targetAgent === session.agent ? session.sessionId : '';
+    const isAgentSwitch = targetAgent !== session.agent;
+    const targetSessionId = isAgentSwitch ? '' : session.sessionId;
+    // When switching agent, pass the live session of the outgoing agent so the
+    // backend can compact it and seed the new session's first turn — see
+    // `compactForHandover` in src/agent/handover.ts. We deliberately don't send
+    // these when the session id is unchanged: same-agent continuation goes via
+    // the agent's own --resume.
+    const previousAgent = isAgentSwitch && session.agent ? session.agent : null;
+    const previousSessionId = isAgentSwitch && session.sessionId ? session.sessionId : null;
     setSending(true);
     // Stash content for potential recall restoration
     lastSentRef.current = { prompt, files: attachments };
@@ -263,6 +271,8 @@ export const InputComposer = memo(function InputComposer({ session, workdir, onS
       attachments,
       model: targetModel,
       effort: targetEffort,
+      previousAgent,
+      previousSessionId,
     })
       .then(res => {
         if (res.taskId) {

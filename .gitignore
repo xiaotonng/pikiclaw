@@ -14,3 +14,4 @@ dashboard-*.png
 .pikiclaw/*
 !.pikiclaw/skills/
 !.pikiclaw/skills/**
+replied_issues.txt

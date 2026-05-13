@@ -22,7 +22,7 @@ import './drivers/hermes.js';
 // ── Re-export: types ────────────────────────────────────────────────────────
 export type {
   Agent, AgentDetectOptions, AgentInfo, AgentListResult,
-  AgentDriverCapabilities, SessionLineageRef,
+  AgentDriverCapabilities, SessionLineageRef, HandoverRef,
   CodexCumulativeUsage, CodexTurnControl,
   AgentInteractionOption, AgentInteractionQuestion, AgentInteraction,
   StreamPreviewMeta, StreamPreviewPlanStep, StreamPreviewPlan, StreamSubAgent,
@@ -61,7 +61,7 @@ export {
 export {
   updateSessionMeta, promoteSessionId, recordFork,
   listPikiclawSessions, findPikiclawSession, getSessionStoredConfig,
-  ensureManagedSession, findManagedThreadSession, findThreadSessionAcrossAgents, stageSessionFiles,
+  ensureManagedSession, findManagedThreadSession, stageSessionFiles,
   mergeManagedAndNativeSessions,
   getSessions, getSessionTail, getSessionMessages,
   applyTurnWindow, applyTurnFilter,

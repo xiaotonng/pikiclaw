@@ -30,6 +30,7 @@ import type {
   SessionTailOpts,
   SessionTailResult,
   SessionMessagesWindow,
+  HandoverRef,
 } from './types.js';
 import {
   dedupeStrings,
@@ -241,6 +242,16 @@ interface EnsureSessionWorkspaceOpts {
   sessionId?: string | null;
   title?: string | null;
   threadId?: string | null;
+  handoverFrom?: HandoverRef | null;
+}
+
+function normalizeHandoverRef(value: unknown): HandoverRef | null {
+  if (!value || typeof value !== 'object') return null;
+  const v = value as { agent?: unknown; sessionId?: unknown };
+  const agent = typeof v.agent === 'string' ? v.agent.trim() : '';
+  const sessionId = typeof v.sessionId === 'string' ? v.sessionId.trim() : '';
+  if (!agent || !sessionId) return null;
+  return { agent: agent as Agent, sessionId };
 }
 
 interface SessionWorkspaceInfo {
@@ -285,6 +296,7 @@ function normalizeSessionRecord(raw: any, workdir: string): ManagedSessionRecord
     migratedFrom: raw?.migratedFrom ?? null,
     migratedTo: raw?.migratedTo ?? null,
     linkedSessions: Array.isArray(raw?.linkedSessions) ? raw.linkedSessions : [],
+    handoverFrom: normalizeHandoverRef(raw?.handoverFrom),
   };
 }
 
@@ -328,6 +340,7 @@ function writeSessionMeta(record: ManagedSessionRecord) {
     migratedFrom: record.migratedFrom,
     migratedTo: record.migratedTo,
     linkedSessions: record.linkedSessions,
+    handoverFrom: record.handoverFrom ?? null,
   });
 }
 
@@ -612,9 +625,12 @@ export function ensureSessionWorkspace(opts: EnsureSessionWorkspaceOpts): Sessio
       lastQuestion: null, lastAnswer: null, lastMessageText: null,
       lastThinking: null, lastPlan: null,
       migratedFrom: null, migratedTo: null, linkedSessions: [],
+      handoverFrom: normalizeHandoverRef(opts.handoverFrom),
     };
   }
   if (!record.threadId) record.threadId = normalizeThreadId(opts.threadId) || legacyThreadId(record.agent, record.sessionId);
+  // Backfill handoverFrom on first staging only — never overwrite an existing one.
+  if (!record.handoverFrom) record.handoverFrom = normalizeHandoverRef(opts.handoverFrom);
   if (!record.title && opts.title) record.title = summarizePromptTitle(opts.title);
   record.workspacePath = path.resolve(record.workspacePath);
   saveSessionRecord(workdir, record);
@@ -658,6 +674,7 @@ function managedRecordToSessionInfo(record: ManagedSessionRecord): SessionInfo {
     migratedTo: record.migratedTo,
     linkedSessions: record.linkedSessions,
     numTurns: record.numTurns ?? null,
+    handoverFrom: record.handoverFrom ?? null,
   };
 }
 
@@ -707,17 +724,6 @@ export function findManagedThreadSession(workdir: string, threadId: string, agen
   return record ? managedRecordToSessionInfo(record) : null;
 }
 
-/**
- * Find the most recently updated session sharing a threadId but from a *different* agent.
- * Used to carry conversation context across agent switches.
- */
-export function findThreadSessionAcrossAgents(workdir: string, threadId: string, excludeAgent: Agent): SessionInfo | null {
-  const record = loadSessionIndex(path.resolve(workdir)).sessions
-    .filter(entry => entry.threadId === threadId && entry.agent !== excludeAgent)
-    .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))[0] || null;
-  return record ? managedRecordToSessionInfo(record) : null;
-}
-
 export function stageSessionFiles(opts: StageSessionFilesOpts): StageSessionFilesResult {
   const session = ensureSessionWorkspace({
     agent: opts.agent,
@@ -725,6 +731,7 @@ export function stageSessionFiles(opts: StageSessionFilesOpts): StageSessionFile
     sessionId: opts.sessionId,
     title: opts.title,
     threadId: opts.threadId,
+    handoverFrom: opts.handoverFrom,
   });
   const importedFiles = importFilesIntoWorkspace(session.workspacePath, opts.files);
   if (importedFiles.length) {
@@ -732,7 +739,13 @@ export function stageSessionFiles(opts: StageSessionFilesOpts): StageSessionFile
     /* title will be set when the first text prompt arrives */
     saveSessionRecord(opts.workdir, session.record);
   }
-  return { sessionId: session.sessionId, workspacePath: session.workspacePath, threadId: session.record.threadId, importedFiles };
+  return {
+    sessionId: session.sessionId,
+    workspacePath: session.workspacePath,
+    threadId: session.record.threadId,
+    importedFiles,
+    handoverFrom: session.record.handoverFrom ?? null,
+  };
 }
 
 // ---------------------------------------------------------------------------

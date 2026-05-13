@@ -72,6 +72,20 @@ export function ImageLightbox({ src, onClose }: { src: string; onClose: () => vo
   );
 }
 
+/** Threshold above which a user bubble's text starts collapsed behind a toggle.
+ *  Picked to comfortably fit a paragraph or short snippet inline while folding
+ *  large pastes (logs, code, the cross-agent `<handover>` seed). */
+const LONG_USER_TEXT_CHAR_THRESHOLD = 1500;
+const LONG_USER_TEXT_LINE_THRESHOLD = 16;
+/** Lines kept visible above the "show all" toggle when collapsed. */
+const COLLAPSED_PREVIEW_LINES = 8;
+
+function previewFromText(text: string): string {
+  const lines = text.split('\n');
+  if (lines.length <= COLLAPSED_PREVIEW_LINES) return text;
+  return lines.slice(0, COLLAPSED_PREVIEW_LINES).join('\n');
+}
+
 /** User message bubble with actions */
 export function UserBubble({ text, blocks, t, onResend, onEdit, onFork }: {
   text: string;
@@ -85,12 +99,20 @@ export function UserBubble({ text, blocks, t, onResend, onEdit, onFork }: {
   const [showActions, setShowActions] = useState(false);
   const [copied, setCopied] = useState(false);
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+  const totalLines = text ? text.split('\n').length : 0;
+  const isLong = !!text && (text.length > LONG_USER_TEXT_CHAR_THRESHOLD || totalLines > LONG_USER_TEXT_LINE_THRESHOLD);
+  const [expanded, setExpanded] = useState(false);
+  const displayText = !text ? '' : (isLong && !expanded ? previewFromText(text) : text);
   const hasActions = !!(onResend || onEdit || onFork);
   const imageBlocks = blocks?.filter(b => b.type === 'image') || [];
 
   const handleCopy = () => {
     navigator.clipboard.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }).catch(() => {});
   };
+
+  const expandLabel = t('hub.expand')
+    .replace('{chars}', text ? text.length.toLocaleString() : '0')
+    .replace('{lines}', String(totalLines));
 
   return (
     <div
@@ -99,7 +121,21 @@ export function UserBubble({ text, blocks, t, onResend, onEdit, onFork }: {
       onMouseLeave={() => setShowActions(false)}
     >
       <div className="max-w-[72%] rounded-md border border-fg-6 bg-panel px-4 py-3 text-[13.5px] leading-[1.72] text-fg shadow-sm">
-        {text && <div className="whitespace-pre-wrap break-words">{text}</div>}
+        {text && (
+          <div className="whitespace-pre-wrap break-words">
+            {displayText}
+            {isLong && !expanded && <span className="text-fg-5/60">…</span>}
+          </div>
+        )}
+        {isLong && (
+          <button
+            type="button"
+            onClick={() => setExpanded(v => !v)}
+            className="mt-2 text-[11.5px] text-fg-4 hover:text-fg-2 underline decoration-fg-5/40 underline-offset-2 transition-colors"
+          >
+            {expanded ? t('hub.collapse') : expandLabel}
+          </button>
+        )}
         {imageBlocks.length > 0 && (
           <div className={cn('flex flex-wrap gap-2', text && 'mt-2')}>
             {imageBlocks.map((img, i) => (

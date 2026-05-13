@@ -3,7 +3,7 @@
  */
 
 import path from 'node:path';
-import { getProjectSkillPaths, listSkills, stageSessionFiles, ensureManagedSession, getDriverCapabilities, isPendingSessionId, type Agent } from '../agent/index.js';
+import { getProjectSkillPaths, listSkills, stageSessionFiles, ensureManagedSession, findPikiclawSession, getDriverCapabilities, isPendingSessionId, type Agent, type HandoverRef } from '../agent/index.js';
 import { loadUserConfig } from '../core/config/user-config.js';
 import { runtime } from './runtime.js';
 
@@ -68,6 +68,33 @@ export interface QueueSessionTaskRequest {
   model?: string | null;
   effort?: string | null;
   attachments?: string[];
+  /**
+   * When the user just switched agent from a live session, pass the source
+   * (agent, sessionId) so cross-agent handover can replay its context as the
+   * first turn of the new session. Ignored when `sessionId` resolves to an
+   * existing (non-pending) session — we don't replay handover on top of an
+   * agent's own history.
+   */
+  previousAgent?: Agent | string | null;
+  previousSessionId?: string | null;
+}
+
+/**
+ * Resolve a `handoverFrom` ref from the request's `previousAgent` /
+ * `previousSessionId` fields, validating that it points to a real, non-self,
+ * different-agent session managed by pikiclaw. Returns null when the inputs
+ * are absent or invalid — handover is best-effort and silent-skip on bad data.
+ */
+function resolveHandoverFrom(request: QueueSessionTaskRequest, targetAgent: Agent): HandoverRef | null {
+  const prevAgent = typeof request.previousAgent === 'string' ? request.previousAgent.trim() : '';
+  const prevSessionId = typeof request.previousSessionId === 'string' ? request.previousSessionId.trim() : '';
+  if (!prevAgent || !prevSessionId) return null;
+  if (!KNOWN_AGENTS.has(prevAgent as Agent)) return null;
+  if (prevAgent === targetAgent) return null;        // same-agent continuation goes via --resume, not handover
+  if (isPendingSessionId(prevSessionId)) return null; // no native history yet → nothing to compact
+  const record = findPikiclawSession(request.workdir, prevAgent as Agent, prevSessionId);
+  if (!record) return null;
+  return { agent: prevAgent as Agent, sessionId: prevSessionId };
 }
 
 export async function queueDashboardSessionTask(request: QueueSessionTaskRequest) {
@@ -106,6 +133,12 @@ export async function queueDashboardSessionTask(request: QueueSessionTaskRequest
   let sessionId = request.sessionId;
   let attachments = request.attachments || [];
 
+  // Resolve handover source. Only meaningful when we're about to stage a fresh
+  // session (sessionId blank or pending). For an existing session we never
+  // replay handover — that session's own --resume history is canonical.
+  const isFreshSession = !sessionId || isPendingSessionId(sessionId);
+  const handoverFrom = isFreshSession ? resolveHandoverFrom(request, resolvedAgent) : null;
+
   // Stage files into the session workspace so temp uploads survive cleanup.
   // Also creates a new pending session when no sessionId is provided.
   if (!sessionId || attachments.length) {
@@ -116,6 +149,7 @@ export async function queueDashboardSessionTask(request: QueueSessionTaskRequest
       sessionId: sessionId || null,
       title: request.prompt || 'New session',
       threadId: null,
+      handoverFrom,
     });
     if (!sessionId) sessionId = staged.sessionId;
     if (staged.importedFiles.length) {
@@ -131,6 +165,7 @@ export async function queueDashboardSessionTask(request: QueueSessionTaskRequest
     attachments,
     ...(modelId ? { modelId } : {}),
     ...(thinkingEffort ? { thinkingEffort } : {}),
+    ...(handoverFrom ? { handoverFrom } : {}),
   });
 }
 

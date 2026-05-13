@@ -93,15 +93,25 @@ const SYSTEM_INJECTED_USER_TAGS = new Set([
   'analysis', 'case_id', 'tool-use-id', 'output-file',
 ]);
 
+/** Inline phrase markers that identify Claude's auto-generated continuation
+ *  summaries (injected as role=user when a thread is compacted). */
+const CONTINUATION_MARKERS = [
+  'continued from a previous',
+  'summary below covers',
+  'earlier portion of the conversation',
+  'Summary:',
+  'Key Technical Concepts',
+];
+
 /** Detect continuation/summary messages and system-injected events that Claude
- *  stores as role=user but never originated from the human. */
+ *  stores as role=user but never originated from the human. Detection is based
+ *  on explicit tag/marker signatures only — never length — so legitimately long
+ *  user content (pasted logs, code, pikiclaw's `<handover>` seed) still renders. */
 export function isContinuationSummary(text: string): boolean {
-  if (text.length > 800) return true;
   const trimmed = text.trim();
   const leading = trimmed.match(/^<([a-z][a-z0-9_-]*)\b/i);
   if (leading && SYSTEM_INJECTED_USER_TAGS.has(leading[1].toLowerCase())) return true;
-  const markers = ['continued from a previous', 'summary below covers', 'earlier portion of the conversation', 'Summary:', 'Key Technical Concepts'];
-  return markers.some(m => text.includes(m));
+  return CONTINUATION_MARKERS.some(m => text.includes(m));
 }
 
 export function lastNLines(text: string, n: number): string {

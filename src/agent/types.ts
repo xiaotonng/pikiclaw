@@ -326,6 +326,13 @@ export interface ManagedSessionRecord {
   migratedTo: SessionLineageRef | null;
   linkedSessions: SessionLineageRef[];
   numTurns?: number | null;
+  /**
+   * Set when this session was created by switching agent away from a prior session.
+   * The first turn of this session triggers `compactForHandover` against that source.
+   * Read-only once written. After the first turn the field stays for audit but is
+   * no longer consulted — the agent's own session file is the canonical context.
+   */
+  handoverFrom?: HandoverRef | null;
 }
 
 /**
@@ -340,6 +347,17 @@ export interface SessionLineageRef {
   sessionId: string;
   kind?: 'migrate' | 'fork';
   forkedAtTurn?: number;
+}
+
+/**
+ * Directed pointer to a previous-agent session that hands its context over to
+ * this one. Used for cross-agent continuation: when the user switches agent
+ * mid-thread, the new session records `handoverFrom` so its first turn knows
+ * which prior session to compact and prepend.
+ */
+export interface HandoverRef {
+  agent: Agent;
+  sessionId: string;
 }
 
 /** The run-state of a session: running, completed, or incomplete. */
@@ -383,6 +401,7 @@ export interface SessionInfo {
   migratedTo: SessionLineageRef | null;
   linkedSessions: SessionLineageRef[];
   numTurns: number | null;
+  handoverFrom?: HandoverRef | null;
 }
 
 /** Result of a session list request. */
@@ -499,6 +518,8 @@ export interface StageSessionFilesOpts {
   sessionId?: string | null;
   title?: string | null;
   threadId?: string | null;
+  /** When creating a fresh session due to cross-agent switch, record the source. */
+  handoverFrom?: HandoverRef | null;
 }
 
 /** Result of staging files into a session workspace. */
@@ -507,6 +528,7 @@ export interface StageSessionFilesResult {
   workspacePath: string;
   threadId: string | null;
   importedFiles: string[];
+  handoverFrom: HandoverRef | null;
 }
 
 /** Options for ensuring a managed session exists. */

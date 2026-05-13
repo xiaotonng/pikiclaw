@@ -38,6 +38,14 @@ export interface SessionSendRequestOptions extends ApiRequestOptions {
   attachments?: File[];
   model?: string | null;
   effort?: string | null;
+  /**
+   * When sent with an empty/pending sessionId because the user just switched
+   * agent, these point at the live session of the agent they switched away
+   * from. The backend reads that session, compacts it, and prepends the seed
+   * to this turn's prompt — see `compactForHandover` in src/agent/handover.ts.
+   */
+  previousAgent?: string | null;
+  previousSessionId?: string | null;
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -427,8 +435,12 @@ export const api = {
       attachments = [],
       model,
       effort,
+      previousAgent,
+      previousSessionId,
       ...opts
     } = options;
+    const prevAgent = typeof previousAgent === 'string' ? previousAgent.trim() : '';
+    const prevSessionId = typeof previousSessionId === 'string' ? previousSessionId.trim() : '';
     const payload = {
       workdir,
       agent,
@@ -436,6 +448,7 @@ export const api = {
       prompt,
       ...(typeof model === 'string' && model.trim() ? { model: model.trim() } : {}),
       ...(typeof effort === 'string' && effort.trim() ? { effort: effort.trim() } : {}),
+      ...(prevAgent && prevSessionId ? { previousAgent: prevAgent, previousSessionId: prevSessionId } : {}),
     };
 
     if (!attachments.length) {
@@ -453,6 +466,10 @@ export const api = {
     body.set('prompt', prompt);
     if (typeof model === 'string' && model.trim()) body.set('model', model.trim());
     if (typeof effort === 'string' && effort.trim()) body.set('effort', effort.trim());
+    if (prevAgent && prevSessionId) {
+      body.set('previousAgent', prevAgent);
+      body.set('previousSessionId', prevSessionId);
+    }
     for (const attachment of attachments) {
       body.append('attachments', attachment, attachment.name || 'image');
     }

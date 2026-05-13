@@ -9,7 +9,7 @@ import path from 'node:path';
 import { execSync, spawn } from 'node:child_process';
 import { getActiveUserConfig, loadWorkspaces, onUserConfigChange, resolveUserWorkdir, setUserWorkdir, updateUserConfig } from '../core/config/user-config.js';
 import {
-  doStream, ensureManagedSession, findManagedThreadSession, findThreadSessionAcrossAgents, getSessionStoredConfig, getUsage, initializeProjectSkills, listAgents, resolveAgentModels, listSkills, stageSessionFiles,
+  doStream, ensureManagedSession, findManagedThreadSession, getSessionStoredConfig, getUsage, initializeProjectSkills, listAgents, resolveAgentModels, listSkills, stageSessionFiles,
   reconcileOrphanedRunningSessions, getAgentBoundModelId, setAgentBoundModelId, collapseSkillPrompt,
   readGoal, accountTurn, shouldContinueAfterTurn, renderContinuationPrompt, renderBudgetLimitPrompt,
   bumpContinuationCount, pauseGoal, resumeGoal, setGoal as setGoalState, clearGoal as clearGoalState,
@@ -21,7 +21,9 @@ import {
   type SkillInfo, type SkillListResult, type AgentDetectOptions, isPendingSessionId,
   type SessionClassification, type SessionMessagesOpts, type SessionMessagesResult,
   type ThreadGoal, type GoalStatus, type CodexThreadGoal, type ClaudeNativeGoal,
+  type HandoverRef,
 } from '../agent/index.js';
+import { compactForHandover, describeHandoverRef } from '../agent/handover.js';
 import {
   querySessions, querySessionTail, updateSession,
   type SessionQueryResult,
@@ -78,37 +80,8 @@ export function thinkLabel(agent: Agent): string {
 }
 
 // ---------------------------------------------------------------------------
-// Cross-agent context migration
+// Prompt assembly helpers
 // ---------------------------------------------------------------------------
-
-const CROSS_AGENT_CONTEXT_MAX_CHARS = 4000;
-const CROSS_AGENT_MSG_MAX_CHARS = 600;
-
-/**
- * Format conversation messages from a previous agent session into a compact
- * context block that can be prepended to the first prompt of the new session.
- */
-function formatCrossAgentContext(agent: string, messages: TailMessage[]): string {
-  const lines: string[] = [];
-  let totalLen = 0;
-  for (const msg of messages) {
-    const label = msg.role === 'user' ? 'User' : 'Assistant';
-    let text = msg.text.trim();
-    if (text.length > CROSS_AGENT_MSG_MAX_CHARS) {
-      text = text.slice(0, CROSS_AGENT_MSG_MAX_CHARS) + '…';
-    }
-    const line = `${label}: ${text}`;
-    if (totalLen + line.length > CROSS_AGENT_CONTEXT_MAX_CHARS) break;
-    lines.push(line);
-    totalLen += line.length;
-  }
-  if (!lines.length) return '';
-  return [
-    `<previous-conversation agent="${agent}">`,
-    ...lines,
-    '</previous-conversation>',
-  ].join('\n');
-}
 
 function appendExtraPrompt(base: string | undefined, extra: string): string {
   const lhs = String(base || '').trim();
@@ -171,6 +144,12 @@ export interface ChatState {
   activeThreadId?: string | null;
   /** Per-chat workdir override; null = use global bot.workdir. */
   workdir?: string | null;
+  /**
+   * When the user switches agent away from a live session, the source (agent,
+   * sessionId) is parked here until the next staging of a fresh session
+   * consumes it as `handoverFrom`. One-shot: cleared once staged.
+   */
+  pendingHandoverFrom?: HandoverRef | null;
 }
 
 export interface SessionRuntime {
@@ -184,6 +163,12 @@ export interface SessionRuntime {
   modelId?: string | null;
   thinkingEffort?: string | null;
   runningTaskIds: Set<string>;
+  /**
+   * Reference to the prior-agent session whose context should hand over to this
+   * one. Only consulted on the first turn (`isPendingSessionId(sessionId)`); after
+   * the first turn completes the new agent owns the canonical session file.
+   */
+  handoverFrom?: HandoverRef | null;
 }
 
 /** Events emitted to dashboard listeners during a stream. */
@@ -349,6 +334,13 @@ export interface SubmitSessionTaskOpts {
   thinkingEffort?: string | null;
   sourceMessageId?: number | string;
   chatId?: ChatId;
+  /**
+   * When this task is the first turn of a session created by switching agent,
+   * the staged session record already has `handoverFrom` set. Passing it here
+   * mirrors that into the in-memory runtime so `runStream`'s first-turn check
+   * can pick it up without re-reading from disk.
+   */
+  handoverFrom?: HandoverRef | null;
   /**
    * When set, this task is a runtime-injected goal continuation, not a user
    * message. Stream events carry the flag so UIs can hide or label it, and the
@@ -752,6 +744,7 @@ export class Bot {
     codexCumulative?: CodexCumulativeUsage;
     modelId?: string | null;
     thinkingEffort?: string | null;
+    handoverFrom?: HandoverRef | null;
   }): SessionRuntime | null {
     if (!session.sessionId) return null;
     return this.upsertSessionRuntime({
@@ -763,6 +756,7 @@ export class Bot {
       codexCumulative: session.codexCumulative,
       modelId: session.modelId ?? null,
       thinkingEffort: session.thinkingEffort ?? null,
+      handoverFrom: session.handoverFrom ?? null,
     });
   }
 
@@ -775,6 +769,7 @@ export class Bot {
     modelId?: string | null;
     thinkingEffort?: string | null;
     workdir?: string;
+    handoverFrom?: HandoverRef | null;
   }): SessionRuntime {
     const workdir = path.resolve(session.workdir || this.workdir);
     const requestedKey = this.sessionKey(session.agent, session.sessionId);
@@ -794,6 +789,10 @@ export class Bot {
       if (session.codexCumulative !== undefined) existing.codexCumulative = session.codexCumulative;
       if (session.modelId !== undefined) existing.modelId = session.modelId ?? null;
       if (session.thinkingEffort !== undefined) existing.thinkingEffort = session.thinkingEffort ?? null;
+      // handoverFrom is one-shot: only set if not already set (the first staging wins).
+      if (session.handoverFrom !== undefined && !existing.handoverFrom) {
+        existing.handoverFrom = session.handoverFrom;
+      }
       return existing;
     }
 
@@ -808,6 +807,7 @@ export class Bot {
       modelId: session.modelId ?? null,
       thinkingEffort: session.thinkingEffort ?? null,
       runningTaskIds: new Set<string>(),
+      handoverFrom: session.handoverFrom ?? null,
     };
     this.sessionStates.set(requestedKey, runtime);
     return runtime;
@@ -1020,13 +1020,20 @@ export class Bot {
     const selected = this.getSelectedSession(cs);
     if (selected) return selected;
 
+    // Auto-resume an existing same-thread session of this agent (back-and-forth
+    // toggling). The handover queued on `cs.pendingHandoverFrom` is intentionally
+    // dropped here — the resumed session already has its own history; replaying
+    // an external handover on top would just be duplicate context.
     const resumed = this.findThreadSessionRuntime(chatId, cs.activeThreadId, cs.agent);
     if (resumed) {
+      cs.pendingHandoverFrom = null;
       this.applySessionSelection(cs, resumed);
       return resumed;
     }
 
     const wd = this.chatWorkdir(chatId);
+    const handoverFrom = cs.pendingHandoverFrom ?? null;
+    cs.pendingHandoverFrom = null;
     const staged = stageSessionFiles({
       agent: cs.agent,
       workdir: wd,
@@ -1034,6 +1041,7 @@ export class Bot {
       sessionId: null,
       title: title || 'New session',
       threadId: cs.activeThreadId ?? null,
+      handoverFrom,
     });
     const runtime = this.upsertSessionRuntime({
       agent: cs.agent,
@@ -1042,6 +1050,7 @@ export class Bot {
       threadId: staged.threadId,
       modelId: this.modelForAgent(cs.agent),
       thinkingEffort: this.effortForAgent(cs.agent),
+      handoverFrom: staged.handoverFrom,
     });
     this.applySessionSelection(cs, runtime);
     return runtime;
@@ -1505,6 +1514,7 @@ export class Bot {
       // Only override when explicitly provided — undefined skips the overwrite in upsertSessionRuntime
       ...(opts.modelId !== undefined ? { modelId: opts.modelId } : {}),
       ...(opts.thinkingEffort !== undefined ? { thinkingEffort: opts.thinkingEffort } : {}),
+      ...(opts.handoverFrom !== undefined ? { handoverFrom: opts.handoverFrom } : {}),
     });
     const taskId = `ext-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const prompt = opts.prompt.trim();
@@ -1906,15 +1916,35 @@ export class Bot {
   switchAgentForChat(chatId: ChatId, agent: Agent): boolean {
     const cs = this.chat(chatId);
     if (cs.agent === agent) return false;
+    // Capture the live session of the *outgoing* agent so the next message to
+    // the new agent can replay it as a handover. We capture BEFORE flipping
+    // cs.agent so the ref is honest about which agent it points at.
+    const prevAgent = cs.agent;
+    const prevSessionId = cs.sessionId && !isPendingSessionId(cs.sessionId) ? cs.sessionId : null;
     cs.agent = agent;
+
+    // Pre-existing session of the new agent in this thread — back-and-forth
+    // toggling resumes it without handover. The user's intent is "continue what
+    // I had", not "translate cross-agent".
     const resumed = this.findThreadSessionRuntime(chatId, cs.activeThreadId, agent);
     if (resumed) {
+      cs.pendingHandoverFrom = null;
       this.applySessionSelection(cs, resumed);
       this.log(`agent switched to ${agent} chat=${chatId} resumed=${resumed.sessionId}`);
       return true;
     }
+    // No existing session of the new agent → next message will stage a fresh
+    // one. Park the outgoing session as the handover source. If the outgoing
+    // agent had no live session (e.g. the user is rapidly toggling agents
+    // before sending anything), keep any already-pending handover so the
+    // original source isn't lost across intermediate switches.
+    if (prevSessionId) {
+      cs.pendingHandoverFrom = { agent: prevAgent, sessionId: prevSessionId };
+    }
     this.resetChatConversation(cs, { clearThread: false });
-    this.log(`agent switched to ${agent} chat=${chatId}`);
+    this.log(
+      `agent switched to ${agent} chat=${chatId} handoverFrom=${describeHandoverRef(cs.pendingHandoverFrom)}`,
+    );
     return true;
   }
 
@@ -2236,7 +2266,7 @@ export class Bot {
   }
 
   async runStream(
-    prompt: string, cs: Pick<SessionRuntime, 'key' | 'workdir' | 'agent' | 'sessionId' | 'workspacePath' | 'codexCumulative' | 'modelId' | 'thinkingEffort' | 'threadId'> | ChatState, attachments: string[],
+    prompt: string, cs: Pick<SessionRuntime, 'key' | 'workdir' | 'agent' | 'sessionId' | 'workspacePath' | 'codexCumulative' | 'modelId' | 'thinkingEffort' | 'threadId' | 'handoverFrom'> | ChatState, attachments: string[],
     onText: (text: string, thinking: string, activity?: string, meta?: StreamPreviewMeta, plan?: StreamPreviewPlan | null) => void,
     systemPrompt?: string,
     mcpSendFile?: import('../agent/mcp/bridge.js').McpSendFileCallback,
@@ -2265,33 +2295,36 @@ export class Bot {
     this.debug(`[runStream] ${cs.agent} config: model=${resolvedModel} extraArgs=[${extraArgs.join(' ')}]`);
     const isFirstTurnOfSession = !cs.sessionId || isPendingSessionId(cs.sessionId);
 
-    // ── Cross-agent context migration ──
-    // When starting a new session that shares a threadId with a session from a
-    // different agent, fetch the previous conversation tail and prepend it so the
-    // new agent has continuity.
-    if (isFirstTurnOfSession) {
-      const threadId = 'threadId' in cs ? cs.threadId : ('activeThreadId' in cs ? (cs as ChatState).activeThreadId : null);
-      if (threadId) {
-        const prevSession = findThreadSessionAcrossAgents(sessionWorkdir, threadId, cs.agent);
-        if (prevSession?.sessionId && prevSession.agent) {
-          try {
-            const tail = await querySessionTail({
-              agent: prevSession.agent as Agent,
-              sessionId: prevSession.sessionId,
-              workdir: sessionWorkdir,
-              limit: 20,
-            });
-            if (tail.ok && tail.messages.length) {
-              const contextBlock = formatCrossAgentContext(prevSession.agent, tail.messages);
-              if (contextBlock) {
-                prompt = contextBlock + '\n\n' + prompt;
-                this.debug(`[runStream] injected cross-agent context from ${prevSession.agent}:${prevSession.sessionId} (${tail.messages.length} msgs)`);
-              }
-            }
-          } catch (e: any) {
-            this.debug(`[runStream] cross-agent context fetch failed: ${e?.message || e}`);
-          }
+    // ── Cross-agent handover ──
+    // First turn of a session created by an agent switch: read the prior agent's
+    // session, compact it, and prepend the seed to this turn's prompt. After this
+    // single injection the new agent owns the canonical session file and `--resume`
+    // takes over. See agent/handover.ts.
+    const handoverFrom = ('handoverFrom' in cs && cs.handoverFrom) ? cs.handoverFrom : null;
+    if (isFirstTurnOfSession && handoverFrom) {
+      try {
+        const result = await compactForHandover({
+          fromAgent: handoverFrom.agent,
+          fromSessionId: handoverFrom.sessionId,
+          workdir: sessionWorkdir,
+          toAgent: cs.agent,
+          toModel: resolvedModel,
+        });
+        if (result.ok && result.seed) {
+          prompt = result.seed + '\n\n' + prompt;
+          this.debug(
+            `[runStream] handover ${describeHandoverRef(handoverFrom)} → ${cs.agent} `
+            + `mode=${result.mode} msgs=${result.messagesIncluded}/${result.messagesTotal} `
+            + `turnsTotal=${result.turnsTotal} chars=${result.charsIncluded}/${result.budgetChars}`,
+          );
+        } else {
+          this.warn(
+            `[runStream] handover ${describeHandoverRef(handoverFrom)} → ${cs.agent} `
+            + `failed (${result.error || 'unknown'}); proceeding without prior context`,
+          );
         }
+      } catch (e: any) {
+        this.warn(`[runStream] handover threw: ${e?.message || e}; proceeding without prior context`);
       }
     }
     const mcpSystemPrompt = appendExtraPrompt(
