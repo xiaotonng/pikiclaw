@@ -121,6 +121,21 @@ export function firstNonEmptyLine(text: string): string {
   return '';
 }
 
+// MCP tool results carry structured content blocks (e.g. screenshot returns
+// `[{type:'image',...}, {type:'text', text:'Saved as ...'}]`). Coerce that to
+// plain text by keeping only the `type:'text'` blocks; otherwise `String([{…}])`
+// silently becomes the literal "[object Object]" in activity summaries.
+export function coerceToolResultText(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) {
+    return value
+      .filter((c: any) => c && c.type === 'text' && typeof c.text === 'string')
+      .map((c: any) => c.text)
+      .join('\n');
+  }
+  return '';
+}
+
 export function shortValue(value: unknown, max = 90): string {
   const text = typeof value === 'string' ? value.trim() : value == null ? '' : String(value).trim();
   if (!text) return '';
@@ -256,13 +271,14 @@ export function summarizeClaudeToolResult(
 ): string {
   const summary = tool?.summary || shortValue(tool?.name || 'Tool', 120) || 'Tool';
   const isError = !!block?.is_error;
+  const contentText = coerceToolResultText(block?.content);
   if (isError) {
-    const detail = firstNonEmptyLine(toolUseResult?.stderr || toolUseResult?.stdout || block?.content || '');
+    const detail = firstNonEmptyLine(toolUseResult?.stderr || toolUseResult?.stdout || contentText);
     return detail ? `${summary} failed: ${shortValue(detail, 120)}` : `${summary} failed`;
   }
   const toolName = tool?.name || '';
   if (toolName === 'Read' || toolName === 'Edit' || toolName === 'Write' || toolName === 'TodoWrite') return `${summary} done`;
-  const detail = firstNonEmptyLine(toolUseResult?.stdout || block?.content || toolUseResult?.stderr || '');
+  const detail = firstNonEmptyLine(toolUseResult?.stdout || contentText || toolUseResult?.stderr || '');
   if (!detail) return `${summary} done`;
   return `${summary} -> ${shortValue(detail, 120)}`;
 }

@@ -222,7 +222,6 @@ type CopyPack = {
   modelCurrentLabel: string;
   saveChanges: string;
   saving: string;
-  cancel: string;
   saved: string;
   configError: string;
   // Read-only banner for external native (Hermes)
@@ -285,7 +284,6 @@ function getCopy(locale: Locale): CopyPack {
       modelCurrentLabel: '当前',
       saveChanges: '保存',
       saving: '保存中…',
-      cancel: '撤销',
       saved: '已保存',
       configError: '保存失败',
       externalNativeNote: path => `Hermes 当前从 ${path || '~/.hermes/config.yaml'} 读取这些值；切换为某个 BYOK 供应商可由 pikiclaw 接管。`,
@@ -344,7 +342,6 @@ function getCopy(locale: Locale): CopyPack {
     modelCurrentLabel: 'Current',
     saveChanges: 'Save',
     saving: 'Saving…',
-    cancel: 'Reset',
     saved: 'Saved',
     configError: 'Save failed',
     externalNativeNote: path => `Hermes reads these values from ${path || '~/.hermes/config.yaml'}; pick a BYOK provider to let pikiclaw take over.`,
@@ -435,6 +432,8 @@ function AgentInlineConfig({
   layer,
   toast,
   onSaved,
+  onCancel,
+  t,
 }: {
   agentId: Agent;
   agentStatus: AgentRuntimeStatus;
@@ -443,6 +442,8 @@ function AgentInlineConfig({
   layer: ModelLayerSnapshot;
   toast: (msg: string, ok?: boolean) => void;
   onSaved: () => void | Promise<void>;
+  onCancel: () => void;
+  t: (key: string) => string;
 }) {
   const externalNative = isNativeConfigExternal(agentId);
   const native = agentStatus.nativeConfig || null;
@@ -749,17 +750,18 @@ function AgentInlineConfig({
         </div>
       )}
 
-      {/* Save / Reset row — only appears when the draft diverges from saved. */}
-      {dirty && (
-        <div className="flex items-center justify-end gap-2">
-          <Button variant="ghost" size="sm" onClick={() => setDraft(baseline)} disabled={submitting}>
-            {copy.cancel}
-          </Button>
-          <Button variant="primary" size="sm" disabled={!canSave} onClick={() => void submit()}>
-            {submitting ? copy.saving : copy.saveChanges}
-          </Button>
-        </div>
-      )}
+      {/* Save / Cancel — always visible so the modal has the standard pair of
+          terminal actions, matching the defaults modal pattern. Save stays
+          disabled until the draft diverges from baseline. */}
+      <div className="flex items-center justify-end gap-2">
+        <Button variant="ghost" size="sm" onClick={onCancel} disabled={submitting}>
+          {t('modal.cancel')}
+        </Button>
+        <Button variant="primary" size="sm" disabled={!canSave} onClick={() => void submit()}>
+          {submitting && <Spinner className="h-3 w-3" />}
+          {submitting ? copy.saving : copy.saveChanges}
+        </Button>
+      </div>
     </div>
   );
 }
@@ -1258,10 +1260,12 @@ export function AgentTab() {
               copy={copy}
               layer={modelLayer}
               toast={toast}
+              t={t}
               onSaved={async () => {
                 await handleConfigSaved();
                 setEditingAgent(null);
               }}
+              onCancel={() => setEditingAgent(null)}
             />
           </>
         )}

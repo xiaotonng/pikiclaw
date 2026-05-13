@@ -11,7 +11,7 @@ dashboard-*.png
 /*.png
 .playwright-mcp/
 **/.playwright-mcp/
+replied_issues.txt
 .pikiclaw/*
 !.pikiclaw/skills/
 !.pikiclaw/skills/**
-replied_issues.txt

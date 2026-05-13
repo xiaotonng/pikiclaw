@@ -1518,7 +1518,7 @@ function McpCatalogSection({
                       busy={busy === item.id}
                       index={i}
                       onPrimary={() => handleConnectedPrimary(item)}
-                      onReconfigure={onOpenBrowserSetup}
+                      onReconfigure={item.id === 'pikiclaw-browser' ? onOpenBrowserSetup : undefined}
                     />
                   ) : (
                     <AvailableCard
