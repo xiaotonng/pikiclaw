@@ -520,7 +520,7 @@ app.get('/api/session-hub/skills', (c) => {
 app.post('/api/session-hub/session/send', async (c) => {
   try {
     const { workdir, agent, sessionId, prompt, model, effort, attachments, cleanup } = await parseSessionSendRequest(c);
-    const queued = queueDashboardSessionTask({
+    const queued = await queueDashboardSessionTask({
       workdir,
       agent,
       sessionId,

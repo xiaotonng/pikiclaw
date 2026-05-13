@@ -1550,6 +1550,89 @@ function getClaudeUsageFromTelemetry(home: string, model?: string | null): Usage
 }
 
 // ---------------------------------------------------------------------------
+// Native /goal bridge — Claude Code v2.x ships a built-in `/goal <condition>`
+// slash command that installs a session-scoped Stop hook (auto-clears when the
+// Haiku-driven completion check returns met:true). State lives in the session
+// transcript JSONL as `attachment` events of shape:
+//
+//   { "type": "goal_status", "met": <bool>, "sentinel": <bool>, "condition": "..." }
+//
+// The latest `goal_status` line wins. `met:false` ⇒ active goal; `met:true` ⇒
+// the Stop hook just judged the condition satisfied and cleared the goal.
+//
+// pikiclaw treats this as the source of truth for claude sessions (the
+// continuation engine runs inside `claude -p` itself; pikiclaw's portable
+// continuation loop must short-circuit so we don't double-loop). Set/clear go
+// through the normal task queue by sending `/goal <objective>` or `/goal clear`
+// as the prompt — claude's slash parser handles it the same way it does in
+// interactive mode.
+// ---------------------------------------------------------------------------
+
+export type ClaudeNativeGoalStatus = 'active' | 'complete';
+
+export interface ClaudeNativeGoal {
+  condition: string;
+  status: ClaudeNativeGoalStatus;
+  met: boolean;
+  /** Wall-clock ms timestamp of the line that produced this snapshot (best-effort, parsed from the surrounding event). */
+  updatedAtMs: number;
+}
+
+function claudeSessionTranscriptPath(workdir: string, sessionId: string): string {
+  const home = getHome();
+  if (!home || !workdir || !sessionId) return '';
+  return path.join(home, '.claude', 'projects', encodePathAsDirName(workdir), `${sessionId}.jsonl`);
+}
+
+/**
+ * Scan a claude session transcript for the latest native /goal state. Returns
+ * null when no `goal_status` attachment is present.
+ */
+export function getClaudeNativeGoal(workdir: string, sessionId: string): ClaudeNativeGoal | null {
+  const file = claudeSessionTranscriptPath(workdir, sessionId);
+  if (!file || !fs.existsSync(file)) return null;
+  // Goal status lines are tiny attachments. Walk the tail (1 MB) to find the
+  // last one — tail covers all realistic session sizes without parsing every
+  // line of a long transcript.
+  const lines = readTailLines(file, 1024 * 1024);
+  let latest: ClaudeNativeGoal | null = null;
+  for (const raw of lines) {
+    if (!raw || raw[0] !== '{') continue;
+    // Cheap pre-filter so we only JSON.parse the relevant subset.
+    if (!raw.includes('"goal_status"')) continue;
+    try {
+      const ev = JSON.parse(raw);
+      const att = ev?.attachment;
+      if (!att || att.type !== 'goal_status') continue;
+      const condition = typeof att.condition === 'string' ? att.condition : '';
+      const met = !!att.met;
+      const ts = typeof ev.timestamp === 'string' ? Date.parse(ev.timestamp) : NaN;
+      latest = {
+        condition,
+        met,
+        status: met || !condition ? 'complete' : 'active',
+        updatedAtMs: Number.isFinite(ts) ? ts : Date.now(),
+      };
+    } catch { /* skip */ }
+  }
+  // After auto-clear (met:true) claude still leaves the goal_status line in the
+  // transcript; pikiclaw treats "no active goal" as null so the bridge mirrors
+  // the codex semantics where `goal_get` returns null after a clear.
+  if (latest && latest.met) return null;
+  return latest;
+}
+
+/** Build the user-prompt that triggers claude's native `/goal <condition>` slash command. */
+export function buildClaudeSetGoalPrompt(objective: string): string {
+  return `/goal ${objective.trim()}`;
+}
+
+/** Build the user-prompt that triggers claude's native `/goal clear` slash command. */
+export function buildClaudeClearGoalPrompt(): string {
+  return '/goal clear';
+}
+
+// ---------------------------------------------------------------------------
 // Driver
 // ---------------------------------------------------------------------------
 

@@ -105,6 +105,12 @@ export {
   type CodexThreadGoal, type CodexGoalStatus,
 } from './drivers/codex.js';
 
+// ── Re-export: native claude goal bridge ─────────────────────────────────────
+export {
+  getClaudeNativeGoal, buildClaudeSetGoalPrompt, buildClaudeClearGoalPrompt,
+  type ClaudeNativeGoal, type ClaudeNativeGoalStatus,
+} from './drivers/claude.js';
+
 // ── Re-export: MCP extensions ───────────────────────────────────────────────
 export {
   listAllMcpExtensions,

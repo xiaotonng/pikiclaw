@@ -112,8 +112,11 @@ export function getWorkspacesData(bot: Bot, chatId: ChatId): WorkspacesData {
  * the IM renderer to send back. Returns null when there is no active session
  * for the chat (caller renders its own "pick a session first" message).
  *
- * For codex sessions this awaits codex's native `thread/goal/*` RPC; for other
- * drivers it's effectively sync but stays async for a uniform call site.
+ * Per-agent routing:
+ *   - codex → native `thread/goal/*` RPC (state machine + budget + pause/resume)
+ *   - claude → native `/goal <condition>` slash command (Stop hook continuation,
+ *              auto-clear on completion, no budget / no pause/resume)
+ *   - others → pikiclaw's portable goal.json with continuation injection
  */
 export async function handleGoalCommand(bot: Bot, chatId: ChatId, rawArgs: string): Promise<string | null> {
   const session = bot.selectedSession(chatId);
@@ -142,12 +145,17 @@ export async function handleGoalCommand(bot: Bot, chatId: ChatId, rawArgs: strin
       return `Resumed goal: ${truncate(goal.objective, 80)}`;
     }
     if (lower === 'clear' || lower === 'cancel' || lower === 'stop') {
-      await bot.clearSessionGoal(workdir, agent, sessionId);
-      return 'Cleared goal.';
+      await bot.clearSessionGoal(workdir, agent, sessionId, { chatId });
+      return agent === 'claude'
+        ? 'Submitted `/goal clear` to claude. (Native /goal auto-clears once the condition is met, so this is only needed to stop early.)'
+        : 'Cleared goal.';
     }
 
     const { objective, tokenBudget } = parseObjective(args);
     if (!objective) return 'Usage: /goal <objective>  (or pause / resume / clear)';
+    if (agent === 'claude' && tokenBudget != null) {
+      return 'Claude native /goal does not support `budget=N` — drop the budget prefix. (Use a codex session if you need a token budget.)';
+    }
     const goal = await bot.setSessionGoal(workdir, agent, sessionId, {
       objective,
       tokenBudget,
@@ -160,6 +168,12 @@ export async function handleGoalCommand(bot: Bot, chatId: ChatId, rawArgs: strin
         'Send any message to trigger codex\'s native continuation loop. Each message resumes the thread and codex audits / continues until it marks the goal complete or hits the budget.',
       ].join('\n');
     }
+    if (agent === 'claude') {
+      return [
+        `Goal set (claude native): ${truncate(goal.objective, 120)}`,
+        'Claude\'s in-process Stop hook keeps working until a Haiku judge confirms the condition is met, then auto-clears. Send `/goal clear` to stop early; `/goal` to inspect.',
+      ].join('\n');
+    }
     return `Goal set${budgetLabel}: ${truncate(goal.objective, 120)}\nThe agent will keep working until it audits the objective complete${goal.tokenBudget != null ? ' or exhausts the budget' : ''}.`;
   } catch (e: any) {
     return `Failed: ${e?.message || e}`;
@@ -168,6 +182,12 @@ export async function handleGoalCommand(bot: Bot, chatId: ChatId, rawArgs: strin
 
 function formatGoalStatusLine(goal: Awaited<ReturnType<Bot['getSessionGoal']>>, agent: Agent): string {
   if (!goal) return 'No goal set for this session. Use `/goal <objective>` to set one.';
+  if (goal.source === 'claude') {
+    return [
+      `Goal: ${truncate(goal.objective, 200)}`,
+      `Status: ${goal.status}  ·  claude native (Stop hook, auto-clears on completion)`,
+    ].join('\n');
+  }
   const budget = goal.tokenBudget != null
     ? `${goal.tokensUsed}/${goal.tokenBudget} tokens`
     : `${goal.tokensUsed} tokens (no budget)`;

@@ -28,7 +28,7 @@ describe('session-control', () => {
     getBotRefMock.mockReturnValue({ submitSessionTask });
 
     const { queueDashboardSessionTask } = await import('../src/dashboard/session-control.ts');
-    const result = queueDashboardSessionTask({
+    const result = await queueDashboardSessionTask({
       workdir: '/tmp/pikiclaw',
       agent: 'codex',
       sessionId: 'sess-1',

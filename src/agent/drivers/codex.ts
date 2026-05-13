@@ -139,7 +139,13 @@ export class CodexAppServer {
         this.pending.clear();
       });
 
-      this.call('initialize', { clientInfo: { name: 'pikiclaw', version: '0.2.0' } })
+      // Declare experimentalApi so `thread/goal/*` is reachable. Codex 0.130+
+      // gates these RPCs behind that capability — without it, every goal call
+      // returns "requires experimentalApi capability".
+      this.call('initialize', {
+        clientInfo: { name: 'pikiclaw', version: '0.2.0' },
+        capabilities: { experimentalApi: true },
+      })
         .then(resp => {
           clearTimeout(timer);
           if (resp.error) { agentWarn(`[codex-rpc] init error: ${resp.error.message}`); resolve(false); return; }

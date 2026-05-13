@@ -14,12 +14,13 @@ import {
   readGoal, accountTurn, shouldContinueAfterTurn, renderContinuationPrompt, renderBudgetLimitPrompt,
   bumpContinuationCount, pauseGoal, resumeGoal, setGoal as setGoalState, clearGoal as clearGoalState,
   setCodexGoal, getCodexGoal, clearCodexGoal, pauseCodexGoal, resumeCodexGoal,
+  getClaudeNativeGoal, buildClaudeSetGoalPrompt, buildClaudeClearGoalPrompt,
   type Agent, type CodexCumulativeUsage, type StreamOpts, type StreamResult, type StreamPreviewMeta, type StreamPreviewPlan, type StreamSubAgent, type SessionInfo, type UsageResult,
   type AgentInteraction, type CodexTurnControl,
   type ModelInfo, type ModelListResult, type TailMessage, type SessionTailResult,
   type SkillInfo, type SkillListResult, type AgentDetectOptions, isPendingSessionId,
   type SessionClassification, type SessionMessagesOpts, type SessionMessagesResult,
-  type ThreadGoal, type GoalStatus, type CodexThreadGoal,
+  type ThreadGoal, type GoalStatus, type CodexThreadGoal, type ClaudeNativeGoal,
 } from '../agent/index.js';
 import {
   querySessions, querySessionTail, updateSession,
@@ -269,12 +270,15 @@ export interface RunningTask {
 
 /**
  * Driver-agnostic goal snapshot consumed by IM renderers + dashboard. The
- * underlying store is either pikiclaw's goal.json (claude / gemini / hermes)
- * or codex's native SQLite (codex). Status uses snake_case for both — codex's
- * camelCase `budgetLimited` is converted to `budget_limited` at the boundary.
+ * underlying store is one of: pikiclaw's goal.json (gemini / hermes / fallback),
+ * codex's native SQLite (codex), or claude's native session transcript JSONL
+ * (claude). Status uses snake_case for all three — codex's camelCase
+ * `budgetLimited` is converted to `budget_limited` at the boundary. Claude
+ * native /goal only emits `active` (and auto-clears on completion so we never
+ * observe a `complete` snapshot — `getSessionGoal` returns null instead).
  */
 export interface SessionGoalView {
-  source: 'pikiclaw' | 'codex';
+  source: 'pikiclaw' | 'codex' | 'claude';
   objective: string;
   status: GoalStatus;
   tokenBudget: number | null;
@@ -303,6 +307,19 @@ function normalizeFromCodex(goal: CodexThreadGoal): SessionGoalView {
     tokenBudget: goal.tokenBudget,
     tokensUsed: goal.tokensUsed,
     timeUsedSeconds: goal.timeUsedSeconds,
+    continuationCount: null,
+  };
+}
+
+function normalizeFromClaudeNative(goal: ClaudeNativeGoal): SessionGoalView {
+  return {
+    source: 'claude',
+    objective: goal.condition,
+    // Native /goal exposes no pause/budget — it's either active or absent.
+    status: 'active',
+    tokenBudget: null,
+    tokensUsed: 0,
+    timeUsedSeconds: 0,
     continuationCount: null,
   };
 }
@@ -1574,18 +1591,18 @@ export class Bot {
    * tasks that get cancelled or errored auto-pause the goal so the loop does
    * not silently resume on the user's next message.
    *
-   * Codex sessions short-circuit: codex CLI runs its own native `/goal`
-   * lifecycle (state machine + continuation engine) inside its app-server, so
-   * pikiclaw stays out to avoid a double loop. See setSessionGoal et al — they
-   * bridge to codex's `thread/goal/*` RPC instead of writing pikiclaw's
-   * goal.json for codex sessions.
+   * Codex and Claude sessions short-circuit: each runs its own native `/goal`
+   * lifecycle (codex's app-server state machine; claude's in-process Stop
+   * hook), so pikiclaw stays out to avoid a double loop. See setSessionGoal
+   * et al — they bridge to codex's `thread/goal/*` RPC and to claude's
+   * `/goal <condition>` slash command instead of writing pikiclaw's goal.json.
    */
   private maybeEnqueueGoalContinuation(
     session: SessionRuntime,
     opts: SubmitSessionTaskOpts,
     result: StreamResult,
   ): void {
-    if (session.agent === 'codex') return;
+    if (session.agent === 'codex' || session.agent === 'claude') return;
     const sessionId = (result.sessionId || session.sessionId || '').trim();
     if (!sessionId || isPendingSessionId(sessionId)) return;
     const workdir = session.workdir;
@@ -1665,6 +1682,11 @@ export class Bot {
       const goal = await getCodexGoal(sessionId);
       return goal ? normalizeFromCodex(goal) : null;
     }
+    if (agent === 'claude') {
+      if (!sessionId || isPendingSessionId(sessionId)) return null;
+      const goal = getClaudeNativeGoal(workdir, sessionId);
+      return goal ? normalizeFromClaudeNative(goal) : null;
+    }
     const goal = readGoal(workdir, agent, sessionId);
     return goal ? normalizeFromPikiclaw(goal) : null;
   }
@@ -1697,6 +1719,36 @@ export class Bot {
       if (!goal) throw new Error('codex did not return a goal snapshot');
       return normalizeFromCodex(goal);
     }
+    if (agent === 'claude') {
+      if (!sessionId || isPendingSessionId(sessionId)) {
+        throw new Error('claude session must exist before /goal — send a first message to create the transcript');
+      }
+      // Native /goal owns its own continuation engine (Stop hook). pikiclaw
+      // just submits the slash command as the next task; claude internally
+      // sets up the goal_status attachment, injects its meta directive, and
+      // keeps looping until the Haiku completion check returns met. Token
+      // budget is accepted in the API for shape parity with codex/portable
+      // but ignored — claude native /goal has no budget concept.
+      const objective = opts.objective.trim();
+      if (!objective) throw new Error('objective must be non-empty');
+      this.submitSessionTask({
+        agent,
+        sessionId,
+        workdir,
+        prompt: buildClaudeSetGoalPrompt(objective),
+        chatId: opts.chatId,
+        modelId: opts.modelId,
+        thinkingEffort: opts.thinkingEffort,
+      });
+      // Return an optimistic snapshot — the actual goal_status attachment is
+      // written by claude during the task; readers can poll getSessionGoal.
+      return normalizeFromClaudeNative({
+        condition: objective,
+        status: 'active',
+        met: false,
+        updatedAtMs: Date.now(),
+      });
+    }
     const goal = setGoalState(workdir, agent, sessionId, {
       objective: opts.objective,
       tokenBudget: opts.tokenBudget ?? null,
@@ -1725,6 +1777,11 @@ export class Bot {
       const goal = resp.goal ?? (await getCodexGoal(sessionId));
       return goal ? normalizeFromCodex(goal) : null;
     }
+    if (agent === 'claude') {
+      // Claude's native /goal exposes no pause/resume — only set and clear.
+      // Surface a clear error so the IM layer can render a friendly message.
+      throw new Error('Claude native /goal does not support pause/resume — only `/goal clear`. Re-issue `/goal <objective>` to start fresh.');
+    }
     const goal = pauseGoal(workdir, agent, sessionId);
     return goal ? normalizeFromPikiclaw(goal) : null;
   }
@@ -1741,6 +1798,9 @@ export class Bot {
       if (!resp.ok) throw new Error(resp.error);
       const goal = resp.goal ?? (await getCodexGoal(sessionId));
       return goal ? normalizeFromCodex(goal) : null;
+    }
+    if (agent === 'claude') {
+      throw new Error('Claude native /goal does not support pause/resume — re-issue `/goal <objective>` to start fresh.');
     }
     const goal = resumeGoal(workdir, agent, sessionId);
     if (!goal || goal.status !== 'active') return goal ? normalizeFromPikiclaw(goal) : null;
@@ -1760,11 +1820,27 @@ export class Bot {
     return normalizeFromPikiclaw(goal);
   }
 
-  async clearSessionGoal(workdir: string, agent: Agent, sessionId: string): Promise<void> {
+  async clearSessionGoal(workdir: string, agent: Agent, sessionId: string, opts: { chatId?: ChatId; modelId?: string | null; thinkingEffort?: string | null } = {}): Promise<void> {
     if (agent === 'codex') {
       if (!sessionId || isPendingSessionId(sessionId)) return;
       const resp = await clearCodexGoal(sessionId);
       if (!resp.ok) throw new Error(resp.error);
+      return;
+    }
+    if (agent === 'claude') {
+      if (!sessionId || isPendingSessionId(sessionId)) return;
+      // Read goal-status first to avoid spawning a no-op turn when nothing is set.
+      const existing = getClaudeNativeGoal(workdir, sessionId);
+      if (!existing) return;
+      this.submitSessionTask({
+        agent,
+        sessionId,
+        workdir,
+        prompt: buildClaudeClearGoalPrompt(),
+        chatId: opts.chatId,
+        modelId: opts.modelId,
+        thinkingEffort: opts.thinkingEffort,
+      });
       return;
     }
     clearGoalState(workdir, agent, sessionId);

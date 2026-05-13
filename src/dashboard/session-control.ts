@@ -3,11 +3,35 @@
  */
 
 import path from 'node:path';
-import { getProjectSkillPaths, listSkills, stageSessionFiles, ensureManagedSession, getDriverCapabilities, type Agent } from '../agent/index.js';
+import { getProjectSkillPaths, listSkills, stageSessionFiles, ensureManagedSession, getDriverCapabilities, isPendingSessionId, type Agent } from '../agent/index.js';
 import { loadUserConfig } from '../core/config/user-config.js';
 import { runtime } from './runtime.js';
 
 const KNOWN_AGENTS = new Set<Agent>(['claude', 'codex', 'gemini', 'hermes']);
+
+/**
+ * Parse a `/goal[ args]` prompt typed in the dashboard chat box. Returns null
+ * when the prompt is not a goal slash command. Sub-commands mirror the IM
+ * `handleGoalCommand` semantics (set / clear / pause / resume / status).
+ *
+ * Routing /goal through the native bridge is the dashboard's analog of what
+ * channels/{telegram,feishu,weixin}/bot.ts do via `handleGoalCommand` — before
+ * this hook, dashboard /goal was matched by the legacy `goal` skill resolver
+ * and silently rewritten to "Read SKILL.md and execute", which bypassed both
+ * the claude native /goal slash command and codex's thread/goal RPC.
+ */
+function parseGoalSlash(prompt: string): { action: 'set' | 'clear' | 'pause' | 'resume' | 'status'; objective: string } | null {
+  const trimmed = prompt.trim();
+  const m = trimmed.match(/^\/goal(?:\s+([\s\S]*))?$/);
+  if (!m) return null;
+  const args = (m[1] || '').trim();
+  if (!args) return { action: 'status', objective: '' };
+  const lower = args.toLowerCase();
+  if (lower === 'clear' || lower === 'cancel' || lower === 'stop') return { action: 'clear', objective: '' };
+  if (lower === 'pause') return { action: 'pause', objective: '' };
+  if (lower === 'resume') return { action: 'resume', objective: '' };
+  return { action: 'set', objective: args };
+}
 
 /**
  * Resolve a `/skill-name [args]` prompt into the full skill execution prompt.
@@ -46,7 +70,7 @@ export interface QueueSessionTaskRequest {
   attachments?: string[];
 }
 
-export function queueDashboardSessionTask(request: QueueSessionTaskRequest) {
+export async function queueDashboardSessionTask(request: QueueSessionTaskRequest) {
   const bot = runtime.getBotRef();
   if (!bot) return { ok: false as const, error: 'Bot is not running' };
   if (!request.workdir || (!request.prompt && !(request.attachments || []).length)) {
@@ -61,6 +85,15 @@ export function queueDashboardSessionTask(request: QueueSessionTaskRequest) {
   const thinkingEffort = resolvedAgent === 'gemini'
     ? ''
     : (typeof request.effort === 'string' ? request.effort.trim().toLowerCase() : '');
+
+  // /goal — route directly to the goal bridge (claude native slash, codex RPC,
+  // or portable goal.json for gemini/hermes). Must run BEFORE skill resolution
+  // so the legacy `goal` skill doesn't grab the prompt and rewrite it into a
+  // "Read SKILL.md" instruction.
+  const goalCmd = parseGoalSlash(request.prompt || '');
+  if (goalCmd && request.sessionId && !isPendingSessionId(request.sessionId)) {
+    return runDashboardGoalSlash(bot, resolvedAgent, request, goalCmd, modelId, thinkingEffort);
+  }
 
   // Resolve /skill-name prompts into full skill execution prompts
   let prompt = request.prompt;
@@ -99,6 +132,50 @@ export function queueDashboardSessionTask(request: QueueSessionTaskRequest) {
     ...(modelId ? { modelId } : {}),
     ...(thinkingEffort ? { thinkingEffort } : {}),
   });
+}
+
+async function runDashboardGoalSlash(
+  bot: NonNullable<ReturnType<typeof runtime.getBotRef>>,
+  agent: Agent,
+  request: QueueSessionTaskRequest,
+  cmd: { action: 'set' | 'clear' | 'pause' | 'resume' | 'status'; objective: string },
+  modelId: string,
+  thinkingEffort: string,
+) {
+  const opts = { chatId: 'dashboard' as const, modelId: modelId || undefined, thinkingEffort: thinkingEffort || undefined };
+  const sessionKey = `${agent}:${request.sessionId}`;
+  // Synthetic task id — for set / clear / resume on agents that internally
+  // submit a follow-up task (claude native slash, portable continuation),
+  // the real task id is owned by submitSessionTask. The dashboard's SSE
+  // stream listener picks that up via session events; this id is just to
+  // give the HTTP caller a non-empty taskId field.
+  const taskId = `goal-${cmd.action}-${Date.now().toString(36)}`;
+  try {
+    if (cmd.action === 'status') {
+      const goal = await bot.getSessionGoal(request.workdir, agent, request.sessionId);
+      return { ok: true as const, taskId, sessionKey, queued: false, goal };
+    }
+    if (cmd.action === 'clear') {
+      await bot.clearSessionGoal(request.workdir, agent, request.sessionId, opts);
+      return { ok: true as const, taskId, sessionKey, queued: false };
+    }
+    if (cmd.action === 'pause') {
+      const goal = await bot.pauseSessionGoal(request.workdir, agent, request.sessionId);
+      return { ok: true as const, taskId, sessionKey, queued: false, goal };
+    }
+    if (cmd.action === 'resume') {
+      const goal = await bot.resumeSessionGoal(request.workdir, agent, request.sessionId, opts);
+      return { ok: true as const, taskId, sessionKey, queued: false, goal };
+    }
+    // set
+    const goal = await bot.setSessionGoal(request.workdir, agent, request.sessionId, {
+      objective: cmd.objective,
+      ...opts,
+    });
+    return { ok: true as const, taskId, sessionKey, queued: true, goal };
+  } catch (e: any) {
+    return { ok: false as const, error: e?.message || String(e) };
+  }
 }
 
 export interface ForkSessionTaskRequest {
