@@ -21,7 +21,13 @@ import type { CredentialField } from '../mcp/registry.js';
 // Types
 // ---------------------------------------------------------------------------
 
-export type CliCategory = 'dev' | 'cloud' | 'productivity' | 'data';
+export type CliCategory =
+  | 'dev'        // 研发工具:source control / containers / package managers
+  | 'cloud'      // 云与部署:IaaS / PaaS / serverless platforms
+  | 'data'       // 数据与后端:databases, analytics, BaaS
+  | 'commerce'   // 商业支付:payments, e-commerce
+  | 'social'     // 社交通讯:chat / messaging / social network CLIs
+  | 'content';   // 内容创作:note-taking, publishing, content platforms
 
 export type CliAuthType = 'oauth-web' | 'token' | 'none';
 

@@ -1449,11 +1449,19 @@ export class Bot {
       };
       this.emitStream(sessionKey, { type: 'interaction', taskId, interaction: interactionSnapshot });
 
-      try {
-        await this.renderInteractionPrompt(active.prompt, chatId);
-      } catch (error: any) {
-        this.humanLoopCancel(active.prompt.promptId, error?.message || 'Failed to send prompt.');
-        throw error;
+      // Dashboard sessions reply through SSE + REST (no IM render). When an IM
+      // bot is also attached, its renderInteractionPrompt override would still
+      // fire here with chatId='dashboard' — sending the prompt to the IM API
+      // with an invalid receive_id, which surfaces as "Request failed with
+      // status code 400" from the axios-based SDK. Skip the render for
+      // dashboard chats; the SSE event is the canonical delivery.
+      if ((chatId as unknown) !== 'dashboard') {
+        try {
+          await this.renderInteractionPrompt(active.prompt, chatId);
+        } catch (error: any) {
+          this.humanLoopCancel(active.prompt.promptId, error?.message || 'Failed to send prompt.');
+          throw error;
+        }
       }
 
       return active.result;

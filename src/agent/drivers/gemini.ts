@@ -348,9 +348,24 @@ interface GeminiHomeOverlay {
   cleanup: () => void;
 }
 
-function prepareGeminiHomeOverlay(effort: string | null | undefined): GeminiHomeOverlay | null {
-  const overrides = geminiEffortOverlay(effort);
-  if (!overrides) return null;
+interface GeminiOverlayOpts {
+  effort: string | null | undefined;
+  /**
+   * Pikiclaw stages IM/dashboard attachments under `.pikiclaw/sessions/<id>/workspace/`,
+   * which is gitignored in this and most consumer repos. gemini-cli's default
+   * `context.fileFiltering.respectGitIgnore: true` silently drops gitignored
+   * `@<path>` references AND blocks the `read_file` tool, so the model never
+   * receives the inlineData and ends up fabricating excuses for the missing
+   * image. When attachments are present we force the filter off for the
+   * spawned process only.
+   */
+  hasAttachments: boolean;
+}
+
+function prepareGeminiHomeOverlay(opts: GeminiOverlayOpts): GeminiHomeOverlay | null {
+  const effortOverrides = geminiEffortOverlay(opts.effort);
+  const needsFileFilterBypass = opts.hasAttachments;
+  if (!effortOverrides && !needsFileFilterBypass) return null;
 
   const home = getHome();
   if (!home) return null;
@@ -388,10 +403,24 @@ function prepareGeminiHomeOverlay(effort: string | null | undefined): GeminiHome
     }
   } catch { /* malformed user settings — start fresh */ }
 
-  const merged = {
-    ...userSettings,
-    agents: deepMergeAgents(userSettings.agents, overrides),
-  };
+  const merged: Record<string, any> = { ...userSettings };
+  if (effortOverrides) {
+    merged.agents = deepMergeAgents(userSettings.agents, effortOverrides);
+  }
+  if (needsFileFilterBypass) {
+    const baseContext = userSettings.context && typeof userSettings.context === 'object' && !Array.isArray(userSettings.context)
+      ? userSettings.context : {};
+    const baseFileFiltering = baseContext.fileFiltering && typeof baseContext.fileFiltering === 'object' && !Array.isArray(baseContext.fileFiltering)
+      ? baseContext.fileFiltering : {};
+    merged.context = {
+      ...baseContext,
+      fileFiltering: {
+        ...baseFileFiltering,
+        respectGitIgnore: false,
+        respectGeminiIgnore: false,
+      },
+    };
+  }
 
   try {
     fs.writeFileSync(path.join(overlayGeminiDir, 'settings.json'), JSON.stringify(merged, null, 2));
@@ -412,7 +441,10 @@ function prepareGeminiHomeOverlay(effort: string | null | undefined): GeminiHome
 
 export async function doGeminiStream(opts: StreamOpts): Promise<StreamResult> {
   // Prompt is passed as -p argument; send empty stdin so run() doesn't duplicate it
-  const overlay = prepareGeminiHomeOverlay(opts.thinkingEffort);
+  const overlay = prepareGeminiHomeOverlay({
+    effort: opts.thinkingEffort,
+    hasAttachments: (opts.attachments?.length ?? 0) > 0,
+  });
   const extraEnv = overlay
     ? { ...(opts.extraEnv || {}), GEMINI_CLI_HOME: overlay.homeDir }
     : opts.extraEnv;

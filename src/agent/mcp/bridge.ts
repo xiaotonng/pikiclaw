@@ -18,10 +18,11 @@ import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
+  ensurePlaywrightMcpConfigFile,
   getManagedBrowserProfileDir,
+  resolveManagedBrowserCdpEndpoint,
   resolveManagedBrowserMcpCommand,
 } from '../../browser-profile.js';
-import { ensureManagedBrowser } from '../../browser-supervisor.js';
 import { loadUserConfig } from '../../core/config/user-config.js';
 import { MCP_TIMEOUTS, MCP_ARTIFACT_MAX_BYTES } from '../../core/constants.js';
 import type { AgentInteraction, AgentInteractionQuestion } from '../types.js';
@@ -490,32 +491,27 @@ export async function startMcpBridge(opts: McpBridgeOpts): Promise<McpBridgeHand
   const { sessionDir, workspacePath, stagedFiles, sendFile, onInteraction } = opts;
   let hadActivity = false;
   const gui = resolveGuiIntegrationConfig();
-  // Resolve the managed-browser CDP endpoint eagerly so the Playwright MCP
-  // server can be spawned in attach mode directly (no proxy required). The
-  // supervisor singleton in `browser-supervisor.ts` caches the result so
-  // concurrent streams reuse the same long-lived Chrome instance; if the
-  // managed Chrome is unreachable we fall back to upstream-managed launch.
   for (const hint of buildGuiSetupHints(gui)) opts.onLog?.(hint);
+  // Lazy browser lifecycle: probe an already-running managed Chrome via
+  // <profileDir>/DevToolsActivePort and attach if reachable; otherwise leave
+  // Chrome unlaunched and let playwright/mcp launch it with `--user-data-dir`
+  // on the first browser_* tool call. Previously the bridge eagerly called
+  // `ensureManagedBrowser`, which forced a Chrome window to open at every
+  // stream start even when the agent never touched the browser.
   let browserCdpEndpoint: string | null = null;
   if (gui.browserEnabled) {
-    try {
-      const snapshot = await ensureManagedBrowser({ headless: gui.browserHeadless });
-      browserCdpEndpoint = snapshot.cdpEndpoint;
-      if (browserCdpEndpoint && snapshot.connectionMode === 'attach') {
-        opts.onLog?.(`reusing managed browser via CDP at ${browserCdpEndpoint}.`);
-      } else if (browserCdpEndpoint) {
-        opts.onLog?.(`managed browser ready (mode=${snapshot.connectionMode}) at ${browserCdpEndpoint}.`);
-      } else {
-        opts.onLog?.('managed browser unavailable; falling back to upstream-managed launch.');
-      }
-    } catch (err: any) {
-      opts.onLog?.(`managed browser ensure failed: ${err?.message || err}; falling back to upstream-managed launch.`);
-    }
+    // Write the playwright/mcp config file (referenced by --config in
+    // getManagedBrowserMcpArgs) before the agent CLI spawns playwright/mcp.
+    ensurePlaywrightMcpConfigFile();
+    browserCdpEndpoint = await resolveManagedBrowserCdpEndpoint(gui.browserProfileDir).catch(() => null);
     if (browserCdpEndpoint) {
+      opts.onLog?.(`attaching to existing managed browser at ${browserCdpEndpoint}.`);
       const { reaped, spared } = reapStalePlaywrightMcpProcesses(browserCdpEndpoint);
       if (reaped.length) {
         opts.onLog?.(`reaped ${reaped.length} stale playwright-mcp process(es) attached to ${browserCdpEndpoint}: pid=${reaped.join(',')}${spared.length ? ` (spared in-tree: ${spared.join(',')})` : ''}`);
       }
+    } else {
+      opts.onLog?.('no managed browser running; playwright/mcp will launch one on first browser_* tool call.');
     }
   }
 

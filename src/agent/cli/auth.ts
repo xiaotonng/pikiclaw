@@ -322,6 +322,24 @@ export async function applyCliToken(cliId: string, values: Record<string, string
         const configPath = path.join(awsDir, 'config');
         mergeIniSection(configPath, 'default', `[default]\nregion = ${region}\n`);
       }
+    } else if (cli.id === 'mocli') {
+      // mocli stores its key via `mocli auth init --apik <KEY>` — let the CLI
+      // own its storage path so future schema changes upstream don't break us.
+      const key = (values.MOWEN_API_KEY || '').trim();
+      if (!key) return { ok: false, error: 'Mowen API Key is required' };
+      const applied = await new Promise<{ ok: boolean; stderr: string }>((resolve) => {
+        const child = spawn('mocli', ['auth', 'init', '--apik', key], {
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: { ...process.env, NO_COLOR: '1', TERM: 'dumb' },
+        });
+        let stderr = '';
+        child.stderr?.on('data', b => { stderr += b.toString('utf8'); });
+        child.on('error', err => resolve({ ok: false, stderr: err.message }));
+        child.on('close', code => resolve({ ok: code === 0, stderr }));
+      });
+      if (!applied.ok) {
+        return { ok: false, error: applied.stderr.trim().slice(0, 200) || 'mocli auth init failed' };
+      }
     } else {
       return { ok: false, error: `token auth is not implemented for ${cliId}` };
     }

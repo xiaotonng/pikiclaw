@@ -634,7 +634,7 @@ export interface LsDirResult {
 // CLI Extensions
 // ---------------------------------------------------------------------------
 
-export type CliCategory = 'dev' | 'cloud' | 'productivity' | 'data';
+export type CliCategory = 'dev' | 'cloud' | 'data' | 'commerce' | 'social' | 'content';
 export type CliState = 'not_installed' | 'installed_not_auth' | 'ready' | 'unknown';
 export type CliAuthType = 'oauth-web' | 'token' | 'none';
 

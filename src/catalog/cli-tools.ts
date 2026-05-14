@@ -151,7 +151,7 @@ export const CLI_TOOLS: RecommendedCli[] = [
     name: 'Supabase CLI',
     description: 'Manage Supabase projects, Postgres, and Edge Functions',
     descriptionZh: '管理 Supabase 项目、Postgres 与 Edge Functions',
-    category: 'cloud',
+    category: 'data',
     iconSlug: 'supabase',
     homepage: 'https://supabase.com/docs/guides/cli',
     recommendedScope: 'global',
@@ -198,14 +198,14 @@ export const CLI_TOOLS: RecommendedCli[] = [
     },
   },
 
-  // ── Token-based ────────────────────────────────────────────────────────────
+  // ── Commerce & payments ────────────────────────────────────────────────────
   {
     id: 'stripe',
     binary: 'stripe',
     name: 'Stripe CLI',
     description: 'Test webhooks, trigger events, inspect API logs',
     descriptionZh: '调试 Webhook、触发事件、查看 API 日志',
-    category: 'data',
+    category: 'commerce',
     iconSlug: 'stripe',
     homepage: 'https://stripe.com/docs/stripe-cli',
     recommendedScope: 'global',
@@ -280,6 +280,64 @@ export const CLI_TOOLS: RecommendedCli[] = [
       logoutArgv: ['gcloud', 'auth', 'revoke'],
       loginHint:   'Opens a browser for Google OAuth.',
       loginHintZh: '将打开浏览器完成 Google OAuth 授权。',
+    },
+  },
+
+  // ── Social & messaging ─────────────────────────────────────────────────────
+  {
+    id: 'lark-cli',
+    binary: 'lark-cli',
+    name: 'Lark CLI',
+    description: 'Official Lark/Feishu CLI — Messenger, Docs, Base, Calendar, Tasks (200+ commands, Agent-native)',
+    descriptionZh: '飞书官方 CLI — 消息、文档、多维表格、日历、任务等 200+ 命令，专为 Agent 设计',
+    category: 'social',
+    iconSlug: 'lark',
+    homepage: 'https://github.com/larksuite/cli',
+    recommendedScope: 'global',
+    versionArgv: ['lark-cli', '--version'],
+    install: {
+      docs: 'https://github.com/larksuite/cli#installation--quick-start',
+      darwin: [{ label: 'npm', cmd: 'npm i -g @larksuite/cli' }],
+      linux:  [{ label: 'npm', cmd: 'npm i -g @larksuite/cli' }],
+      win:    [{ label: 'npm', cmd: 'npm i -g @larksuite/cli' }],
+    },
+    auth: {
+      type: 'oauth-web',
+      statusArgv: ['lark-cli', 'auth', 'status'],
+      loginArgv:  ['lark-cli', 'auth', 'login', '--recommend'],
+      logoutArgv: ['lark-cli', 'auth', 'logout'],
+      loginHint:   'First run `lark-cli config init` in a terminal to register your Feishu app, then click below to sign in via OAuth.',
+      loginHintZh: '首次使用先在终端运行 `lark-cli config init` 注册飞书应用，再点这里走 OAuth 浏览器登录。建议同步安装配套 Skills：`npx skills add larksuite/cli -y -g`。',
+    },
+  },
+
+  // ── Content & creation ─────────────────────────────────────────────────────
+  {
+    id: 'mocli',
+    binary: 'mocli',
+    name: 'Mowen CLI',
+    description: 'Talk to 墨问 (Mowen) — query notes, search users, view activity from your agent',
+    descriptionZh: '墨问官方 CLI — 查我的笔记、搜用户、看动态，给 Agent 一手接入墨问内容',
+    category: 'content',
+    iconUrl: 'https://pub-sdn-001.mowen.cn/fe/assets/mowen-note.svg',
+    homepage: 'https://github.com/mowenxd/cli',
+    recommendedScope: 'global',
+    versionArgv: ['mocli', '--version'],
+    install: {
+      docs: 'https://github.com/mowenxd/cli#安装与快速开始',
+      darwin: [{ label: 'npm', cmd: 'npm i -g @mowenxd/cli' }],
+      linux:  [{ label: 'npm', cmd: 'npm i -g @mowenxd/cli' }],
+      win:    [{ label: 'npm', cmd: 'npm i -g @mowenxd/cli' }],
+    },
+    auth: {
+      type: 'token',
+      statusArgv: ['mocli', 'auth', 'info'],
+      logoutArgv: ['mocli', 'auth', 'logout'],
+      tokenFields: [
+        { key: 'MOWEN_API_KEY', label: 'Mowen API Key', labelZh: '墨问 API Key', secret: true, required: true },
+      ],
+      loginHint:   'Get your API Key in the Mowen mini-program → 我的 → 开发者 → 我的 API Key.',
+      loginHintZh: '在墨问小程序里：右下角「我的」→「开发者」→「我的 API Key」，复制粘贴到这里。装完后建议再跑 `npx skills add mowenxd/cli -y -g` 安装配套 Skills。',
     },
   },
 

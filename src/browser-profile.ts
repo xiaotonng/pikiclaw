@@ -58,15 +58,34 @@ interface ManagedBrowserSetupState {
   pid: number;
   profileDir: string;
   chromeExecutable: string;
-  debugPort: number;
   launchedAt: string;
 }
 
 const MANAGED_BROWSER_SETUP_STATE_FILENAME = 'managed-browser-setup.json';
 const MANAGED_BROWSER_SHUTDOWN_TIMEOUT_MS = 5_000;
 const MANAGED_BROWSER_SHUTDOWN_POLL_MS = 100;
-const MANAGED_BROWSER_DEBUG_PORT = 39222;
 const require = createRequire(import.meta.url);
+
+/**
+ * Read Chrome's `DevToolsActivePort` file from the managed profile dir.
+ * Chrome writes this file when launched with `--remote-debugging-port=<n>`
+ * (including `=0`, which lets the OS assign a free port). Format is two lines:
+ *   <port>
+ *   /devtools/browser/<id>
+ * We use it to discover the actual port rather than hard-coding one.
+ */
+function readDevToolsActivePort(profileDir: string): number | null {
+  try {
+    const raw = fs.readFileSync(path.join(profileDir, 'DevToolsActivePort'), 'utf8');
+    const firstLine = raw.split('\n')[0]?.trim();
+    if (!firstLine) return null;
+    const port = parseInt(firstLine, 10);
+    if (!Number.isFinite(port) || port <= 0 || port > 65535) return null;
+    return port;
+  } catch {
+    return null;
+  }
+}
 
 function normalizeBrowserCdpEndpoint(endpoint: string): string {
   const value = String(endpoint || '').trim();
@@ -174,15 +193,52 @@ export function ensureManagedBrowserProfileDir(): string {
   return profileDir;
 }
 
+function getPlaywrightMcpConfigPath(outputDir: string): string {
+  return path.join(outputDir, 'playwright-mcp-config.json');
+}
+
+/**
+ * Write the playwright/mcp config JSON used by every spawn. Currently it just
+ * strips Playwright's default `--disable-blink-features=AutomationControlled`
+ * arg so Chrome doesn't show its "unsupported command-line flag" infobar.
+ * Playwright adds that flag to hide `navigator.webdriver`; removing it makes
+ * the managed browser look like a normal session, which is what we want for
+ * pikiclaw's logged-in automation profile.
+ *
+ * Idempotent: rewrites only when the content drifts.
+ */
+export function ensurePlaywrightMcpConfigFile(
+  outputDir: string = path.dirname(getManagedBrowserProfileDir()),
+): string {
+  const configPath = getPlaywrightMcpConfigPath(outputDir);
+  const desired = JSON.stringify({
+    browser: {
+      launchOptions: {
+        ignoreDefaultArgs: ['--disable-blink-features=AutomationControlled'],
+      },
+    },
+  }, null, 2);
+  try {
+    if (fs.readFileSync(configPath, 'utf8') === desired) return configPath;
+  } catch {
+    // File missing or unreadable — fall through to write.
+  }
+  fs.mkdirSync(outputDir, { recursive: true });
+  fs.writeFileSync(configPath, desired, 'utf8');
+  return configPath;
+}
+
 export function getManagedBrowserMcpArgs(
   profileDir = getManagedBrowserProfileDir(),
   options: ManagedBrowserMcpOptions = {},
 ): string[] {
   const outputDir = path.dirname(profileDir);
+  const configPath = getPlaywrightMcpConfigPath(outputDir);
   if (options.cdpEndpoint) {
-    return ['--cdp-endpoint', options.cdpEndpoint, '--output-dir', outputDir];
+    return ['--config', configPath, '--cdp-endpoint', options.cdpEndpoint, '--output-dir', outputDir];
   }
   return [
+    '--config', configPath,
     ...PLAYWRIGHT_MCP_BROWSER_ARGS,
     ...(options.headless ? ['--headless'] : []),
     '--user-data-dir',
@@ -228,7 +284,10 @@ export function getManagedBrowserLaunchArgs(profileDir = getManagedBrowserProfil
     : ['--start-maximized'];
   return [
     `--user-data-dir=${profileDir}`,
-    `--remote-debugging-port=${MANAGED_BROWSER_DEBUG_PORT}`,
+    // `=0` makes Chrome pick a free port and write it to <profileDir>/DevToolsActivePort,
+    // which `readDevToolsActivePort` reads back. Hard-coding a port causes collisions
+    // when another Chrome / debugger is already on it.
+    '--remote-debugging-port=0',
     '--no-first-run',
     '--no-default-browser-check',
     '--new-window',
@@ -269,7 +328,6 @@ function readManagedBrowserSetupState(profileDir = getManagedBrowserProfileDir()
       pid: parsed.pid,
       profileDir: parsed.profileDir,
       chromeExecutable: parsed.chromeExecutable,
-      debugPort: typeof parsed.debugPort === 'number' && parsed.debugPort > 0 ? parsed.debugPort : MANAGED_BROWSER_DEBUG_PORT,
       launchedAt: typeof parsed.launchedAt === 'string' ? parsed.launchedAt : new Date().toISOString(),
     };
   } catch {
@@ -397,22 +455,20 @@ async function terminatePid(pid: number): Promise<boolean> {
   return waitForPidExit(pid, 1_000);
 }
 
-function getManagedBrowserDebugEndpoint(port: number): string {
-  return `http://127.0.0.1:${port}`;
+export async function resolveManagedBrowserCdpEndpoint(profileDir = getManagedBrowserProfileDir()): Promise<string | null> {
+  const port = readDevToolsActivePort(profileDir);
+  if (!port) return null;
+  return resolveBrowserCdpEndpoint(`http://127.0.0.1:${port}`);
 }
 
-async function resolveManagedBrowserCdpEndpoint(port: number): Promise<string | null> {
-  return resolveBrowserCdpEndpoint(getManagedBrowserDebugEndpoint(port));
-}
-
-async function waitForManagedBrowserCdpEndpoint(port: number, timeoutMs = 6_000): Promise<string | null> {
+async function waitForManagedBrowserCdpEndpoint(profileDir: string, timeoutMs = 6_000): Promise<string | null> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const endpoint = await resolveManagedBrowserCdpEndpoint(port);
+    const endpoint = await resolveManagedBrowserCdpEndpoint(profileDir);
     if (endpoint) return endpoint;
     await sleep(200);
   }
-  return resolveManagedBrowserCdpEndpoint(port);
+  return resolveManagedBrowserCdpEndpoint(profileDir);
 }
 
 /**
@@ -476,15 +532,12 @@ export async function prepareManagedBrowserForAutomation(
   profileDir = getManagedBrowserProfileDir(),
   options: ManagedBrowserAutomationOptions = {},
 ): Promise<ManagedBrowserAutomationPreparationResult> {
-  const tracked = readManagedBrowserSetupState(profileDir);
-  const cdpPort = tracked?.debugPort || MANAGED_BROWSER_DEBUG_PORT;
-
   // CDP probe is the authoritative signal: if the managed Chrome answers on
   // its debug port, attach to it regardless of what the setup-state file or
   // the process table say. The ps-based running-state check is heuristic and
   // can be wrong after a daemon restart, which would otherwise kill the
   // user's live (and signed-in) browser.
-  const reachableEndpoint = await resolveManagedBrowserCdpEndpoint(cdpPort);
+  const reachableEndpoint = await resolveManagedBrowserCdpEndpoint(profileDir);
   if (reachableEndpoint) {
     return {
       profileDir,
@@ -497,7 +550,7 @@ export async function prepareManagedBrowserForAutomation(
   const closedPids = await closeManagedBrowserProcesses(profileDir);
   if (!options.headless) {
     launchManagedBrowserSetup();
-    const cdpEndpoint = await waitForManagedBrowserCdpEndpoint(MANAGED_BROWSER_DEBUG_PORT);
+    const cdpEndpoint = await waitForManagedBrowserCdpEndpoint(profileDir);
     if (cdpEndpoint) {
       return {
         profileDir,
@@ -571,7 +624,6 @@ export function launchManagedBrowserSetup(): ManagedBrowserLaunchResult {
       pid: child.pid,
       profileDir,
       chromeExecutable,
-      debugPort: MANAGED_BROWSER_DEBUG_PORT,
       launchedAt: new Date().toISOString(),
     });
   }

@@ -375,6 +375,63 @@ describe('Bot.runStream interaction handler (IM path)', () => {
   });
 });
 
+describe('dashboard chats skip IM-side renderInteractionPrompt', () => {
+  it('does not invoke renderInteractionPrompt when chatId is the dashboard sentinel', async () => {
+    const doStreamMock = vi.mocked(doStream);
+
+    doStreamMock.mockImplementationOnce(async (opts) => {
+      const response = await opts.onInteraction?.(buildTestInteraction());
+      expect(response).toEqual({ answers: { q1: { answers: ['Allow'] } } });
+      return makeStreamResult('codex', { sessionId: 'sess-dash-skip', message: 'done' });
+    });
+
+    const renderSpy = vi.fn(async () => {
+      // Simulate an IM subclass whose channel SDK (e.g. Feishu/axios) rejects
+      // `chatId='dashboard'` with a 400 — the bug this test guards against.
+      throw new Error('Request failed with status code 400');
+    });
+
+    class IMBot extends Bot {
+      // @ts-expect-error narrow ChatId only matters at runtime here
+      protected override renderInteractionPrompt(...args: unknown[]) {
+        return renderSpy(...args);
+      }
+    }
+
+    const bot = new IMBot();
+    const submitted = bot.submitSessionTask({
+      agent: 'codex',
+      sessionId: 'sess-dash-skip',
+      workdir: process.env.PIKICLAW_WORKDIR!,
+      prompt: 'do work',
+      // No chatId — defaults to the dashboard sentinel.
+    });
+    expect(submitted.ok).toBe(true);
+
+    const deadline = Date.now() + 2000;
+    while (Date.now() < deadline) {
+      const snap = bot.getStreamSnapshot('codex:sess-dash-skip');
+      if (snap?.interactions?.length) break;
+      await new Promise(r => setTimeout(r, 10));
+    }
+
+    const snap = bot.getStreamSnapshot('codex:sess-dash-skip');
+    expect(snap?.interactions).toHaveLength(1);
+    const promptId = snap!.interactions![0].promptId;
+    bot.interactionSelectOption(promptId, 'Allow');
+
+    const doneDeadline = Date.now() + 2000;
+    while (Date.now() < doneDeadline) {
+      const s = bot.getStreamSnapshot('codex:sess-dash-skip');
+      if (s?.phase === 'done') break;
+      await new Promise(r => setTimeout(r, 10));
+    }
+
+    expect(renderSpy).not.toHaveBeenCalled();
+    expect(bot.getStreamSnapshot('codex:sess-dash-skip')?.phase).toBe('done');
+  });
+});
+
 describe('interaction on nonexistent prompts', () => {
   it('returns null for all operations on nonexistent prompt IDs', () => {
     const bot = new Bot();

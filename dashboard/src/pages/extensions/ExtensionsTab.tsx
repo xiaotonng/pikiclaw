@@ -1811,10 +1811,12 @@ function SkillsCatalogSection({
 // ═══════════════════════════════════════════════════════════════════════════
 
 const CLI_CATEGORY_META: Record<string, { zh: string; en: string; order: number }> = {
-  dev:          { zh: '开发工具',   en: 'Developer', order: 1 },
-  cloud:        { zh: '云平台',     en: 'Cloud',     order: 2 },
-  data:         { zh: '数据',       en: 'Data',      order: 3 },
-  productivity: { zh: '生产力',     en: 'Productivity', order: 4 },
+  dev:      { zh: '研发工具', en: 'Developer', order: 1 },
+  cloud:    { zh: '云与部署', en: 'Cloud',     order: 2 },
+  data:     { zh: '数据后端', en: 'Data',      order: 3 },
+  commerce: { zh: '商业支付', en: 'Commerce',  order: 4 },
+  social:   { zh: '社交通讯', en: 'Social',    order: 5 },
+  content:  { zh: '内容创作', en: 'Content',   order: 6 },
 };
 
 function cliStatePill({
