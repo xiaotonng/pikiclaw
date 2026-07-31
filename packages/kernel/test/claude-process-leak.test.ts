@@ -81,22 +81,42 @@ const until = async (pred: () => boolean, ms = 5_000): Promise<boolean> => {
 describe('claude -p process leak', () => {
   let tmp: string;
   let driver: ClaudeDriver | null;
+  /** Pid files every fixture in this file writes. STUBBORN deliberately survives SIGTERM, so if
+   *  an assertion throws before the test reaps it, nothing else ever will — an orphan that
+   *  outlives the whole run. (Observed for real while running these tests against the unfixed
+   *  source, where `reapChild` was undefined and `dispose()` threw.) Sweep unconditionally. */
+  let pidFiles: string[];
 
   beforeEach(() => {
     tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kernel-claude-leak-'));
     driver = null;
+    pidFiles = [];
     // Sub-second so the quiet-settle branch is reachable inside a test.
     process.env.PIKILOOM_CLAUDE_BG_SETTLE_QUIET_MS = '150';
     process.env.PIKILOOM_CLAUDE_BG_HOLD_RECHECK_MS = '50';
   });
   afterEach(() => {
-    driver?.dispose();
+    try { driver?.dispose(); } catch { /* the point of the sweep below */ }
+    for (const f of pidFiles) {
+      try { process.kill(Number(fs.readFileSync(f, 'utf8').trim()), 'SIGKILL'); } catch { /* gone */ }
+    }
     delete process.env.PIKILOOM_CLAUDE_BG_SETTLE_QUIET_MS;
     delete process.env.PIKILOOM_CLAUDE_BG_HOLD_RECHECK_MS;
     delete process.env.PIKILOOM_CLAUDE_WARM_IDLE_MS;
     delete process.env.PIKILOOM_CLAUDE_WARM_MAX;
+    delete process.env.PIKILOOM_REAP_GRACE_MS;
+    delete process.env.PIKILOOM_REAP_FORCE_MS;
+    delete process.env.PID_FILE;
     fs.rmSync(tmp, { recursive: true, force: true });
   });
+
+  /** Arm PID_FILE for a STUBBORN spawn and register it for the afterEach sweep. */
+  const armPidFile = (name: string): string => {
+    const f = path.join(tmp, name);
+    pidFiles.push(f);
+    process.env.PID_FILE = f;
+    return f;
+  };
 
   const write = (body: string): string => {
     const p = path.join(tmp, `fake-${Math.random().toString(36).slice(2)}.js`);
@@ -146,10 +166,10 @@ describe('claude -p process leak', () => {
     // The pool only ever holds PARKED processes, so a dispose() that walked it alone left an
     // in-flight turn's CLI running: on shutdown nothing aborts running turns (Loom.stop stops
     // surfaces only), so this process got no signal at all and outlived the server.
-    const pidFile = path.join(tmp, 'stubborn.pid');
-    process.env.PID_FILE = pidFile;
+    const pidFile = armPidFile('stubborn.pid');
     process.env.PIKILOOM_REAP_FORCE_MS = '150';
     const d = new ClaudeDriver(write(STUBBORN), { warmPool: true });
+    driver = d;
     const { ctx } = ctxCollect();
 
     const turn = d.run(turnInput(), ctx); // never settles on its own — no `result` ever comes
@@ -162,20 +182,16 @@ describe('claude -p process leak', () => {
     d.dispose();
     expect(await until(() => !alive(pid), 5_000)).toBe(true);
     await turn.catch(() => undefined); // the kill settles the hanging turn
-    delete process.env.PID_FILE;
-    delete process.env.PIKILOOM_REAP_FORCE_MS;
   });
 
   it('reapChild escalates to SIGKILL when the child ignores stdin EOF and SIGTERM', async () => {
-    const pidFile = path.join(tmp, 'reap.pid');
-    process.env.PID_FILE = pidFile;
+    armPidFile('reap.pid');
     const child = spawn(process.execPath, [write(STUBBORN)], { stdio: ['pipe', 'pipe', 'pipe'] });
     const pid = child.pid!;
     await until(() => alive(pid));
 
     reapChild(child, { graceMs: 20, forceMs: 60 });
     expect(await until(() => child.signalCode === 'SIGKILL' || !alive(pid), 3_000)).toBe(true);
-    delete process.env.PID_FILE;
   });
 
   it('reapChild sends no signal to a child that exits on stdin EOF', async () => {
