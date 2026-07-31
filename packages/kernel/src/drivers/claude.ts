@@ -6,7 +6,7 @@ import type { AgentDriver, AgentTurnInput, DriverContext, DriverResult, DriverEv
 import type { UniversalUsage, UniversalPlan, UniversalSubAgent } from '../protocol/index.js';
 import { ClaudeWarmPool } from './claude-pool.js';
 import { claudeAnchorResolvable, claudeTranscriptTailAnchor, discoverClaudeNativeSessions, encodeClaudeProjectDir } from './native.js';
-import { attachedFileNote, contextPercent, createLineBuffer, imageMimeForFile, parseJsonLine, reapChild, wireAbort } from './shared.js';
+import { attachedFileNote, canLeadProcessGroup, contextPercent, createLineBuffer, imageMimeForFile, parseJsonLine, reapChild, wireAbort } from './shared.js';
 
 // Real driver: shells the local `claude` CLI in stream-json mode and normalizes its
 // events into kernel DriverEvents. Faithful to pikiloom's claude.ts event shapes
@@ -41,7 +41,7 @@ export class ClaudeDriver implements AgentDriver {
    *  Long-lived hosts call this on shutdown. */
   dispose(): void {
     this.pool?.dispose();
-    for (const child of [...this.spawned]) reapChild(child, { graceMs: 0 });
+    for (const child of [...this.spawned]) reapChild(child, { graceMs: 0, group: true });
   }
 
   /** Track a child until it exits, so {@link dispose} can always find it. */
@@ -217,7 +217,7 @@ export class ClaudeDriver implements AgentDriver {
           // Reap rather than fire-and-forget: one SIGTERM with nothing watching is how a
           // wedged CLI became an unowned resident process (see reapChild). kill=true wants
           // the SIGTERM now; kill=false grants the transcript-flush grace first.
-          reapChild(child, { graceMs: kill ? 0 : CLAUDE_EXIT_LEAK_GUARD_MS });
+          reapChild(child, { graceMs: kill ? 0 : CLAUDE_EXIT_LEAK_GUARD_MS, group: true });
         }
         resolve({ ...r, transport });
       };
@@ -295,11 +295,20 @@ export class ClaudeDriver implements AgentDriver {
         try {
           pooled.stdin!.write(claudeUserMessage(input.prompt, input.attachments) + '\n');
           acquired = pooled; transport = 'warm'; promptDelivered = true;
-        } catch { reapChild(pooled, { graceMs: 0 }); }
+        } catch { reapChild(pooled, { graceMs: 0, group: true }); }
       }
       if (!acquired) {
         try {
-          acquired = spawn(this.bin, args, { cwd: input.workdir, env: { ...process.env, ...(input.env || {}) }, stdio: ['pipe', 'pipe', 'pipe'] });
+          // detached: the CLI leads its OWN process group, so the tree it builds (its MCP
+          // servers, its tool subprocesses) can be SIGKILLed as one unit if it ever wedges
+          // past SIGTERM. Without that they reparent to init — tens of MB each, invisible.
+          // Only reapChild's final SIGKILL uses the group; see its doc for why.
+          acquired = spawn(this.bin, args, {
+            cwd: input.workdir,
+            env: { ...process.env, ...(input.env || {}) },
+            stdio: ['pipe', 'pipe', 'pipe'],
+            detached: canLeadProcessGroup,
+          });
           this.track(acquired); // a warm process is already tracked from its own cold spawn
         } catch (err: any) {
           finish({ ok: false, text: '', error: `spawn failed: ${err?.message || err}`, stopReason: 'error' });
@@ -311,7 +320,7 @@ export class ClaudeDriver implements AgentDriver {
       // Abort (the user pressed Stop) must actually END the process. A lone SIGTERM here relied on
       // the child's `close` to bring the turn — and any escalation — with it, so a CLI that ignored
       // it left both the turn and the process hanging. Reap escalates to SIGKILL on its own.
-      disposeAbort = wireAbort(ctx.signal, () => reapChild(child, { graceMs: 0 }));
+      disposeAbort = wireAbort(ctx.signal, () => reapChild(child, { graceMs: 0, group: true }));
 
       if (steerable) {
         ctx.registerSteer(async (prompt: string, attachments?: string[]) => {

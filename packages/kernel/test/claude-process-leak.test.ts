@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { ClaudeDriver } from '../src/drivers/claude.js';
-import { reapChild } from '../src/drivers/shared.js';
+import { canLeadProcessGroup, reapChild } from '../src/drivers/shared.js';
 import type { AgentTurnInput, DriverContext, DriverEvent } from '../src/contracts/driver.js';
 
 // Process-leak regressions for the `claude -p` path. Two defects, both observed in the wild as
@@ -47,6 +47,19 @@ process.stdin.on('end', () => process.exit(0));
  *  hangs its own shutdown, which is the state only SIGKILL ends. */
 const STUBBORN = `#!/usr/bin/env node
 require('node:fs').writeFileSync(process.env.PID_FILE, String(process.pid));
+process.on('SIGTERM', () => {});
+process.stdin.resume();
+process.stdin.on('end', () => {});
+setInterval(() => {}, 1000);
+`;
+
+/** A wedged CLI that already spawned a subprocess of its own — stands in for `claude` holding
+ *  its MCP servers. Both ignore SIGTERM. The subprocess is NOT itself detached, so it joins
+ *  whatever group its parent leads: signalling that group is the only thing that reaches it. */
+const STUBBORN_TREE = `#!/usr/bin/env node
+const { spawn } = require('node:child_process');
+const kid = spawn(process.execPath, ['-e', 'process.on("SIGTERM",()=>{}); setInterval(()=>{},1000)'], { stdio: 'ignore' });
+require('node:fs').writeFileSync(process.env.PID_FILE, process.pid + '\\n' + kid.pid + '\\n');
 process.on('SIGTERM', () => {});
 process.stdin.resume();
 process.stdin.on('end', () => {});
@@ -98,7 +111,11 @@ describe('claude -p process leak', () => {
   afterEach(() => {
     try { driver?.dispose(); } catch { /* the point of the sweep below */ }
     for (const f of pidFiles) {
-      try { process.kill(Number(fs.readFileSync(f, 'utf8').trim()), 'SIGKILL'); } catch { /* gone */ }
+      try {
+        for (const line of fs.readFileSync(f, 'utf8').trim().split('\n')) {
+          try { process.kill(Number(line.trim()), 'SIGKILL'); } catch { /* gone */ }
+        }
+      } catch { /* fixture never started */ }
     }
     delete process.env.PIKILOOM_CLAUDE_BG_SETTLE_QUIET_MS;
     delete process.env.PIKILOOM_CLAUDE_BG_HOLD_RECHECK_MS;
@@ -194,8 +211,54 @@ describe('claude -p process leak', () => {
     expect(await until(() => child.signalCode === 'SIGKILL' || !alive(pid), 3_000)).toBe(true);
   });
 
-  it('reapChild sends no signal to a child that exits on stdin EOF', async () => {
-    const child = spawn(process.execPath, ['-e', 'process.stdin.on("end", () => process.exit(0)); process.stdin.resume();'], {
+  it('a group reap takes the wedged CLI\'s whole subprocess tree', async () => {
+    // The MCP-orphan case: SIGKILLing only the CLI leaves everything it spawned reparented to
+    // init — a handful of MCP servers at tens of MB each, with nothing left that knows about them.
+    const pidFile = armPidFile('tree.pid');
+    const child = spawn(process.execPath, [write(STUBBORN_TREE)], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      detached: canLeadProcessGroup, // what the driver now does for every `-p` spawn
+    });
+    const twoPids = (): number[] => {
+      try {
+        const lines = fs.readFileSync(pidFile, 'utf8').trim().split('\n').filter(Boolean);
+        return lines.length === 2 ? lines.map(Number) : [];
+      } catch { return []; }
+    };
+    expect(await until(() => twoPids().length === 2)).toBe(true);
+    const [cliPid, mcpPid] = twoPids();
+    expect(alive(cliPid!)).toBe(true);
+    expect(alive(mcpPid!)).toBe(true);
+
+    reapChild(child, { graceMs: 20, forceMs: 60, group: true });
+    expect(await until(() => !alive(cliPid!), 3_000)).toBe(true);
+    expect(await until(() => !alive(mcpPid!), 3_000)).toBe(true); // used to survive forever
+  });
+
+  it('without the group step the subprocess survives — so the group step is what fixes it', async () => {
+    // Negative control, pinning WHY the flag exists rather than just that the happy path works.
+    // afterEach SIGKILLs both pids, so the survivor this asserts does not outlive the test.
+    const pidFile = armPidFile('tree-nogroup.pid');
+    const child = spawn(process.execPath, [write(STUBBORN_TREE)], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      detached: canLeadProcessGroup,
+    });
+    const twoPids = (): number[] => {
+      try {
+        const lines = fs.readFileSync(pidFile, 'utf8').trim().split('\n').filter(Boolean);
+        return lines.length === 2 ? lines.map(Number) : [];
+      } catch { return []; }
+    };
+    expect(await until(() => twoPids().length === 2)).toBe(true);
+    const [cliPid, mcpPid] = twoPids();
+
+    reapChild(child, { graceMs: 20, forceMs: 60 }); // no group
+    expect(await until(() => !alive(cliPid!), 3_000)).toBe(true);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(alive(mcpPid!)).toBe(true); // orphaned: nothing else would ever reach it
+  });
+
+  it('reapChild sends no signal to a child that exits on stdin EOF', async () => {    const child = spawn(process.execPath, ['-e', 'process.stdin.on("end", () => process.exit(0)); process.stdin.resume();'], {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     const pid = child.pid!;

@@ -45,7 +45,9 @@ interface ParkedClaude {
 
 /** End a no-longer-poolable process the same way a graceful settle does. */
 function destroyClaudeChild(child: ChildProcess): void {
-  reapChild(child, { graceMs: CLAUDE_WARM_DESTROY_GUARD_MS });
+  // group: the parked process came from the driver's detached spawn, so a wedged one
+  // that reaches SIGKILL takes its MCP servers with it instead of orphaning them.
+  reapChild(child, { graceMs: CLAUDE_WARM_DESTROY_GUARD_MS, group: true });
 }
 
 export class ClaudeWarmPool {

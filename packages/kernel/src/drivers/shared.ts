@@ -53,6 +53,14 @@ export function reapForceMs(): number {
 }
 
 /**
+ * True when a child can be spawned as its own process-group leader on this platform, so the
+ * whole tree it builds — an agent CLI's MCP servers, its tool subprocesses — can be signalled
+ * as one unit. `detached` opens a console window on Windows, so there it stays off and the
+ * group step below degrades to the single pid.
+ */
+export const canLeadProcessGroup = process.platform !== 'win32';
+
+/**
  * Terminate a child FOR GOOD: end its stdin, then SIGTERM, then SIGKILL — each step only if
  * it is still alive, and the whole ladder cancelled the moment it exits.
  *
@@ -67,13 +75,25 @@ export function reapForceMs(): number {
  * reason the graceful path exists: the CLI persists the turn into its session jsonl AFTER
  * emitting `result`, and killing it mid-write loses the reply from the transcript.
  *
+ * `group: true` (for a child spawned `detached`) widens ONLY the final SIGKILL to the child's
+ * process group. The ladder's earlier steps stay aimed at the child alone on purpose: stdin EOF
+ * and SIGTERM both let the CLI shut its own subprocesses down in order, which it does properly.
+ * SIGKILL is the case where it CANNOT, so whatever it spawned is on its own.
+ *
+ * Most of that tree survives a hard kill only briefly: an MCP server talks to the CLI over a
+ * stdio pipe, so the pipe breaking is its own EOF and it exits — measured, with claude's four
+ * default MCP servers all gone within seconds of `kill -9` on the CLI alone. This covers the
+ * rest: a subprocess holding no pipe back to the CLI (`stdio: 'ignore'`), or one that ignores
+ * EOF, reparents to init and then nothing in the system knows it exists. Cheap insurance, and
+ * the same thing the PTY path already does deliberately when it hangs up a terminal.
+ *
  * Timers are `unref`'d so a reap in flight never holds a one-shot embedder's event loop open;
  * they still fire in any live process, and the `exit` listener is what guarantees the ladder
  * stops early rather than the timers being cancelled from outside.
  */
 export function reapChild(
   child: ChildProcess | null | undefined,
-  opts: { graceMs?: number; forceMs?: number } = {},
+  opts: { graceMs?: number; forceMs?: number; group?: boolean } = {},
 ): void {
   if (!child) return;
   try { child.stdin?.end(); } catch { /* ignore */ }
@@ -94,6 +114,12 @@ export function reapChild(
 
   const force = (): void => {
     if (child.exitCode != null || child.signalCode != null) return;
+    // Group first, then the bare pid: a negative pid needs the child to actually BE a group
+    // leader, and it is only one when the caller spawned it detached on a platform that allows
+    // it. ESRCH/EPERM here just means there is no such group, so fall through.
+    if (opts.group && canLeadProcessGroup && child.pid) {
+      try { process.kill(-child.pid, 'SIGKILL'); return; } catch { /* not a group — fall through */ }
+    }
     try { child.kill('SIGKILL'); } catch { /* already gone */ }
   };
   const term = (): void => {
