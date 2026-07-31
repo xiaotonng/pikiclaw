@@ -37,6 +37,74 @@ export function sigterm(proc: ChildProcess | null | undefined): void {
   try { proc?.kill('SIGTERM'); } catch { /* ignore */ }
 }
 
+/** How long a reaped child may take to honour stdin EOF before it earns a SIGTERM.
+ *  Override with PIKILOOM_REAP_GRACE_MS. */
+const REAP_GRACE_DEFAULT_MS = 15_000;
+export function reapGraceMs(): number {
+  const raw = Number(process.env.PIKILOOM_REAP_GRACE_MS);
+  return Number.isFinite(raw) && raw >= 0 ? raw : REAP_GRACE_DEFAULT_MS;
+}
+/** How long it may then take to honour SIGTERM before it earns a SIGKILL.
+ *  Override with PIKILOOM_REAP_FORCE_MS (tests need a sub-second escalation). */
+const REAP_FORCE_DEFAULT_MS = 10_000;
+export function reapForceMs(): number {
+  const raw = Number(process.env.PIKILOOM_REAP_FORCE_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : REAP_FORCE_DEFAULT_MS;
+}
+
+/**
+ * Terminate a child FOR GOOD: end its stdin, then SIGTERM, then SIGKILL — each step only if
+ * it is still alive, and the whole ladder cancelled the moment it exits.
+ *
+ * Why this exists rather than a bare {@link sigterm}: every teardown site used to fire one
+ * signal and forget the child. A `claude -p` that ignored both stdin EOF and that single
+ * SIGTERM — a large-transcript flush, an MCP server wedging its own shutdown — was then
+ * unreferenced by the pool AND by its turn, so nothing would ever try again. Observed in the
+ * wild as `claude` processes resident for 14 hours at ~400 MB each with no session behind them.
+ *
+ * `graceMs: 0` skips straight to SIGTERM (the old `kill=true` semantics — nothing is left
+ * running in the background, so there is nothing to wait for). A positive grace preserves the
+ * reason the graceful path exists: the CLI persists the turn into its session jsonl AFTER
+ * emitting `result`, and killing it mid-write loses the reply from the transcript.
+ *
+ * Timers are `unref`'d so a reap in flight never holds a one-shot embedder's event loop open;
+ * they still fire in any live process, and the `exit` listener is what guarantees the ladder
+ * stops early rather than the timers being cancelled from outside.
+ */
+export function reapChild(
+  child: ChildProcess | null | undefined,
+  opts: { graceMs?: number; forceMs?: number } = {},
+): void {
+  if (!child) return;
+  try { child.stdin?.end(); } catch { /* ignore */ }
+  if (child.exitCode != null || child.signalCode != null) return;
+
+  const graceMs = opts.graceMs ?? reapGraceMs();
+  const forceMs = opts.forceMs ?? reapForceMs();
+  const timers: Array<ReturnType<typeof setTimeout>> = [];
+  const arm = (fn: () => void, ms: number): void => {
+    const t = setTimeout(fn, ms);
+    if (typeof t.unref === 'function') t.unref();
+    timers.push(t);
+  };
+  const done = (): void => { for (const t of timers) clearTimeout(t); timers.length = 0; };
+  // Cancels the rest of the ladder as soon as the child is gone — the reason a normally
+  // exiting child costs nothing here, and the reason SIGKILL is never sent to a dead pid.
+  child.once('exit', done);
+
+  const force = (): void => {
+    if (child.exitCode != null || child.signalCode != null) return;
+    try { child.kill('SIGKILL'); } catch { /* already gone */ }
+  };
+  const term = (): void => {
+    if (child.exitCode != null || child.signalCode != null) return;
+    sigterm(child);
+    arm(force, forceMs);
+  };
+  if (graceMs > 0) arm(term, graceMs);
+  else term();
+}
+
 // Attachment vocabulary lives in ../attachments.ts (the Hub also normalizes oversized
 // images there); re-exported so drivers keep one import site for driver-internal helpers.
 export { imageMimeForFile, attachedFileNote } from '../attachments.js';

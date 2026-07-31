@@ -6,7 +6,7 @@ import type { AgentDriver, AgentTurnInput, DriverContext, DriverResult, DriverEv
 import type { UniversalUsage, UniversalPlan, UniversalSubAgent } from '../protocol/index.js';
 import { ClaudeWarmPool } from './claude-pool.js';
 import { claudeAnchorResolvable, claudeTranscriptTailAnchor, discoverClaudeNativeSessions, encodeClaudeProjectDir } from './native.js';
-import { attachedFileNote, contextPercent, createLineBuffer, imageMimeForFile, parseJsonLine, sigterm, wireAbort } from './shared.js';
+import { attachedFileNote, contextPercent, createLineBuffer, imageMimeForFile, parseJsonLine, reapChild, wireAbort } from './shared.js';
 
 // Real driver: shells the local `claude` CLI in stream-json mode and normalizes its
 // events into kernel DriverEvents. Faithful to pikiloom's claude.ts event shapes
@@ -24,14 +24,35 @@ export class ClaudeDriver implements AgentDriver {
   readonly id = 'claude';
   readonly capabilities = { steer: true, interact: false, resume: true, tui: true, fork: true, rewind: true };
   private readonly pool: ClaudeWarmPool | null;
+  /**
+   * Every `-p` child this driver has spawned that has not exited yet — parked, mid-turn, or
+   * released-but-still-shutting-down. The pool only ever knows about PARKED processes, so a
+   * `dispose()` that walked the pool alone left the other two states running: on shutdown an
+   * in-flight turn's CLI got no signal at all, and one released by a background-work settle was
+   * already unreferenced. Entries remove themselves on `exit`, so this never grows unbounded.
+   */
+  private readonly spawned = new Set<ChildProcess>();
 
   constructor(private readonly bin: string = 'claude', opts: ClaudeDriverOptions = {}) {
     this.pool = opts.warmPool ? new ClaudeWarmPool() : null;
   }
 
-  /** Destroy every parked warm process. Long-lived hosts call this on shutdown. */
+  /** Reap every process this driver still owns — parked, running, or draining.
+   *  Long-lived hosts call this on shutdown. */
   dispose(): void {
     this.pool?.dispose();
+    for (const child of [...this.spawned]) reapChild(child, { graceMs: 0 });
+  }
+
+  /** Track a child until it exits, so {@link dispose} can always find it. */
+  private track(child: ChildProcess): void {
+    this.spawned.add(child);
+    child.once('exit', () => this.spawned.delete(child));
+  }
+
+  /** Live `-p` processes this driver still owns (tests + telemetry). */
+  liveProcessCount(): number {
+    return this.spawned.size;
   }
 
   /** Parked warm processes right now (tests + telemetry). */
@@ -193,11 +214,10 @@ export class ClaudeDriver implements AgentDriver {
         }
         try { child?.stdin?.end(); } catch { /* ignore */ }
         if (child && !child.killed && child.exitCode == null) {
-          if (kill) sigterm(child);
-          else {
-            const guard = setTimeout(() => sigterm(child), CLAUDE_EXIT_LEAK_GUARD_MS);
-            unref(guard);
-          }
+          // Reap rather than fire-and-forget: one SIGTERM with nothing watching is how a
+          // wedged CLI became an unowned resident process (see reapChild). kill=true wants
+          // the SIGTERM now; kill=false grants the transcript-flush grace first.
+          reapChild(child, { graceMs: kill ? 0 : CLAUDE_EXIT_LEAK_GUARD_MS });
         }
         resolve({ ...r, transport });
       };
@@ -230,9 +250,15 @@ export class ClaudeDriver implements AgentDriver {
       };
       // Grace close once all background work is done: settle gracefully (no kill) if Claude stays
       // quiet for the window. Re-armed on every event, so a still-streaming wake-up keeps it open.
+      // park: by the time this fires every background task has reported terminal AND Claude has
+      // been silent for the whole quiet window, so the process is idle-and-healthy — exactly the
+      // state the pool wants. Withholding it here was the process leak's other half: a turn that
+      // used run_in_background TOOK the parked process out of the pool and never put it back, so
+      // the session's next turn always cold-spawned (measured 78% of continuations) while the
+      // taken process was released unowned. finish() still re-checks health before parking.
       const armQuiet = () => {
         clearQuiet();
-        quietTimer = setTimeout(() => { if (!settled) settleResult({ kill: false }); }, claudeBgSettleQuietMs());
+        quietTimer = setTimeout(() => { if (!settled) settleResult({ kill: false, park: true }); }, claudeBgSettleQuietMs());
         unref(quietTimer);
       };
       // Model-stall watchdog: while the turn waits on the model with nothing streaming, the model
@@ -269,11 +295,12 @@ export class ClaudeDriver implements AgentDriver {
         try {
           pooled.stdin!.write(claudeUserMessage(input.prompt, input.attachments) + '\n');
           acquired = pooled; transport = 'warm'; promptDelivered = true;
-        } catch { sigterm(pooled); }
+        } catch { reapChild(pooled, { graceMs: 0 }); }
       }
       if (!acquired) {
         try {
           acquired = spawn(this.bin, args, { cwd: input.workdir, env: { ...process.env, ...(input.env || {}) }, stdio: ['pipe', 'pipe', 'pipe'] });
+          this.track(acquired); // a warm process is already tracked from its own cold spawn
         } catch (err: any) {
           finish({ ok: false, text: '', error: `spawn failed: ${err?.message || err}`, stopReason: 'error' });
           return;
@@ -281,7 +308,10 @@ export class ClaudeDriver implements AgentDriver {
       }
       child = acquired;
 
-      disposeAbort = wireAbort(ctx.signal, () => sigterm(child));
+      // Abort (the user pressed Stop) must actually END the process. A lone SIGTERM here relied on
+      // the child's `close` to bring the turn — and any escalation — with it, so a CLI that ignored
+      // it left both the turn and the process hanging. Reap escalates to SIGKILL on its own.
+      disposeAbort = wireAbort(ctx.signal, () => reapChild(child, { graceMs: 0 }));
 
       if (steerable) {
         ctx.registerSteer(async (prompt: string, attachments?: string[]) => {

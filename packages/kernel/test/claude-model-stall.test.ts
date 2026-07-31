@@ -94,6 +94,12 @@ describe('ClaudeDriver model-stall watchdog (severed-connection hang)', () => {
   });
 
   it('does NOT stall a healthy turn — real model output clears the watchdog', async () => {
+    // This case must NOT inherit the tight window above. What it asserts is that model output
+    // CLEARS the watchdog; with a 2.5 s window the pass condition also silently requires a cold
+    // `node` spawn to finish inside 2.5 s, which is a race against machine load rather than
+    // against the model — under a loaded suite it misfires and the turn settles 'stalled'.
+    // A window that cannot misfire keeps the assertion about the watchdog, which is the point.
+    process.env.PIKILOOM_CLAUDE_MODEL_STALL_MS = '60000';
     const d = new ClaudeDriver(fake);
     driver = d;
     const r = await d.run(turnInput('healthy'), ctxCollect().ctx);

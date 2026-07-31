@@ -1,5 +1,5 @@
 import type { ChildProcess } from 'node:child_process';
-import { sigterm } from './shared.js';
+import { reapChild } from './shared.js';
 
 // ── Warm Claude process pool ─────────────────────────────────────────────────────────
 // A `claude -p --input-format stream-json` process stays alive after `result` for as long
@@ -30,8 +30,8 @@ export function claudeWarmMaxProcesses(): number {
   const raw = Number(process.env.PIKILOOM_CLAUDE_WARM_MAX);
   return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : CLAUDE_WARM_MAX_DEFAULT;
 }
-// After ending a parked process's stdin, force-kill only if it hasn't exited on its own
-// within this window — same leak-guard shape as a graceful turn settle.
+// After ending a parked process's stdin, escalate to SIGTERM only if it hasn't exited on its
+// own within this window — same leak-guard shape as a graceful turn settle.
 const CLAUDE_WARM_DESTROY_GUARD_MS = 15_000;
 
 interface ParkedClaude {
@@ -45,10 +45,7 @@ interface ParkedClaude {
 
 /** End a no-longer-poolable process the same way a graceful settle does. */
 function destroyClaudeChild(child: ChildProcess): void {
-  try { child.stdin?.end(); } catch { /* ignore */ }
-  if (child.exitCode != null || child.killed) return;
-  const guard = setTimeout(() => sigterm(child), CLAUDE_WARM_DESTROY_GUARD_MS);
-  if (typeof guard.unref === 'function') guard.unref();
+  reapChild(child, { graceMs: CLAUDE_WARM_DESTROY_GUARD_MS });
 }
 
 export class ClaudeWarmPool {
