@@ -43,6 +43,7 @@ import {
   resolveAgentEffort,
   resolveAgentModel,
   resolveClaudeAccessMode,
+  splitEffortForAgent,
   DEFAULT_CLAUDE_ACCESS_MODE,
   type ClaudeAccessMode,
 } from '../core/config/runtime-config.js';
@@ -1967,8 +1968,7 @@ export class Bot {
 
   switchEffortForChat(chatId: ChatId, effort: string) {
     const cs = this.chat(chatId);
-    const ultra = effort === 'ultra';
-    const realEffort = ultra ? 'max' : effort;
+    const { effort: realEffort, workflow } = splitEffortForAgent(cs.agent, effort);
 
     this.setEffortForAgent(cs.agent, realEffort);
     const session = this.getSelectedSession(cs);
@@ -1976,10 +1976,10 @@ export class Bot {
     this.persistAgentPreference(cs.agent, 'effort', realEffort);
 
     if (getDriverCapabilities(cs.agent).workflow) {
-      this.setWorkflowEnabledForAgent(cs.agent, ultra);
-      this.persistAgentPreference(cs.agent, 'workflow', ultra ? '1' : '0');
+      this.setWorkflowEnabledForAgent(cs.agent, workflow);
+      this.persistAgentPreference(cs.agent, 'workflow', workflow ? '1' : '0');
     }
-    this.log(`effort switched to ${effort} (effort=${realEffort}, workflow=${ultra}) for ${cs.agent} chat=${chatId}`);
+    this.log(`effort switched to ${effort} (effort=${realEffort}, workflow=${workflow}) for ${cs.agent} chat=${chatId}`);
   }
 
   effortSelectionForAgent(agent: Agent): string | null {

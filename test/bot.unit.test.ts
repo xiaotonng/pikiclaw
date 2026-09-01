@@ -343,6 +343,20 @@ describe('Bot emitStream queue tracking', () => {
 });
 
 describe('Bot selection switching (model / effort)', () => {
+  it('preserves native Codex ultra effort when selected from chat', () => {
+    const bot = new Bot() as any;
+    bot.chat(1).agent = 'codex';
+
+    bot.switchEffortForChat(1, 'ultra');
+
+    expect(bot.effortForAgent('codex')).toBe('ultra');
+    expect(bot.workflowEnabledForAgent('codex')).toBe(false);
+    expect(bot.effortSelectionForAgent('codex')).toBe('ultra');
+
+    const config = JSON.parse(fs.readFileSync(process.env.PIKILOOM_CONFIG!, 'utf8'));
+    expect(config.codexReasoningEffort).toBe('ultra');
+  });
+
   it('switches model inline or as a default, and decomposes/clears the ultra effort rung', () => {
     {
     const bot = new Bot() as any;
